@@ -6,7 +6,7 @@ Na podstawie materiałów z tego repozytorium przygotuj działające laboratoriu
 
 ## Konieczna kolejność
 
-1. Przeczytaj ../.. /AGENTS.md (w katalogu głównym), ../../docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md, ../../docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md oraz README.md z bieżącego folderu.
+1. Przeczytaj ../../AGENTS.md (w katalogu głównym), ../../docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md, ../../docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md oraz README.md z bieżącego folderu.
 2. Sprawdź lokalne środowisko robocze (pwd, git status, gałąź, wersja Git).
 3. Sprawdź **read-only** dostęp do EVE-NG, jego wersję, dostępność obrazu vSRX, liczbę vCPU/RAM hosta, istniejącą strukturę labs, przykładowy prawidłowy .unl do odtworzenia schematu.
 4. Jeśli nie ma obrazu legalnego vSRX KVM/QCOW2, nie pobieraj go z nieoficjalnych serwisów. Przygotuj topologię statycznie, oznacz blokadę i przekaż użytkownikowi wymagany format/nazwę obrazu.
