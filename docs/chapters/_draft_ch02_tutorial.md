@@ -420,3 +420,261 @@ Jeśli potrafisz to powiedzieć bez patrzenia w notatki, rozumiesz sens RE. Nie 
 
 ---
 
+## 2.4. Packet Forwarding Engine — co się dzieje z pakietem po podjęciu decyzji? [A]
+
+### 2.4.1. Kierowca nie musi dzwonić do nawigacji przy każdym skrzyżowaniu
+
+Wiesz już, że RE pomaga urządzeniu zdecydować, dokąd wysłać ruch. Teraz wróćmy na chwilę do sortowni paczek. W budynku wisi kompletna mapa połączeń, ale sam plan nie przesunie ani jednej paczki. Potrzeba pasów, skanerów, zwrotnic i obsługi wyjazdu.
+
+**PFE to właśnie ta wykonawcza część Junos.**
+
+Na wybranych routerach i switchach Junipera wiele czynności wykonują układy ASIC i sprzętowe mechanizmy forwarding. Na vSRX wirtualne przetwarzanie pakietów działa programowo i jest powiązane ze stanową analizą bezpieczeństwa. Dlatego słowo „PFE” opisuje **funkcję logiczną**, nie zawsze jeden identyczny fizyczny moduł.
+
+Kiedy pakiet przychodzi na interfejs, urządzenie musi ustalić:
+- jaki to interfejs i do jakiego kontekstu należy;
+- czy pakiet jest do lokalnego urządzenia, czy ma zostać przekazany dalej;
+- jaka droga i next-hop są właściwe;
+- jakie reguły filtering, QoS lub security mają zastosowanie;
+- jak przygotować wyjściową ramkę i na który interfejs ją wysłać.
+
+Jeżeli przyjrzysz się temu uważnie, zobaczysz ważny szczegół: PFE nie „zna świata” w sposób, w jaki znają go OSPF lub BGP. **PFE stosuje przygotowane instrukcje forwarding.**
+
+### 2.4.2. Jeszcze jeden problem: „routing działa”, a firewall odmawia
+
+Tu pojawia się ważna różnica między typowym routerem a **vSRX**, którego użyjemy do ćwiczeń.
+
+Wyobraź sobie most prowadzący do miasta. Inżynier drogowy narysował mapę i jest pewien, że most istnieje. Jednak na moście stoi punkt kontroli bezpieczeństwa. Sam fakt, że **droga istnieje**, nie znaczy, że każdy samochód **dostanie pozwolenie na przejazd**.
+
+Na SRX tym punktem kontrolnym są m.in. security zones, policies, NAT i **stateful flow processing**.
+
+Gdy pojawia się pierwszy pakiet nowego strumienia, SRX musi ustalić, czy ruch jest dozwolony, jakie działania zastosować i czy utworzyć sesję. Kolejne pakiety tej samej sesji mogą korzystać z już zapisanego stanu. Mechanika jest bogatsza niż samo lookup w FIB.
+
+**Nie myl dwóch rodzajów pracy:**
+- rpd **nie** jest po prostu procesem analizującym każdy nowy strumień;
+- analiza sesji security odbywa się w odpowiednim datapath SRX, a nie dlatego, że każdy pakiet trzeba wysłać do routingu na RE.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show security flow status
+show security flow session summary
+show security flow session
+show security flow statistics
+~~~
+
+Gdy zobaczysz tryb **flow based**, spodziewaj się konieczności badania sesji, stref i polityk. Jeśli rzeczywisty system działa inaczej, nie zmieniaj globalnego trybu forwarding „żeby zgadzał się z podręcznikiem”. Zidentyfikuj wersję i zamierzony sposób działania labu.
+
+### 2.4.3. Najdłuższy prefiks — dlaczego 140 nie pojedzie „dowolną drogą”
+
+Ustalmy sytuację.
+
+Router ma takie wpisy forwarding:
+
+- default 0.0.0.0/0 przez ISP;
+- 198.51.100.0/24 przez R2;
+- 198.51.100.128/25 przez R3.
+
+Do routera przychodzi pakiet z docelowym IP **198.51.100.140**.
+
+Wyobraź sobie adresowanie przesyłek:
+- „Polska” to bardzo ogólna etykieta.
+- „Województwo łódzkie” jest bardziej precyzyjne.
+- „Łódź, konkretny rejon” wskazuje jeszcze węższy obszar.
+
+Dopasowanie do **/25** jest najdokładniejsze. Mimo istnienia /24 i /0 router wybiera /25. W skrócie to **Longest Prefix Match (LPM)**.
+
+Teraz uważaj na typowy haczyk: jeśli masz **dwie trasy do tego samego 198.51.100.128/25**, nie „wygrywa dłuższy prefiks”, bo obie są równie długie. Musisz rozpatrzyć selekcję tras i stosowne preferencje. LPM służy do dopasowania docelowego adresu do prefiksu, a nie do wybierania między kandydatami do identycznej sieci.
+
+**Pytanie kontrolne:** pakiet do 198.51.100.50 — którą drogą? Przez R2, ponieważ 50 nie należy do 198.51.100.128/25, ale należy do /24.
+
+### 2.4.4. Co naprawdę mówią „route”, „forwarding table” i „PFE”?
+
+To temat, przy którym nietrudno nauczyć się złej diagnozy. Dlatego zamiast tabeli wyobraź sobie trzy kartki trzymane przez trzy osoby:
+
+**Kartka dyspozytora:** „znam dwie drogi, wybrałem tę przez R2” — tak myślisz o RIB.
+
+**Kartka przy sorterze:** „dla prefiksu 198.51.100.0/24 użyj next-hop R2” — to master forwarding table przygotowana po stronie RE.
+
+**Kartka w maszynie wykonawczej:** lokalnie zainstalowane informacje przekazywania, których faktycznie używa PFE.
+
+Jeśli te kartki się rozjadą, możesz zobaczyć trasę w RIB, ale nadal mieć problem z forwarding. A nawet jeśli kartki są identyczne, pakiet może utknąć na wyjściu przez problem z ARP, interfejsem, MTU, filtrem albo policy.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show route table inet.0
+show route forwarding-table family inet
+show route forwarding-table destination 198.51.100.10
+~~~
+
+Na sprzętowych platformach, które to wspierają, polecenie **show pfe route** może dać bezpośrednią perspektywę PFE. Na vSRX sprawdź jego dostępność, zanim zbudujesz na nim cały proces troubleshootingu.
+
+**Urządzenie: wybrana platforma Junos obsługująca polecenie — tryb operational**
+
+~~~junos
+show pfe route
+~~~
+
+**Najważniejsze do zapamiętania:** **show route forwarding-table przedstawia master forwarding table na RE, nie gwarantuje pełnego odczytu hardware PFE.** Gdy jesteś na vSRX, realny przesył pakietów potwierdzają również testy end-to-end i **show security flow session**.
+
+### 2.4.5. Gdy dataplane ma problem, nie musi umrzeć cały router
+
+Przypadek z produkcji, który może się zdarzyć na platformie sprzętowej: dostęp do RE jest normalny, sąsiedztwa routingu są stabilne, a ruch przez porty określonego modułu nie przechodzi. Nie ma sensu udawać, że sam fakt działającego SSH wyklucza problem z kartą forwarding.
+
+**Urządzenie: fizyczny MX/EX/QFX (jeśli polecenia dostępne) — tryb operational**
+
+~~~junos
+show chassis fpc
+show chassis fpc pic-status
+show interfaces terse
+show interfaces extensive
+show chassis alarms
+show log messages | match "fpc|pfe|chassisd"
+~~~
+
+Na vSRX zamiast szukać nieistniejącego ASIC analizuj **wirtualne interfejsy, route/FIB, stan sesji i statystyki flow**.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show interfaces terse
+show interfaces ge-0/0/0 extensive
+show route forwarding-table family inet
+show security flow session summary
+show security flow statistics
+~~~
+
+**Rzecz do zrozumienia:** dostęp administracyjny, protokół routingu, forwarding i stateful security to różne etapy. Diagnoza jest dobra wtedy, gdy umiesz wskazać, **który etap masz udowodniony, a którego jeszcze nie**.
+
+---
+
+## 2.5. Transit traffic — idziemy z pakietem od źródła do celu [A]
+
+### 2.5.1. Kiedy pakiet jest tranzytem?
+
+Załóżmy, że stoi przed Tobą R1 z dwoma sieciami:
+
+- PC-A: 192.0.2.10/24, gateway 192.0.2.1;
+- PC-B: 198.51.100.10/24, gateway 198.51.100.1;
+- R1 łączy obie sieci.
+
+PC-A chce porozmawiać z PC-B. Adres docelowy **nie należy do R1**. Router powinien przeprowadzić pakiet przez siebie — to **transit traffic**.
+
+To brzmi prosto, ale teraz prześledzimy dokładnie, **co musi się zgadzać**, zanim ping zadziała. W ten sposób zrozumiesz, dlaczego w rzeczywistej awarii „routingu” wina często leży w zupełnie innym miejscu.
+
+### 2.5.2. Film w siedmiu scenach: jedna wiadomość ICMP
+
+**Scena 1 — PC-A wybiera bramę.** Host widzi, że adres 198.51.100.10 nie jest w jego /24. Nie szuka MAC docelowego PC-B w swojej sieci. Wysyła pakiet do **default gateway**.
+
+**Scena 2 — ARP.** PC-A potrzebuje MAC interfejsu R1 w swojej sieci. Jeśli wpisu jeszcze nie ma, wykonuje ARP. Dopóki nie zna odpowiedniego MAC, nie potrafi poprawnie zaadresować wyjściowej ramki Ethernet.
+
+**Scena 3 — R1 odbiera ramkę.** Docelowy MAC to MAC interfejsu R1. Ale **destination IP** pakietu to 198.51.100.10 — host za routerem.
+
+**Scena 4 — decyzja forwarding.** R1 odnajduje odpowiedni wpis w tablicy forwarding i określa next-hop oraz interfejs wyjściowy. Na vSRX do tej ścieżki dochodzą mechanizmy session/security.
+
+**Scena 5 — kontrola bezpieczeństwa.** Jeżeli nie ma odpowiedniego zezwolenia w security policy, pakiet może zostać odrzucony nawet przy idealnym route lookup.
+
+**Scena 6 — zmiana ramki.** W routingu L3 przejście do kolejnego segmentu zwykle oznacza zmianę **źródłowego i docelowego MAC**. Adresy IP nadawcy i odbiorcy na ogół pozostają takie same, o ile nie ma NAT lub innej transformacji. IPv4 TTL zostaje zmniejszony, a w IPv6 zmniejsza się Hop Limit.
+
+**Scena 7 — odpowiedź.** PC-B musi mieć **drogę powrotną** do PC-A. Jeśli request dotarł, ale reply nie potrafi wrócić, ping również się nie powiedzie.
+
+Możesz to zilustrować tak:
+
+~~~text
+PC-A                  R1-vSRX                   PC-B
+192.0.2.10       ge-0/0/1  ge-0/0/2        198.51.100.10
+GW 192.0.2.1     192.0.2.1  198.51.100.1 GW 198.51.100.1
+   |                  |           |                |
+   |  L2 DST = R1     |           |                |
+   |  IP DST = PC-B   |           |                |
+   +----------------->|           |                |
+                      |  routing  |                |
+                      |  policy   |                |
+                      |  flow     |                |
+                      +-----------+--------------->|
+                           L2 DST = PC-B            |
+                           IP DST = PC-B            |
+~~~
+
+Nawet prosty ping PC-A → PC-B jest więc małym łańcuchem zależności. **Powód i skutek** są ważniejsze niż mechaniczne wpisywanie komend.
+
+### 2.5.3. Dlaczego Ethernet się zmienia, a IP często nie?
+
+Wyobraź sobie przesyłkę wysyłaną przez kilka sortowni. Na paczce nadal widnieje ostateczny adres odbiorcy. Zmienia się jednak etykieta lokalnego transportu: z którego magazynu do której następnej sortowni ma trafić.
+
+W Ethernet taką **lokalną etykietą** są adresy MAC na danym hopie. W IP adresem docelowym paczki jest IP końcowego hosta.
+
+Na wejściu R1:
+
+- L2 destination MAC — interfejs R1 od strony PC-A;
+- IP source — 192.0.2.10;
+- IP destination — 198.51.100.10.
+
+Na wyjściu z R1 do sieci PC-B:
+
+- L2 source MAC — wyjściowy interfejs R1;
+- L2 destination MAC — MAC PC-B;
+- IP source — nadal 192.0.2.10;
+- IP destination — nadal 198.51.100.10.
+
+Jest istotny wyjątek: **NAT** może zmienić IP, dlatego mówimy „zwykle”, a nie „zawsze”.
+
+### 2.5.4. Transit na SRX: jeszcze jeden warunek
+
+Pamiętasz kontrolę na moście z sekcji 2.4? Właśnie tu ona działa.
+
+Na vSRX możesz mieć:
+- poprawne adresowanie obu interfejsów;
+- prawidłową trasę connected;
+- aktywne porty;
+- a mimo to brak pingu PC-A → PC-B.
+
+Dlaczego? Bo **security policy nie zezwala na sesję między odpowiednimi strefami**.
+
+W tym miejscu myślenie wyłącznie kategoriami routera potrafi wprowadzić inżyniera Cisco w błąd. SRX to nie tylko „Junos jako router”; jego stateful security jest pełnoprawną częścią datapath.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show security zones
+show security policies
+show security flow status
+show security flow session source-prefix 192.0.2.10/32
+show security flow statistics
+~~~
+
+Co mówi wynik? **Zone** wskazuje logiczny kontekst wejścia i wyjścia. **Policy** decyduje, czy nowy ruch jest dopuszczony. **Session** mówi, czy dla obserwowanego ruchu powstał stan; liczniki mogą pomóc ustalić, czy pakiety rzeczywiście wędrują.
+
+Jeżeli sesji nie ma, nie wyciągaj od razu wniosku „policy deny”. Pakiet mógł jeszcze nie dotrzeć do SRX, trafić do złej sieci, mieć zły gateway lub zostać odrzucony wcześniej.
+
+### 2.5.5. Dlaczego routing z R1 może działać, a PC-A → PC-B nie?
+
+Przykładowo wykonujesz ping **z CLI R1** do PC-B. Wynik jest poprawny. Następnie PC-A próbuje tego samego i nie ma odpowiedzi.
+
+Czy R1 oszukuje? Nie. Te próby sprawdzają inne ścieżki:
+
+- ping z R1 jest generowany lokalnie i może używać innego adresu źródłowego, interfejsu oraz ścieżki przetwarzania;
+- ping z PC-A jest ruchem tranzytowym, wymaga poprawnego gateway, routingu, stref, policy, sesji i drogi zwrotnej.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+ping 198.51.100.10 source 198.51.100.1 count 5
+~~~
+
+**Urządzenie: PC-A — konsola VPCS**
+
+~~~text
+ping 198.51.100.10
+~~~
+
+Nie zastępuj drugim wynikiem pierwszego ani odwrotnie. Dobre testy nie tylko mówią, że „działa” — mówią, **co zostało przetestowane**.
+
+### 2.5.6. Wnioski, które zapamiętasz bez tabeli
+
+Jeżeli test H1 → H2 nie działa, przejdź kolejno: IP/maska/gateway H1 → ARP do bramy → ingress na R1 → routing/next-hop → zone/policy/session SRX → egress → host H2 → droga powrotna.
+
+To jest praktyczny model przyczyna → skutek, który przyda Ci się w każdej technologii od VLAN po BGP.
+
+---
+
