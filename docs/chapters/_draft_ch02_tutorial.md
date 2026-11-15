@@ -878,3 +878,425 @@ Wykonaj ćwiczenia w następującej kolejności:
 
 Dlaczego w tej kolejności? Bo inaczej bardzo łatwo pomylić trzy niezależne przyczyny awarii: brak route, brak policy oraz problem host-bound. Dobry lab powinien uczyć **izolowania zmiennej**, nie losowego zmieniania pięciu rzeczy naraz.
 
+### 2.LAB.4. Konfigurujemy R1 — dwie autostrady, z czego jedna preferowana
+
+Zacznijmy od serca naszego eksperymentu: R1. Chcemy, żeby pakiety do PC-B pojechały **najpierw przez R2**, ale miały alternatywną drogę przez R3.
+
+O ile samo **show route** nie robi niczego skomplikowanego, o tyle próba realizacji failover przy złej konfiguracji szybko ujawnia różnicę między tym, co myśleliśmy, a tym, co router naprawdę wie.
+
+W przykładzie wszystkie interfejsy danych umieszczamy w strefie **LAB**. Jedna jawna polityka zezwala na laboratoryjny ruch wewnątrz tej strefy. Zezwalamy również na ICMP do interfejsów SRX, żeby później móc niezależnie je wyłączać. Tego typu szerokie reguły **nie są wzorem bezpieczeństwa produkcyjnego**.
+
+**Urządzenie: R1-vSRX — tryb configuration, wyłącznie w izolowanym LAB**
+
+~~~junos
+configure
+set system host-name R1-vSRX
+
+set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.1/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.13.0.1/30
+set interfaces ge-0/0/2 unit 0 family inet address 192.0.2.1/24
+
+set routing-options static route 198.51.100.0/24 next-hop 10.12.0.2
+set routing-options static route 198.51.100.0/24 qualified-next-hop 10.13.0.2 preference 15
+
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces ge-0/0/1.0
+set security zones security-zone LAB interfaces ge-0/0/2.0
+set security zones security-zone LAB interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match source-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match destination-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match application any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB then permit
+
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**Dlaczego qualified-next-hop?** W zwykłej trasie statycznej preferencja wynosi typowo 5. Nadając drodze przez R3 preferencję 15, mówimy: „jeśli oba next-hopy są kwalifikowane jako użyteczne, wybierz R2”. Na tym etapie **nie** używamy dynamicznego protokołu, który śledziłby całe dwie trasy.
+
+**Czego nie robimy?** Nie kasujemy globalnie istniejącej konfiguracji security. Jeśli obraz startuje z innymi strefami lub domyślnymi regułami, najpierw obejrzyj je i dostosuj przykład, zamiast bezrefleksyjnie dublować interfejsy w strefach.
+
+Gdy konsola nadal działa i wyniki są zgodne z planem:
+
+**Urządzenie: R1-vSRX — tryb configuration, potwierdzenie zmiany**
+
+~~~junos
+commit
+exit
+~~~
+
+### 2.LAB.5. Konfigurujemy R2 — północna droga
+
+R2 ma dwa łącza: jedno do R1, drugie do R4. Nie musi znać całego Internetu. Do naszego testu wystarczą trasy do obu hostowych LAN-ów.
+
+**Urządzenie: R2-vSRX — tryb configuration, wyłącznie w izolowanym LAB**
+
+~~~junos
+configure
+set system host-name R2-vSRX
+
+set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.24.0.1/30
+
+set routing-options static route 192.0.2.0/24 next-hop 10.12.0.1
+set routing-options static route 198.51.100.0/24 next-hop 10.24.0.2
+
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces ge-0/0/1.0
+set security zones security-zone LAB interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match source-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match destination-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match application any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB then permit
+
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R2-vSRX — tryb configuration, potwierdzenie po sprawdzeniu**
+
+~~~junos
+commit
+exit
+~~~
+
+Spróbuj przewidzieć: jeśli R2 nie miałby trasy do 192.0.2.0/24, co stałoby się z odpowiedzią PC-B → PC-A wracającą północną drogą? Mogłaby utknąć mimo poprawnego ruchu wychodzącego. **Dwukierunkowa komunikacja wymaga sprawnej drogi powrotnej**.
+
+### 2.LAB.6. Konfigurujemy R3 — południowa droga
+
+R3 z definicji ma być naszą trasą alternatywną, ale to nie oznacza, że w normalnym stanie ma siedzieć „wyłączony”. Powinien znać oba LAN-y i być zdolny przekazywać ruch od początku. Gdy pierwszy raz będziesz diagnozować failover, szybko docenisz fakt, że najpierw sprawdziłeś działanie całej ścieżki zapasowej.
+
+**Urządzenie: R3-vSRX — tryb configuration, wyłącznie w izolowanym LAB**
+
+~~~junos
+configure
+set system host-name R3-vSRX
+
+set interfaces ge-0/0/0 unit 0 family inet address 10.13.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.1/30
+
+set routing-options static route 192.0.2.0/24 next-hop 10.13.0.1
+set routing-options static route 198.51.100.0/24 next-hop 10.34.0.2
+
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces ge-0/0/1.0
+set security zones security-zone LAB interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match source-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match destination-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match application any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB then permit
+
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R3-vSRX — tryb configuration, potwierdzenie po sprawdzeniu**
+
+~~~junos
+commit
+exit
+~~~
+
+### 2.LAB.7. Konfigurujemy R4 — musi wiedzieć, jak wrócić
+
+Pomyśl o R4 jako o bramie do PC-B. Z jednej strony zna LAN-B, z drugiej dostaje dwie możliwości powrotu do LAN-A. W stanie początkowym również preferuje R2.
+
+**Urządzenie: R4-vSRX — tryb configuration, wyłącznie w izolowanym LAB**
+
+~~~junos
+configure
+set system host-name R4-vSRX
+
+set interfaces ge-0/0/0 unit 0 family inet address 10.24.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.2/30
+set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24
+
+set routing-options static route 192.0.2.0/24 next-hop 10.24.0.1
+set routing-options static route 192.0.2.0/24 qualified-next-hop 10.34.0.1 preference 15
+
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces ge-0/0/1.0
+set security zones security-zone LAB interfaces ge-0/0/2.0
+set security zones security-zone LAB interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match source-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match destination-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match application any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB then permit
+
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R4-vSRX — tryb configuration, potwierdzenie po sprawdzeniu**
+
+~~~junos
+commit
+exit
+~~~
+
+### 2.LAB.8. Hosty mają prostą rolę — dostarczyć dowód end-to-end
+
+Na PC-A nie instalujemy zaawansowanego systemu. Wystarczy VPCS, bo potrzebujemy źródła prawdziwego ruchu **tranzytowego**.
+
+**Urządzenie: PC-A — konsola VPCS**
+
+~~~text
+ip 192.0.2.10 255.255.255.0 192.0.2.1
+show ip
+~~~
+
+**Urządzenie: PC-B — konsola VPCS**
+
+~~~text
+ip 198.51.100.10 255.255.255.0 198.51.100.1
+show ip
+~~~
+
+Nie testuj jeszcze jedynie końcowego ping. Najpierw sprawdź „schodki”: czy host sięga gateway? Czy R1 sięga R2 i R3? Czy R2/R3 sięgają R4? Jeśli na pierwszym hopie masz błąd, żaden z kolejnych testów nie będzie uczciwym dowodem poprawności.
+
+**Urządzenie: PC-A — konsola VPCS**
+
+~~~text
+ping 192.0.2.1
+ping 198.51.100.10
+trace 198.51.100.10
+~~~
+
+**Urządzenie: PC-B — konsola VPCS**
+
+~~~text
+ping 198.51.100.1
+ping 192.0.2.10
+trace 192.0.2.10
+~~~
+
+Jeśli oba pingi host-host działają, mamy dobry punkt wyjścia. Nie wyciągaj jeszcze wniosku, którędy przeszedł ruch. To sprawdzamy dalej.
+
+### 2.LAB.9. Przyglądamy się pakietom, zamiast wierzyć diagramowi
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show route 198.51.100.0/24 exact
+show route forwarding-table destination 198.51.100.10
+show arp
+show security flow session source-prefix 192.0.2.10/32
+show security flow statistics
+~~~
+
+**Urządzenie: R4-vSRX — tryb operational**
+
+~~~junos
+show route 192.0.2.0/24 exact
+show route forwarding-table destination 192.0.2.10
+show security flow session source-prefix 192.0.2.10/32
+~~~
+
+Teraz opowiedz własnymi słowami drogę pakietu: R1 powinien widzieć podstawowy next-hop przez R2, R4 powinien widzieć podstawową drogę powrotną przez R2, a na urządzeniach tranzytowych powinieneś móc potwierdzić dozwolone przetwarzanie sesji.
+
+**Nie traktuj traceroute jako absolutnej prawdy o każdej ramce.** Interfejsy mogą ograniczać ICMP Time Exceeded, a SRX może mieć własne zasady dla odpowiedzi. Dodatkowo istniejące sesje i asymetria ścieżek mogą wpływać na wyniki przy zmianach tras.
+
+### 2.LAB.10. Symptom, który trzeba umieć czytać: session exists, packets do not increment
+
+Zobaczyłeś sesję na R1. Czy to automatycznie koniec diagnozy? Nie.
+
+Sesja może istnieć, ale liczniki pakietów w jednym kierunku mogą nie rosnąć. Może to oznaczać problem dalej na ścieżce, ruch bez odpowiedzi lub nieaktualną sesję. Wnioskuj z **kierunku** i **czasu**.
+
+Przykładowy, **ilustracyjny** zapis (nie realny wynik tego laba):
+
+**Urządzenie: R1-vSRX — przykładowy output, tylko do interpretacji**
+
+~~~text
+Session ID: 1234, Policy name: ALLOW-LAB/4, Valid
+  In: 192.0.2.10/3 --> 198.51.100.10/0;icmp,
+      If: ge-0/0/2.0, Pkts: 5, Bytes: 420
+  Out: 198.51.100.10/0 --> 192.0.2.10/3;icmp,
+      If: ge-0/0/0.0, Pkts: 0, Bytes: 0
+~~~
+
+Nie ucz się na pamięć kolejności pól, bo wersje się różnią. Zamiast tego zadaj pytanie: **czy widać ruch w obie strony?** Jeśli nie, dowiedz się, gdzie i dlaczego odpowiedź nie wraca. Nie zakładaj automatycznie winy security policy.
+
+### 2.LAB.11. Kontrolowana awaria A — brak ping do samego R1
+
+Teraz zrobimy coś pozornie dziwnego: chcemy, aby **PC-A nie mógł pingować bramy 192.0.2.1**, ale nadal mógł komunikować się z PC-B przez router.
+
+Na R1 wyłączymy wyłącznie zezwolenie na lokalną usługę ping od strony PC-A.
+
+**Urządzenie: R1-vSRX — tryb configuration, tylko LAB**
+
+~~~junos
+configure
+delete security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: PC-A — konsola VPCS**
+
+~~~text
+ping 192.0.2.1
+ping 198.51.100.10
+~~~
+
+**Co przewidujesz?** Ping do samego R1 może przestać otrzymywać odpowiedzi, a prawidłowo skonfigurowany transit do PC-B nadal przechodzi. Jeśli zobaczysz inne zachowanie, sprawdź rzeczywiste security zones i policies, a nie dopasowuj faktów do teorii.
+
+Po ćwiczeniu przywróć ustawienie.
+
+**Urządzenie: R1-vSRX — tryb configuration, przywrócenie baseline**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+commit
+exit
+~~~
+
+**Co właśnie udowodniłeś?** Ruch host-bound i transit nie są tym samym.
+
+### 2.LAB.12. Kontrolowana awaria B — router odpowiada, ale nie przepuszcza hostów
+
+Teraz odwrócimy sytuację. R1 ma nadal odpowiadać na ping do własnego interfejsu, ale nowy ruch tranzytowy PC-A → PC-B ma zostać zablokowany.
+
+**Urządzenie: R1-vSRX — tryb configuration, tylko LAB**
+
+~~~junos
+configure
+deactivate security policies from-zone LAB to-zone LAB policy ALLOW-LAB
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: PC-A — konsola VPCS**
+
+~~~text
+ping 192.0.2.1
+ping 198.51.100.10
+~~~
+
+**Przewidywanie:** ping do R1 odpowie, ale nowa sesja PC-A → PC-B zostanie zablokowana przez brak pasującego permit. Uwaga: **istniejąca sesja SRX może jeszcze przez pewien czas działać** po zmianie policy. Dlatego do wiarygodnego testu użyj nowego strumienia albo poczekaj na wygaśnięcie właściwej sesji. Nie kasuj wszystkich sesji produkcyjnego SRX.
+
+**Urządzenie: R1-vSRX — tryb operational, kontrola laboratoryjna**
+
+~~~junos
+show security policies
+show security flow session source-prefix 192.0.2.10/32
+show security flow statistics
+~~~
+
+Przywrócenie:
+
+**Urządzenie: R1-vSRX — tryb configuration, przywrócenie baseline**
+
+~~~junos
+activate security policies from-zone LAB to-zone LAB policy ALLOW-LAB
+commit
+exit
+~~~
+
+**Co właśnie udowodniłeś?** Działający host-bound ping do routera nie oznacza, że zezwolono na ruch przez router.
+
+### 2.LAB.13. Kontrolowana awaria C — północna autostrada zamknięta
+
+Przyszedł czas na prawdziwy eksperyment z trasą zapasową. Wyłączymy **lokalne łącze R1–R2**, a następnie sprawdzimy, czy dla docelowego LAN-u zostanie wybrana ścieżka przez R3.
+
+Nie wyłączaj całego R2 „na ślepo”. Najpierw sprawdź, która karta sieciowa i który segment EVE odpowiadają za R1–R2. Następnie na izolowanym labie możesz użyć administracyjnego disable interfejsu R1.
+
+**Urządzenie: R1-vSRX — tryb configuration, tylko LAB**
+
+~~~junos
+configure
+set interfaces ge-0/0/0 disable
+commit confirmed 5
+~~~
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show interfaces terse
+show route 198.51.100.0/24 exact
+show route forwarding-table destination 198.51.100.10
+show security flow session source-prefix 192.0.2.10/32
+~~~
+
+**Urządzenie: PC-A — konsola VPCS**
+
+~~~text
+ping 198.51.100.10
+trace 198.51.100.10
+~~~
+
+Jeśli lokalny primary link R1–R2 zostanie wyłączony, R1 powinien utracić możliwość użycia next-hopu 10.12.0.2 w normalny sposób i może wybrać qualified-next-hop przez R3. **Jednocześnie przemyśl drogę odpowiedzi:** R4 nadal preferuje R2, co może doprowadzić do **asymetrycznego routingu** i problemów z stateful SRX. Sama zmiana tylko R1 **nie gwarantuje** prawidłowej sesji host-host.
+
+Dlatego w pełnym eksperymencie trzeba **symetrycznie przełączyć ścieżkę powrotną**, np. również wyłączyć primary link R4–R2 w izolowanym labie albo użyć sterowania ruchem odpowiadającego mechanizmowi laboratorium.
+
+**Urządzenie: R4-vSRX — tryb configuration, tylko LAB, jeżeli potrzebne do spójnego przełączenia**
+
+~~~junos
+configure
+set interfaces ge-0/0/0 disable
+commit confirmed 5
+~~~
+
+**Urządzenie: R4-vSRX — tryb operational**
+
+~~~junos
+show route 192.0.2.0/24 exact
+show security flow session summary
+~~~
+
+Powtórz test PC-A → PC-B i sprawdź obie strony. W razie problemu nie lekceważ istniejących sesji ani asymetrii tras.
+
+Przywrócenie baseline:
+
+**Urządzenie: R1-vSRX — tryb configuration**
+
+~~~junos
+delete interfaces ge-0/0/0 disable
+commit
+exit
+~~~
+
+**Urządzenie: R4-vSRX — tryb configuration, jeśli ten interfejs również wyłączano**
+
+~~~junos
+delete interfaces ge-0/0/0 disable
+commit
+exit
+~~~
+
+**Bardzo istotne ograniczenie:** zwykła trasa statyczna nie wykryje zawsze awarii **odległego** łącza R2–R4, jeśli lokalny interfejs R1–R2 nadal jest up, a next-hop pozostaje osiągalny. Do tego przyda się routing dynamiczny, odpowiedni monitoring ścieżki albo inny mechanizm, które omówimy w następnych rozdziałach.
+
+### 2.LAB.14. Co naprawdę oznacza „zaliczyłem”?
+
+Nie wystarczy zielony ping na końcu. Przygotuj krótki raport w pliku VERIFY.md:
+
+1. Wersja vSRX, przypisane porty i status interfejsów.
+2. Routing table i forwarding table na R1 i R4 — dla ruchu w obie strony.
+3. Sesje SRX i rzeczywiste liczniki dla komunikacji PC-A ↔ PC-B.
+4. Wynik testu host-bound i transit przed każdą zmianą.
+5. Wynik po zablokowaniu host-inbound ping: **jaki był skutek i co pozostało sprawne?**
+6. Wynik po zablokowaniu transit policy: **jaki był skutek i co pozostało sprawne?**
+7. Wynik failover i uzasadnienie, czy zachowano trasę powrotną.
+8. Potwierdzenie usunięcia kontrolowanych usterek.
+
+Jeśli udało Ci się tylko utworzyć plik **.unl**, ale vSRX jeszcze nie uruchomiono, to jest **GENERATED**, a nie **RUNTIME VALIDATED**. Jeśli XML jest poprawny, ale nie wykonano pingów, to najwyżej **STATIC VALIDATED**.
+
+Gdy zrobisz to uczciwie, rozdział 2 nie będzie już materiałem do wkuwania. Będzie jednym z Twoich pierwszych własnych narzędzi diagnostycznych.
+
+---
+
