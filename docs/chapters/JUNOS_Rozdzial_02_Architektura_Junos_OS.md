@@ -997,6 +997,7 @@ A. wykonuje NAT dla każdej sesji  B. oblicza i utrzymuje informacje routingu  C
 ---
 
 ## Bibliografia i źródła (oficjalne)
+
 **Źródło organizacji rozdziału:** `JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md`, punkty 2.1–2.6 (plik opracowany wcześniej w tym projekcie). Rozdział zachowuje jego zakres i numerację; dodatkowe sekcje są oznaczone `[EXT]`.
 
 1. [JNCIA-Junos Certification Overview — official objectives](https://learningportal.juniper.net/juniper/user_activity_info.aspx?id=14354) — domena *Junos OS Fundamentals*: software architecture, control/forwarding planes, RE/PFE, transit i exception traffic.
