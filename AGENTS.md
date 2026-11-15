@@ -44,3 +44,19 @@ Po wykonanym zadaniu zapisz rzeczywisty status w README laboratorium, wraz z lis
 ## Źródła techniczne
 
 W razie rozbieżności sięgaj do oficjalnej dokumentacji Juniper Junos/vSRX, dokumentacji wersji obrazu oraz dokumentacji EVE-NG. Rozróżniaj klasyczne routery/switche Junos (tradycyjny PFE) i vSRX (stateful flow processing).
+
+## Obowiązkowy styl dydaktyczny podręcznika (od rozdziału 2 v2)
+
+Użytkownik **nie chce encyklopedycznego materiału ani zestawu tabel do wykucia**. Pisz po polsku, jak doświadczony instruktor prowadzący żywe korepetycje dla inżyniera Cisco:
+
+1. Zacznij od życiowego lub operatorskiego problemu: czego nie dało się zrobić, po co powstał mechanizm, jakie były alternatywy i kompromisy.
+2. Użyj trafnej analogii, ale jasno pokaż, gdzie analogia się kończy; nie infantylizuj ucznia.
+3. Prowadź narrację **przyczyna → mechanizm → skutek → obserwacja w CLI → awaria → naprawa**.
+4. Zanim pokażesz konfigurację, wyjaśnij **po co** ją wpisujemy i jaki wynik przewidujemy; po CLI naucz interpretować wynik i wyjątki.
+5. Zanim pokażesz tabelę, opowiedz, jaki problem porządkuje; preferuj opowieść, scenariusze, diagnozę i pytania aktywizujące przed tabelami.
+6. Wyraźnie rozróżniaj: **na pamięć**, **do zrozumienia**, **do przećwiczenia**; nie wymagaj zapamiętywania całych outputów show.
+7. Podawaj łączniki Cisco IOS/IOS XE ↔ Junos oraz typowe błędne intuicje inżyniera Cisco, ale nie zamieniaj rozdziału w dwukolumnowy słownik.
+8. Łącz każde objective z rzeczywistym symptomem i rozwiązaniem (lab, fault injection, troubleshooting).
+9. Utrzymuj pełną techniczną precyzję i zakres blueprintu. Nie rezygnuj z głębi, by brzmieć bardziej swobodnie.
+10. Nie kopiuj specyficznego języka konkretnych instruktorów; wzoruj się na wysokiej jakości wyjaśniania, energii, przykładach i stopniowaniu trudności.
+11. Najważniejszy punkt odniesienia stylistycznego: docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md (v2).
