@@ -678,3 +678,203 @@ To jest praktyczny model przyczyna → skutek, który przyda Ci się w każdej t
 
 ---
 
+## 2.6. Exception traffic — kiedy pakiet puka do drzwi routera? [A]
+
+### 2.6.1. Dwa podobne auta, dwa zupełnie różne zadania
+
+Wracamy do lotniska. Jeden samochód jedzie **przez teren lotniska** na drugą stronę miasta. Inny dojeżdża **pod wieżę kontroli**, bo ma dokumenty dla personelu. Oba przejechały przez tę samą bramę. Ale jeden jest ruchem tranzytowym, drugi ma zostać obsłużony przez samą administrację lotniska.
+
+W sieci podobnie:
+
+- **Transit**: docelowy adres IP należy do innego hosta, urządzenie ma pakiet przesłać dalej.
+- **Host-bound / local-destination**: docelowy adres IP należy do samego urządzenia albo pakiet jest przeznaczony dla jego usług, np. SSH, BGP, OSPF czy ping do interfejsu.
+- **Locally originated**: urządzenie samo tworzy pakiet, np. z CLI uruchamiasz ping, protokół wysyła update lub system wysyła syslog.
+
+**Exception traffic** to szersze określenie ruchu wymagającego specjalnej obsługi, często w związku z control plane. Może obejmować ruch host-bound, wybrane pakiety protokołów i sytuacje nietypowe dla normalnego forwarding, np. wyczerpanie TTL. Nie każdy wyjątek musi być realizowany identycznie na każdym PFE, a część reakcji może być obsługiwana specjalizowanymi mechanizmami platformy.
+
+**Nie zapamiętuj błędnej reguły „ICMP = exception”.** ICMP Echo Request z PC-A do PC-B, przechodzący przez R1, to normalny ruch tranzytowy. ICMP Echo Request do adresu R1 jest natomiast ruchem do lokalnego urządzenia.
+
+### 2.6.2. Skąd się bierze packet punt?
+
+Wyobraź sobie zautomatyzowaną sortownię. Większość paczek idzie taśmociągiem. Ale raz na jakiś czas skaner zobaczy szczególny przypadek: paczkę, której system automatyczny nie może obsłużyć zwykłą regułą. Odkłada ją do stanowiska operatora.
+
+W sieciach analogiczna operacja może nazywać się **punt** — skierowanie wybranego pakietu do specjalnej obsługi, często do control plane. To nie jest jednak obietnica, że **każdy** pakiet szczególnego typu w każdej wersji Junos zawsze trafia fizycznie do CPU RE.
+
+Przykłady problemów i wyjątków:
+- pakiet przeznaczony do lokalnej usługi SSH/BGP/OSPF;
+- pakiet wymagający reakcji przy TTL/Hop Limit równym zero;
+- niektóre zdarzenia kontroli lub obsługi sąsiedztwa, zależnie od platformy;
+- pakiet, którego nie można przetworzyć zwykłą ścieżką forwarding, zależnie od sprzętu i funkcji.
+
+Zadanie inżyniera: rozpoznać **dlaczego taki pakiet może trafić do innej ścieżki** i jaki będzie efekt dla działania sieci.
+
+### 2.6.3. Dlaczego ping do bramy może nie działać, choć router doskonale routuje
+
+Pamiętasz dwa scenariusze z początku rozdziału? Teraz potrafisz je rozdzielić.
+
+Na SRX możesz mieć politykę pozwalającą PC-A rozmawiać z PC-B, ale nie zezwolić PC-A na pingowanie **samego SRX**. SRX ma do tego osobne ustawienia **host-inbound-traffic**. Polityka transit **nie** jest automatycznie pozwoleniem na dostęp do usług routera.
+
+To ma sens również z punktu widzenia bezpieczeństwa. Możesz chcieć, aby klienci mogli przejść przez sieć, ale nie skanowali interfejsów i usług zarządzania.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show security zones
+show configuration security zones | display set
+show security policies
+~~~
+
+Szukasz dwustopniowej historii:
+1. Czy interfejs wejściowy ma strefę i czy zezwolono na **host-inbound system-services ping** do samego SRX?
+2. Czy osobna policy pozwala na **transit** do innej sieci?
+
+Te dwie decyzje można zmienić niezależnie, co pokażemy w laboratorium.
+
+### 2.6.4. BGP to też rozmowa z samym routerem
+
+Masz kolegę, który skonfigurował adresy i IP connectivity, ale BGP nie przechodzi z Active do Established. Mówi:
+
+— „Przecież transit policy pozwala na wszystko!”
+
+Problem polega na tym, że BGP na adresie R1 nie jest zwykłym przekazywaniem pakietów host-host. To ruch do **lokalnego procesu routingu**. Na SRX trzeba sprawdzić obsługę protokołu w host-inbound oraz samą konfigurację BGP.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show bgp summary
+show configuration protocols bgp | display set
+show configuration security zones | display set
+show log messages | match "rpd|bgp"
+~~~
+
+Nie budujemy tutaj pełnego BGP. Chcę jedynie, abyś przestał utożsamiać security policy dla transit z możliwością komunikowania się z control plane SRX.
+
+### 2.6.5. Traceroute pokazuje gwiazdki — czy to przerwa w sieci?
+
+Wyobraź sobie, że traceroute pokazuje odpowiedzi z R1, potem kilka gwiazdek, a następnie docelowy serwer odpowiada prawidłowo.
+
+Wzrok ciągnie Cię do gwiazdek. Ale **traceroute bada również zachowanie wyjątków**: TTL na danym hopie wygasa, a urządzenie może wygenerować lub ograniczyć odpowiedź ICMP Time Exceeded. Brak odpowiedzi z pośredniego routera nie dowodzi automatycznie, że normalny transit przez ten router nie działa.
+
+Tak samo router może ograniczać pakiety do RE, ale przekazywać ruch użytkownika normalnie.
+
+Zrób sobie małą zasadę diagnostyczną: **zawsze rozdziel odpowiedzi generowane przez router od pakietów, które router tylko przekazuje**.
+
+### 2.6.6. Jak oglądać ruch do RE bez udawania, że widzimy cały dataplane?
+
+W Junos masz narzędzie **monitor traffic**, ale traktuj je rozsądnie. W typowych zastosowaniach obserwujesz pakiety widoczne z perspektywy RE/host stack. Nie jest to uniwersalny sniffer każdej ramki przechodzącej przez sprzętowy PFE.
+
+**Urządzenie: R1-vSRX — tryb operational, tylko izolowany LAB**
+
+~~~junos
+monitor traffic interface ge-0/0/2 no-resolve matching "icmp" count 10
+~~~
+
+Uruchom tę komendę podczas pingowania **lokalnego IP R1** z PC-A. Potem uruchom ping PC-A → PC-B. Jeśli monitor traffic nie pokaże ruchu transit, a test end-to-end oraz sesja SRX pokazują pakiety, nie traktuj tego jako sprzeczności.
+
+**Dobrze zapamiętaj:** brak pakietu w zrzucie z RE **nie jest dowodem**, że nie dotarł do urządzenia.
+
+### 2.6.7. Jak chroni się control plane
+
+Dlaczego w ogóle ograniczamy ping/SSH do interfejsów routera? Bo RE musi mieć zasoby na właściwe zadania — protokoły, zarządzanie i obsługę wyjątków. Nie chcesz, by tysiące losowych żądań odebrały mu zdolność aktualizacji tras.
+
+Na wybranych platformach stosuje się filtry na interfejsie loopback (np. **lo0**), mechanizmy ochrony DDoS/policery control-plane. Na SRX dodatkowo istnieje **host-inbound-traffic** ograniczające lokalnie dostępne usługi i protokoły. To różne mechanizmy — nie przepisuj bez zastanowienia filtra MX na SRX.
+
+**Urządzenie: R1-vSRX — tryb configuration, tylko izolowany LAB**
+
+~~~junos
+configure
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+commit check
+commit confirmed 5
+~~~
+
+Przykład dotyczy interfejsu **ge-0/0/2.0** dopiero po potwierdzeniu mapowania EVE-NG. Jeśli interfejs już należy do innej strefy, musisz świadomie dostosować przykład, a nie dopisywać go do dwóch stref.
+
+### Tu sprawdzamy, czy naprawdę rozumiesz rozdział
+
+PC-A może pingować PC-B przez R1, ale nie może pingować IP R1. Co musi być prawdą?
+
+Nie wiemy jeszcze, **dlaczego** nie pingujesz R1. Wiemy natomiast, że **funkcja transit jest co najmniej w jakimś zakresie sprawna**, a host-bound wymaga osobnej diagnostyki. Na SRX sprawdzisz host-inbound ping i stan interfejsu. Na innych platformach możesz szukać np. filtrów control plane lub policerów.
+
+Właśnie o to chodzi w dobrej analizie — oddzielić udowodnione fakty od przypuszczeń.
+
+---
+
+## 2.LAB. Laboratorium prowadzone — zbudujemy własną małą sieć [EXT]
+
+### 2.LAB.1. Dlaczego aż cztery vSRX, skoro do rozdziału 2 wystarczy jeden?
+
+Do pokazania różnicy między host-bound a transit **jeden SRX jest wystarczający**. Ale chcemy zbudować coś, co będzie towarzyszyło Ci również przy następnych rozdziałach. Dzięki czterem routerom zobaczysz nie tylko pakiet na jednym urządzeniu, lecz także **dwie alternatywne drogi przez sieć**.
+
+Wyobraź sobie dwie autostrady łączące miasta. Jeśli autostrada północna zostanie zamknięta, chcesz wiedzieć, kiedy i dlaczego ruch pojedzie południową. To doskonała okazja do rozróżnienia wiedzy routingu, tablic forwarding i realnych pakietów.
+
+~~~text
+                 R2-vSRX
+                /       \
+               /         \
+PC-A --- R1-vSRX         R4-vSRX --- PC-B
+               \         /
+                \       /
+                 R3-vSRX
+
+Podstawowa trasa: PC-A → R1 → R2 → R4 → PC-B
+Alternatywna:     PC-A → R1 → R3 → R4 → PC-B
+~~~
+
+**Ważne:** cztery vSRX po 4 GiB RAM to orientacyjnie **16 GiB przydzielonej pamięci**, bez EVE-NG i systemu hosta. Nie uruchamiaj ich jednocześnie, jeśli Twój host nie ma wystarczających zasobów. Jeżeli jeszcze nie masz legalnie pobranego obrazu QCOW2, specyfikację można przygotować bez uruchamiania urządzeń. Rozdział nie udaje, że topologia została już przetestowana.
+
+**Konfiguracja jest przykładem do LAB, nie gotowym szablonem produkcyjnym**. Używamy czytelnych adresów i szerokiej polityki allow w izolowanym środowisku wyłącznie po to, by badać działanie datapath. Nie kopiuj tego do firmowego SRX.
+
+### 2.LAB.2. Rozrysuj adresy, zanim wpiszesz pierwszą komendę
+
+Najpierw opowiedzmy sobie trasę od PC-A do PC-B. PC-A ma sieć **192.0.2.0/24** i bramę 192.0.2.1 na R1. PC-B jest w **198.51.100.0/24** i ma bramę 198.51.100.1 na R4. R1 do R4 może dojść przez R2 albo R3.
+
+Wybieramy następujące łącza:
+
+- R1 ↔ R2: 10.12.0.0/30, R1 .1, R2 .2.
+- R1 ↔ R3: 10.13.0.0/30, R1 .1, R3 .2.
+- R2 ↔ R4: 10.24.0.0/30, R2 .1, R4 .2.
+- R3 ↔ R4: 10.34.0.0/30, R3 .1, R4 .2.
+- PC-A ↔ R1: 192.0.2.0/24.
+- R4 ↔ PC-B: 198.51.100.0/24.
+
+Adresy 192.0.2.0/24 i 198.51.100.0/24 należą do zakresów dokumentacyjnych RFC 5737. Świadomie izolujemy lab i **nie** projektujemy routingu tych sieci do publicznego Internetu.
+
+Dopiero teraz krótka mapa portów, aby uniknąć zgadywania:
+
+| Urządzenie | Port 0 | Port 1 | Port 2 |
+|---|---|---|---|
+| R1 | ge-0/0/0 → R2 | ge-0/0/1 → R3 | ge-0/0/2 → PC-A |
+| R2 | ge-0/0/0 → R1 | ge-0/0/1 → R4 | — |
+| R3 | ge-0/0/0 → R1 | ge-0/0/1 → R4 | — |
+| R4 | ge-0/0/0 → R2 | ge-0/0/1 → R3 | ge-0/0/2 → PC-B |
+
+To **plan mapowania**, nie gwarancja dla konkretnego obrazu. vSRX bywa wyposażony w osobny interfejs zarządzający **fxp0**, a kolejność kart NIC w EVE może wpływać na widoczne porty. Przed wklejeniem konfiguracji **koniecznie** zweryfikuj:
+
+**Urządzenia: R1-vSRX, R2-vSRX, R3-vSRX i R4-vSRX — każde osobno, tryb operational**
+
+~~~junos
+show version
+show interfaces terse
+show security flow status
+show security zones
+~~~
+
+Jeśli portów brakuje albo mają inne nazwy, zatrzymujesz się i poprawiasz mapowanie. Nie „naprawiasz” problemu przypadkowym usunięciem fabrycznej konfiguracji management.
+
+### 2.LAB.3. Najpierw plan działania, potem uruchomienie
+
+Wykonaj ćwiczenia w następującej kolejności:
+
+**Etap A:** skonfiguruj adresy interfejsów i sprawdź linki oraz ARP między sąsiadami.
+
+**Etap B:** dodaj trasy statyczne tak, aby ścieżka przez R2 była podstawowa, a przez R3 alternatywna.
+
+**Etap C:** skonfiguruj logiczne strefy bezpieczeństwa na vSRX i zezwól na laboratoryjny transit oraz konkretne host-inbound ping.
+
+**Etap D:** sprawdź ruch host-host, trasę, sesje oraz jej powrót.
+
+**Etap E:** kolejno zasymuluj: zablokowany host-inbound ping, zablokowany transit oraz awarię podstawowego łącza.
+
+Dlaczego w tej kolejności? Bo inaczej bardzo łatwo pomylić trzy niezależne przyczyny awarii: brak route, brak policy oraz problem host-bound. Dobry lab powinien uczyć **izolowania zmiennej**, nie losowego zmieniania pięciu rzeczy naraz.
+
