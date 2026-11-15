@@ -180,3 +180,243 @@ Wyjaśnij własnymi słowami: dlaczego zwykły pakiet tranzytowy nie powinien py
 
 ---
 
+## 2.2. Control plane i forwarding plane — dwa różne światy [A]
+
+### 2.2.1. Dlaczego router może być jednocześnie „żywy” i „martwy”?
+
+Wracamy do nocnego incydentu. Router odpowiada na ping, ale aplikacja nie działa. To brzmi jak sprzeczność tylko wtedy, gdy w głowie mamy model „router to jedno pudełko, które albo działa, albo nie działa”.
+
+Spróbujmy innego modelu. Na lotnisku jest **wieża kontroli lotów** oraz **pasy startowe z systemami obsługi ruchu**. Wieża może rozmawiać z pilotami, podczas gdy konkretny pas jest zamknięty. Samoloty mogą też wykonywać zaplanowane wcześniej operacje, choć wieża ma chwilowy problem z aktualizacjami harmonogramu. Mamy jeden port lotniczy, ale różne funkcje.
+
+W Junos rozdzielamy:
+
+**Control plane** — „skąd urządzenie wie, którędy prowadzi droga?”. Tutaj rodzą się relacje OSPF, sesje BGP, obliczenia tras i informacje dla routing table.
+
+**Forwarding plane / data plane** — „co urządzenie robi z konkretnym pakietem?”. Tutaj pracują mechanizmy przełączania i routingu pakietu, kolejkowanie oraz funkcje właściwe platformie.
+
+**Management plane** — „jak operator rozmawia z urządzeniem?”. SSH, CLI, NETCONF, logowanie i monitoring. Na klasycznych urządzeniach zarządzanie jest w znacznym stopniu związane z RE. Nie oznacza to automatycznie trzeciego fizycznego układu.
+
+**Do zapamiętania na pamięć:** control plane przygotowuje decyzję; forwarding plane ją stosuje; management plane pozwala zarządzać i obserwować.
+
+### 2.2.2. Co naprawdę dowodzi ping?
+
+Nie mówmy „ping działa”. Zawsze dopytujmy: **skąd, dokąd, przez co?**
+
+Wyobraź sobie trzy testy:
+
+**Test A.** Laptop operatora ping → adres interfejsu R1. Pakiet chce dotrzeć do R1. To **host-bound**, a nie dowód tranzytu.
+
+**Test B.** Operator uruchamia ping z CLI R1 → serwer w innym VLAN-ie. To **locally originated**: pakiet powstaje na urządzeniu, które testujesz.
+
+**Test C.** PC-A ping → PC-B, przy czym ruch przechodzi przez R1. To **transit**: R1 ma go przepuścić dalej.
+
+Wszystkie trzy wykorzystują ICMP. **Sam protokół ICMP nie mówi, z którą płaszczyzną masz do czynienia.** Decyduje przede wszystkim rola urządzenia w ścieżce pakietu oraz jego lokalne przeznaczenie.
+
+Prawidłowa odpowiedź w troubleshootingu nie brzmi „ping przechodzi”, lecz np. „PC-A osiąga IP R1, ale nie osiąga PC-B; host-bound działa, transit nie został jeszcze potwierdzony”.
+
+### 2.2.3. Wspólna historia jednego pakietu
+
+Zróbmy z tego krótki film.
+
+**Godzina 10:00.** R1 ma trasę do 198.51.100.0/24 przez R2. Informacja pojawiła się w routing table, a odpowiednie struktury forwarding zostały przygotowane.
+
+**Godzina 10:01.** Z PC-A przychodzi pierwszy pakiet do 198.51.100.10.
+
+**W control plane:** nie ma potrzeby od nowa negocjować OSPF dla tego pakietu.
+
+**W data plane:** router rozpoznaje interfejs wejściowy, poszukuje pasującej trasy w strukturach forwarding, rozwiązuje sąsiedztwo L2/next-hop i przekazuje dalej. Na SRX dodatkowo sprawdzany jest odpowiedni stan sesji i security policy.
+
+**Godzina 10:02.** R2 znika. Jeśli protokół routingu lub inny mechanizm wykryje zmianę, control plane musi przeliczyć wybór, a forwarding może otrzymać nowe wpisy. Jeśli użyłeś zwykłej trasy statycznej do next-hopu, który wciąż wydaje się dostępny, sam odległy zanik łącza nie musi uruchomić zmiany.
+
+Widzisz związek przyczynowo-skutkowy? **To nie pakiety wymagają osobnego „odpytywania” RE, lecz RE aktualizuje ich wspólną instrukcję, kiedy sieć się zmienia.**
+
+### 2.2.4. Trzy warstwy dowodów, nie trzy magiczne komendy
+
+W czasie awarii zbierasz dowody stopniowo, zamiast wykonać jedną komendę i ogłosić zwycięstwo.
+
+Najpierw pytanie: czy urządzenie **zna** trasę?
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show route table inet.0
+show route 198.51.100.10
+~~~
+
+Jeśli widzisz poprawny prefiks, to dopiero początek. Teraz pytasz: czy przygotowano wpis forwarding?
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show route forwarding-table family inet
+show route forwarding-table destination 198.51.100.10
+~~~
+
+Następnie pytasz o realną drogę i ewentualne zatrzymanie ruchu.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show interfaces terse
+show interfaces ge-0/0/0 extensive
+show arp
+show security flow status
+show security flow session summary
+~~~
+
+Tutaj interfejs i ARP wskazują, czy ścieżka do sąsiada ma sens. Komendy security flow dotyczą SRX, ponieważ nawet perfekcyjny routing na firewallu nie stanowi gwarancji zezwolenia na sesję.
+
+**Pamiętaj:** forwarding table RE nie jest zawsze bezpośrednim odczytem PFE. Komenda **show pfe route** może udostępniać taką perspektywę na wspieranych platformach, ale na vSRX może jej nie być. Do diagnostyki dodaj obserwację faktycznych sesji i liczników.
+
+### 2.2.5. Miniscenariusz: wysoki CPU RE
+
+Na monitoringu widzisz 90% CPU Routing Engine. Jaki wniosek?
+
+Kuszący: „Router nie da rady przekazywać ruchu”. To zbyt szybkie. Przyczyna może leżeć w rpd, licznych zmianach routingu, burzy ruchu host-bound lub innym procesie. Forwarding może w tym samym czasie nadal działać, choć sytuacja jest niepokojąca.
+
+Odwrotność też jest możliwa: CPU RE jest niewielki, lecz port wyjściowy ma błędy lub security policy blokuje sesje.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show chassis routing-engine
+show system processes extensive
+show log messages | last 40
+show interfaces terse
+~~~
+
+Szukaj zależności w czasie: kiedy wzrosło CPU, jaki proces obciąża system, czy zmieniły się sąsiedztwa, czy pojawiły się alarmy lub dropy? Nie restartuj rpd tylko dlatego, że „routing jest podejrzany”.
+
+### Zrób pauzę i przewidź odpowiedź
+
+Na R1 działa SSH. Nie działa TCP z PC-A do PC-B. Czy SSH potwierdziło kontrolę nad urządzeniem? Tak. Czy potwierdziło forwarding PC-A → PC-B? Nie. Pierwszy test użył management/host-bound, drugi wymagał przejścia przez data plane i — na vSRX — zaakceptowania sesji.
+
+To rozróżnienie jest **wymagane do rozumienia JNCIA** i pozostaje ważne przez cały JNCIP.
+
+---
+
+## 2.3. Routing Engine — „mózg”, ale nie operator każdej paczki [A]
+
+### 2.3.1. Po co w ogóle RE?
+
+Przypomnij sobie GPS. Urządzenie może mieć mapę i potrafić obliczyć trasę. Jednak samochód nie przesyła każdej decyzji o skręcie do centralnego serwera. Kierowca korzysta ze wskazówek już wyliczonych. Kiedy zamknięta zostanie droga, mapa i trasa wymagają aktualizacji.
+
+RE wykonuje tę inteligentną pracę: uruchamia i nadzoruje odpowiednie procesy, przechowuje konfigurację, buduje relacje protokołów, utrzymuje routing table, przygotowuje dane przekazywania i przyjmuje ruch skierowany do samego urządzenia.
+
+W modelu egzaminacyjnym potraktuj RE jako **control + znaczną część management plane**, a PFE jako głównego wykonawcę forwarding.
+
+### 2.3.2. RIB, active route, FIB — wytłumaczę to na trzech nawigacjach
+
+Załóżmy, że masz trzy aplikacje do planowania trasy z Łodzi do Gdańska. Pierwsza proponuje autostradę, druga drogę krajową, trzecia przejazd przez Toruń. Lista dostępnych kandydatów nie oznacza, że wszystkie są jednocześnie realizowane.
+
+- **RIB (Routing Information Base)** — zbiór tras znanych routerowi. W Junos najczęściej zaczynasz od IPv4 **inet.0** albo IPv6 **inet6.0**. Różne protokoły mogą dostarczać kandydatów dla tego samego prefiksu.
+- **Active route** — kandydat wybrany do użytku zgodnie z zasadami selekcji i preferencji.
+- **FIB (Forwarding Information Base)** — struktura potrzebna do przekazywania ruchu na podstawie wyników selekcji, odpowiednich next-hopów i interfejsów.
+
+Nie myl dwóch różnych pytań: „którą z kandydackich tras wybrano do danego **prefiksu**?” i „który **prefiks** pasuje najlepiej do adresu docelowego?”. Pierwsze dotyczy selekcji trasy; drugie to **longest prefix match** w lookup forwarding.
+
+Spróbujmy przykładu. R1 zna 198.51.100.0/24 przez R2, ale ma także default route 0.0.0.0/0 przez ISP. Pakiet do 198.51.100.10 pasuje do obu; wygra /24, bo jest bardziej szczegółowy. Jeśli istnieją dwie alternatywne trasy **do tego samego /24**, wtedy porównywane są odpowiednie preferencje/protokół i atrybuty.
+
+### 2.3.3. Czytamy prawdziwy typ wyniku, a nie uczymy się kolumn
+
+Zobaczmy uproszczony, **ilustracyjny**, niepochodzący z działającego laba, fragment outputu.
+
+**Urządzenie: R1-vSRX — przykładowy output (illustrative)**
+
+~~~text
+user@R1> show route 198.51.100.10
+
+inet.0: 12 destinations, 14 routes (12 active, 0 holddown, 0 hidden)
++ = Active Route, - = Last Active, * = Both
+
+198.51.100.0/24  *[Static/5] 00:01:22
+                   > to 10.12.0.2 via ge-0/0/0.0
+~~~
+
+Nie próbuj zapamiętywać całego wyniku. Wypatrz **cztery rzeczy**, które opowiadają historię:
+
+1. **inet.0** — jesteś w tabeli routingu IPv4.
+2. **198.51.100.0/24** — do jakiej sieci odnosi się wpis.
+3. **Static/5** — źródło trasy i jej preferencja.
+4. **to 10.12.0.2 via ge-0/0/0.0** — plan wyjścia do następnego urządzenia.
+
+Gwiazdka oznacza aktywną trasę według legendy. Ale odpowiedz teraz na pytanie: czy to dowodzi, że PC-B odbiera ping? **Nie!** Nie widzieliśmy jeszcze ARP, portu, security zones, security policies ani ruchu powrotnego.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show route 198.51.100.10
+show route 198.51.100.0/24 detail
+show route forwarding-table family inet
+~~~
+
+Pierwsza komenda znajduje pasującą trasę, druga pomaga przyjrzeć się prefiksowi, trzecia pokazuje master forwarding table po stronie RE. Na platformach obsługujących **show pfe route** można dodatkowo sprawdzić perspektywę PFE. Na vSRX nie opieramy całego laboratorium na tej komendzie.
+
+**Pułapka egzaminacyjna:** obecność wpisu w RIB nie dowodzi ani poprawnej instalacji forwarding, ani zgodności polityk bezpieczeństwa, ani sprawności odległego hosta.
+
+### 2.3.4. Czy Routing Engine także zajmuje się konfiguracją?
+
+Tak. To drugi powód, dla którego RE jest ważny poza samym routingiem.
+
+W Junos typowo przygotowujesz **candidate configuration**, sprawdzasz zmiany i dopiero poleceniem **commit** aktywujesz konfigurację. Przykład w IOS XE to bardziej bezpośrednie wprowadzanie zmian w running configuration, chociaż konkretne platformy Cisco również oferują mechanizmy transakcyjne.
+
+**Zanim wykonasz zmianę**, odpowiadasz na dwa pytania: co dokładnie zmieniam i jak wrócę do stanu wcześniejszego?
+
+**Urządzenie: R1-vSRX — tryb operational → configuration, tylko LAB**
+
+~~~junos
+configure
+set system host-name R1-vSRX
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**show | compare** pokazuje różnicę candidate względem aktywnej konfiguracji; **commit check** sprawdza poprawność konfiguracji, ale nie działanie aplikacji; **commit confirmed 5** aktywuje zmianę ze zwrotem po czasie, jeżeli nie potwierdzisz jej ponownie.
+
+Gdy zmiana jest dobra:
+
+**Urządzenie: R1-vSRX — tryb configuration, tylko LAB**
+
+~~~junos
+commit
+exit
+~~~
+
+W razie błędu w konfiguracji — jeśli nie potwierdzisz — działa mechanizm wycofania; nie traktuj go jako zastępstwa testów. Na produkcji uwzględnij też równoległych operatorów i zasady change management. Mechanikę candidate/commit/rollback nauczymy się szerzej w rozdziale 3.
+
+### 2.3.5. Kiedy RE pracuje ciężko i co wtedy robisz?
+
+Wyobraź sobie, że dyspozytor dostaje co sekundę tysiące zgłoszeń o zamykanych drogach. Ciągle przelicza mapę. Tak może wyglądać niestabilny routing albo burza update'ów.
+
+Możliwe przyczyny wysokiego CPU RE: flapping sąsiedztwa, ogromne zmiany RIB, intensywne logowanie, ruch wyjątkowy do control plane, problem usług zarządzania, awaria procesu.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show chassis routing-engine
+show system processes extensive
+show system uptime
+show log messages | match "rpd|mgd|chassisd|dcd"
+~~~
+
+Zadaj sobie pytania: jaki proces najbardziej obciąża CPU? Czy problem narasta? Czy usterka rozpoczęła się po zmianie konfiguracji? Czy sąsiedztwa dynamiczne się zrywają? Czy forwarding host-host naprawdę ma straty?
+
+**Nie restartuj procesu bez diagnozy.** Reset rpd na produkcyjnym routerze może być znacznie groźniejszy niż sam alarm CPU.
+
+### 2.3.6. Dwa RE to nie to samo co dwa sprawne połączenia
+
+Na większych platformach możesz mieć primary i backup Routing Engine. Brzmi pięknie: „mam drugą dyspozytornię”. Ale czy masz też drugi pas startowy? Czy dane routingowe są synchronizowane? Czy protokoły przetrwają failover bez restartu sąsiedztw?
+
+Do tego służą dodatkowe technologie HA, np. GRES/NSR, nie samo fizyczne istnienie dwóch RE. Szczegóły będą w rozdziale 17.
+
+### Ćwiczenie bez kabla: diagnoza w trzech zdaniach
+
+**Objaw:** show route pokazuje trasę, SSH działa, aplikacja nie odpowiada.
+
+Odpowiedź: „Znamy co najmniej prawidłowy dostęp administracyjny i istnienie wpisu w RIB. Nie potwierdziliśmy forwarding end-to-end. Następny etap: interfejsy, forwarding table, next-hop/ARP, security policy i sesje SRX oraz droga powrotna”.
+
+Jeśli potrafisz to powiedzieć bez patrzenia w notatki, rozumiesz sens RE. Nie tylko jego rozwinięcie z trzech liter.
+
+---
+
