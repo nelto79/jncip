@@ -1300,3 +1300,301 @@ Gdy zrobisz to uczciwie, rozdział 2 nie będzie już materiałem do wkuwania. B
 
 ---
 
+## 2.TS. Troubleshooting — uczymy się myśleć jak inżynier, nie jak wyszukiwarka komend [EXT]
+
+### 2.TS.1. Telefon z NOC: „mamy routing, a nie mamy aplikacji”
+
+Niedziela, 03:40. Operator wysyła Ci taki fragment:
+
+— „W R1 jest trasa 198.51.100.0/24. Ping do samego R1 działa. Serwer odpowiada, gdy pinguję go z R4, ale PC-A nie może się połączyć”.
+
+Niedoświadczony operator zacznie poprawiać static route albo restartować router. Ty zrobisz coś innego: **zbudujesz łańcuch hipotez i dowodów**.
+
+**Hipoteza 1: PC-A nie potrafi dotrzeć do swojej bramy.** Sprawdź maskę, IP, gateway, ARP, VLAN/L2, stan interfejsu.
+
+**Hipoteza 2: R1 nie zna aktywnej drogi do PC-B.** Sprawdź konkretny prefiks i next-hop, nie tylko „jakieś trasy są”.
+
+**Hipoteza 3: R1 zna drogę, ale SRX nie zezwala na sesję.** Sprawdź ingress interface → zone → policy → egress, a następnie sesję i liczniki.
+
+**Hipoteza 4: request wyszedł, reply nie wraca.** Sprawdź routing zwrotny, asymetrię, sesje na urządzeniach pośrednich i policy w przeciwnym kierunku dla nowych sesji.
+
+**Hipoteza 5: łącze/kolejka/MTU lub problem platformy.** Jeśli inne elementy masz udowodnione, sprawdź błędy interfejsu, dropy, alarmy i ograniczenia sprzętowe.
+
+Założenie „route exists, therefore data works” nie należy do poprawnych hipotez. To skrót myślowy, który nauczy Cię przegrywać incydenty.
+
+### 2.TS.2. Pierwsza wizyta na urządzeniu — bezpieczny zestaw rozpoznawczy
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show version
+show system uptime
+show system alarms
+show chassis alarms
+show interfaces terse
+show route table inet.0
+show route 198.51.100.10
+show route forwarding-table family inet
+~~~
+
+Dlaczego ta kolejność? Najpierw ustalamy **co to za system**, czy miał restart, jakie ma alarmy, które interfejsy żyją oraz jak wygląda jego decyzja routingu. Dopiero wtedy sensowne jest zgłębianie session/security.
+
+### 2.TS.3. Druga wizyta — czy SRX w ogóle widzi potrzebny flow?
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show security zones
+show security policies
+show security flow status
+show security flow session source-prefix 192.0.2.10/32
+show security flow statistics
+show arp
+~~~
+
+Czy sesja w ogóle powstaje? Czy wskazuje oczekiwany interfejs wejściowy i wyjściowy? Czy liczniki rosną? Nie ma sesji? Najpierw sprawdź, czy pakiet dotarł i czy polityka pozwala go utworzyć. Nie zakładaj przyczyny na podstawie jednej komendy.
+
+### 2.TS.4. Trzecią wizytę składaj już z konkretnego podejrzenia
+
+Załóżmy, że suspect to **interfejs R1–R2**. Nie ma sensu oglądać wszystkich 100 portów; czytaj licznik i status tego, który bierze udział w ścieżce.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show interfaces ge-0/0/0 extensive
+show interfaces ge-0/0/2 extensive
+show log messages | last 50
+~~~
+
+Jeżeli suspect to **rpd lub control plane**:
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show chassis routing-engine
+show system processes extensive
+show log messages | match "rpd|mgd"
+~~~
+
+Jeżeli suspect to **północna droga**:
+
+**Urządzenie: R2-vSRX — tryb operational**
+
+~~~junos
+show interfaces terse
+show route 198.51.100.0/24 exact
+show route 192.0.2.0/24 exact
+show security flow session summary
+~~~
+
+**Sposób myślenia:** każde polecenie jest odpowiedzią na konkretne pytanie. Gdy nie masz pytania, nie jesteś jeszcze w diagnostyce — jesteś w kolekcjonowaniu tekstu.
+
+### 2.TS.5. Case study — „BGP nie zestawia sesji, mimo że ping działa”
+
+Przygotowanie do późniejszego JNCIS/JNCIP. Załóżmy, że z R1 pingujesz sąsiada BGP. Połączenie BGP jednak nie osiąga Established.
+
+Mógłbyś powiedzieć: „Skoro jest IP connectivity, powinno działać”. Ale BGP nie używa ogólnego ruchu transit do hosta w innej podsieci, jeśli peerem jest **sam SRX**. Do gry wchodzi lokalna obsługa protokołu, parametry peeringu oraz **host-inbound traffic**.
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show bgp summary
+show configuration protocols bgp | display set
+show configuration security zones | display set
+show log messages | match "bgp|rpd"
+~~~
+
+Pytania:
+- Czy naprawdę wskazano właściwy local/peer address?
+- Czy AS i konfiguracja grupy są prawidłowe?
+- Czy odpowiednia strefa/interfejs zezwala na host-inbound BGP?
+- Czy logi wskazują problem TCP, auth, policy lub kompatybilności parametrów?
+
+Na rozdział 11 zostawiamy szczegóły BGP. Tu masz zapamiętać **dlaczego session do RE i transit mają różne ścieżki**.
+
+### 2.TS.6. Case study — „traceroute nie pokazuje R3, ale aplikacja działa”
+
+R1 przekazuje pakiety. PC-B otrzymuje dane. Traceroute ma gwiazdki w miejscu R3. Czy to dowód, że R3 nie działa?
+
+Nie. Pakiety z wygasłym TTL/Hop Limit wymagają specjalnej reakcji routera, a ta może być filtrowana, rate-limitowana lub obsługiwana inną ścieżką niż zwykły forwarding. Traceroute jest użyteczną sondą, ale nie absolutną mapą wszystkich pakietów i nie dowodzi każdej awarii.
+
+Porównaj:
+- rzeczywisty ruch end-to-end;
+- routing na urządzeniach;
+- sesje i liczniki;
+- odpowiedzi poszczególnych interfejsów;
+- wyniki w różnych momentach i kierunkach.
+
+Ważny zawodowy odruch: jeśli aplikacja działa, a hop pośredni nie odpowiada, nie otwieraj od razu incydentu „łącze down”.
+
+### 2.TS.7. Case study — „rpd szaleje, a użytkownicy jeszcze pracują”
+
+Monitoring pokazuje wzrost CPU RE. Routing dynamiczny przelicza topologię w pętli. Użytkownicy jednak jeszcze mogą wykonywać transakcje.
+
+To możliwe, bo wcześniej zaprogramowane informacje forwarding i istniejące sesje mogą przez pewien czas obsługiwać ruch. Problem nie jest przez to „fałszywy”: przy kolejnej zmianie topologii mogą pojawić się problemy z aktualizacją informacji i konwergencją.
+
+Sprawdź:
+- konkretny proces;
+- sąsiedztwa dynamiczne i historię zmian;
+- logi;
+- stan interfejsów;
+- rzeczywiste straty użytkowników.
+
+Nie myl braku natychmiastowego wpływu z brakiem ryzyka.
+
+### 2.TS.8. Case study — „ping z routera działa, ping z hosta nie”
+
+To jeden z najczęstszych błędów przy przejściu z IOS na SRX. Ping z routera to locally originated; ping host-host przez SRX wymaga transit security policy. Różnią się też źródło i potencjalnie droga powrotna.
+
+Dlatego do weryfikacji sieci klientów używaj **testu wykonywanego z właściwego hosta lub odpowiedniego miejsca w topologii**. Test z samego routera traktuj jako narzędzie pomocnicze, a nie ostateczny dowód.
+
+### 2.TS.9. Czego nie robić tylko dlatego, że nie znasz jeszcze przyczyny
+
+W szkolnym laboratorium łatwo przyzwyczaić się do komendy „restart i zobaczymy”. W produkcji może to zamienić małą usterkę w incydent P1.
+
+Zachowaj ostrożność przy:
+- restartowaniu procesu routingu albo całego urządzenia;
+- masowym czyszczeniu sesji SRX;
+- wyłączaniu wszystkich security policies;
+- globalnym przełączaniu SRX między flow-based i packet-based;
+- uruchamianiu długiego nieograniczonego monitor traffic/traceoptions;
+- szerokich zmianach filtrów control plane bez gwarantowanego powrotu do urządzenia.
+
+To nie są „złe komendy”. Są **złe, jeśli wykonujesz je bez hipotezy, okna zmiany i planu odtworzenia**.
+
+---
+
+## 2.CLI. Krótka ściąga — dopiero teraz, gdy wiesz PO CO [EXT]
+
+Zanim zobaczysz zestawienie, powtórz rozumowanie: **najpierw dowód routingu, potem dowód forwarding, potem dowód realnego ruchu i security**. Lista komend jest po to, by przyspieszyć działanie, nie zastępować diagnozy.
+
+| Co próbuję udowodnić? | Polecenie | Uwaga |
+|---|---|---|
+| Na czym pracuję? | show version | Platforma i release zmieniają dostępne funkcje |
+| Czy RE ma problemy? | show chassis routing-engine | Zależnie od modelu |
+| Który proces obciąża system? | show system processes extensive | Czytaj wraz z czasem zdarzenia |
+| Czy port istnieje i jest up? | show interfaces terse | Nazwy zależą od mapowania obrazu |
+| Czy port ma błędy? | show interfaces ge-0/0/0 extensive | Podstaw rzeczywisty port |
+| Czy RE zna trasę? | show route table inet.0 | RIB |
+| Czy RE ma wpis forwarding? | show route forwarding-table | Master FIB na RE |
+| Czy PFE ma wpis? | show pfe route | Tylko na obsługiwanej platformie |
+| Czy są wpisy ARP? | show arp | Test lokalnego next-hopu |
+| Czy SRX przepuszcza flow? | show security flow session | Stateful security |
+| Jakie są strefy? | show security zones | Nie mylić z host-inbound |
+| Co dopuszcza transit? | show security policies | From-zone/to-zone |
+| Co dopuszcza ruch do SRX? | show configuration security zones | Host-inbound |
+| Czy są alarmy? | show system alarms / show chassis alarms | Sprawdzaj zawsze z wersją/model |
+| Czy RE widzi host-bound ICMP? | monitor traffic interface ... | RE capture ≠ pełny PFE sniffer |
+
+**Rzeczy, które masz znać na pamięć:** RE, PFE, RIB, FIB, rpd, mgd, transit, host-bound, originated. **Rzeczy do przećwiczenia:** wykonywanie tych komend i rozumienie odpowiedzi. Nie ucz się na pamięć dziesięciu kolumn z wyjścia, jeśli nie wiesz, jaki problem rozwiązują.
+
+---
+
+## 2.TEST. Quiz w stylu korepetycji — przewiduj, nie zgaduj [EXT]
+
+Rozwiąż bez patrzenia na odpowiedzi. To pytania autorskie o mechanizmy, a nie wyciek pytań egzaminacyjnych.
+
+**1. Noc w NOC.** SSH do R1 działa, ale PC-A nie może pingować PC-B. Co zostało udowodnione, a czego jeszcze nie?
+
+**2. Dwie kartki z trasą.** Dlaczego wpis w RIB nie gwarantuje, że pakiet dotrze do PC-B?
+
+**3. Zaginiony ping.** PC-A nie pingnie 192.0.2.1, ale PC-A → PC-B działa. Jak to możliwe?
+
+**4. Podchwytliwe ICMP.** Czy każdy ICMP pakiet jest exception traffic? Podaj kontrprzykład.
+
+**5. Kto pracuje?** Proces rpd zajmuje się głównie: (A) forwarding każdej ramki (B) protokołami routingu i RIB (C) SSH logowaniem (D) kolejkowaniem na ASIC.
+
+**6. Szybki automat.** W typowym modelu Junos, za przekazywanie zwykłego pakietu tranzytowego odpowiada głównie: RE czy PFE?
+
+**7. LPM czy preference?** R1 zna 198.51.100.0/24 i 198.51.100.128/25. Pakiet ma IP docelowe 198.51.100.200. Która sieć jest lepszym dopasowaniem? A co, jeśli są dwie trasy do tego samego /25?
+
+**8. Ścieżka zwrotna.** PC-A wysyła request, który dociera do PC-B, ale nie ma reply. Co sprawdzisz przed zmianą trasy na R1?
+
+**9. Obserwacja.** monitor traffic na R1 nie pokazuje pakietów PC-A → PC-B, ale sesja SRX i liczniki rosną. Czy to dowód awarii?
+
+**10. Wersje i platformy.** Dlaczego komenda dostępna na MX może nie występować na Twoim vSRX?
+
+**11. Zmiana trasy.** Wyłączyłeś R1–R2, więc ruch ma przejść przez R3. Jakie problemy jeszcze mogą wystąpić na stateful SRX?
+
+**12. Szybka naprawa?** NOC proponuje restart rpd, bo CPU jest wysokie. Jakie minimalne dowody powinny poprzedzić taką decyzję?
+
+### Odpowiedzi i komentarz nauczyciela
+
+**1.** Udowodniono dostęp do usługi zarządzania R1. Nie udowodniono pełnej ścieżki ingress/forwarding/security/egress/return PC-A → PC-B.
+
+**2.** RIB pokazuje wiedzę i wybór routingu. Nadal mogą istnieć problemy z FIB/PFE, portem, ARP, MTU, filtrem, security policy, sesją, drogą powrotną i samym hostem.
+
+**3.** Na SRX możesz zablokować host-inbound system-services ping, pozostawiając dozwoloną policy transit. Na innych platformach możliwy jest filtr lub limiter control plane.
+
+**4.** Nie. ICMP Echo Request PC-A → PC-B przez R1 jest zwykłym transit. ICMP do lokalnego IP R1 to host-bound.
+
+**5.** B. rpd utrzymuje informacje protokołów i routingu; nie przesyła każdego pakietu.
+
+**6.** PFE — przy czym na vSRX jest to logiczny wirtualny datapath z mechanizmami security flow, a nie identyczny sprzętowy ASIC jak na QFX.
+
+**7.** /25. Jeśli dwa kandydaty mają ten sam prefiks /25, decyzja między nimi jest związana z wyborem trasy/preferencją i atrybutami, nie z LPM.
+
+**8.** Routing na R4/R2/R3, stateful sessions/policies, odpowiedni adres źródłowy/destynację, asymetrię i prawidłowość gateway PC-B.
+
+**9.** Nie. RE capture zwykle nie pokazuje każdego zwykłego pakietu przekazywanego przez datapath. Test end-to-end, sesje i liczniki są bardziej właściwym dowodem dla transit na vSRX.
+
+**10.** Junos działa na różnych rodzinach sprzętu i wersjach, a część komend jest specyficzna dla PFE lub platformy. Nie zakładaj identycznej implementacji na wszystkich urządzeniach.
+
+**11.** Asymetria drogi powrotnej, stateful session pinning i brak detekcji części odległych awarii przez zwykłą trasę statyczną.
+
+**12.** Potrzebne są dane o procesach/CPU, czasie, logach, stanie protokołów, obserwacji użytkowników i wpływie na forwarding. Restart usługi nie jest pierwszym krokiem.
+
+### Egzaminacyjna samokontrola — bez presji na numer punktów
+
+Jeśli potrafisz **bez zaglądania** opowiedzieć pakiet PC-A → PC-B, oddzielić trzy rodzaje ruchu i przeprowadzić podstawową diagnozę RIB → FIB → forwarding → security, jesteś gotowy przejść do kolejnego rozdziału.
+
+Jeśli nie, nie próbuj zaklejać luk kolejnymi definicjami. Wykonaj ponownie awarię A lub B i opowiedz, **dlaczego dokładnie jeden rodzaj ruchu przestał działać**.
+
+---
+
+## 2.RECAP. Co zabierasz na egzamin i na dyżur
+
+Wyobraź sobie, że ktoś pyta Cię w windzie: „Czym różni się RE od PFE?”. Nie potrzebujesz dwustronicowego wykładu. Powiedz:
+
+**RE planuje i utrzymuje informacje sterujące, PFE wykonuje normalne przekazywanie ruchu na podstawie przygotowanych danych.**
+
+Jeśli ktoś pyta: „W tablicy mam trasę, to czemu pakiet nie dochodzi?”, odpowiadasz:
+
+**Bo trasa to tylko jeden element drogi. Trzeba sprawdzić forwarding, interfejs, next-hop, ARP/ND, filtry, na SRX również zone/policy/session, a na końcu drogę powrotną.**
+
+Jeśli ktoś pyta: „Nie mogę pingować interfejsu routera, więc router padł?”, odpowiadasz:
+
+**Niekoniecznie. Test ruchu do routera jest inny niż test ruchu przez router.**
+
+To są trzy najważniejsze myśli tego rozdziału. Reszta pomaga je udowodnić.
+
+### Gdzie idziemy dalej?
+
+- **Rozdział 3:** CLI, candidate/active config, commit i rollback.
+- **Rozdział 5:** monitoring, logi i weryfikacja.
+- **Rozdział 6:** RIB/FIB, routing instances, static route, route preference i LPM.
+- **Rozdział 8:** routing policies i firewall filters.
+- **Rozdział 11:** BGP, communities, next-hop resolution i troubleshooting.
+- **Rozdział 17:** HA, redundant RE, GRES/NSR i wpływ na dataplane.
+
+Najlepszy moment na przejście dalej jest wtedy, gdy umiesz w praktyce rozwiązać przynajmniej dwa laboratoryjne problemy: **host-bound blocked, transit works** i **host-bound works, transit blocked**.
+
+---
+
+## Źródła i granice tego opracowania
+
+**Podstawa numeracji:** [Unified Blueprint JNCIA + JNCIS + JNCIP](../JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md), dokładnie cele **2.1–2.6**. Zachowano tematykę oryginalnego rozdziału 2, lecz narrację, kolejność nauczania, przykłady i lab rozszerzono dla potrzeb korepetycji.
+
+**Dokumentacja producenta do samodzielnego sprawdzenia szczegółów platformy i wersji:**
+
+1. [JNCIA-Junos — official certification objectives](https://learningportal.juniper.net/juniper/user_activity_info.aspx?id=14354).
+2. [Junos OS software architecture](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-architecture.html).
+3. [Junos OS components and processes](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-components-and-processes.html).
+4. [show route forwarding-table reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
+5. [Junos security policies overview](https://networkingdocs.hpe.com/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html).
+6. [Static routes: qualified next-hops and preference](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html).
+7. [Day One: Beginner's Guide to Learning Junos](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf).
+
+Przykładowe adresy, wyniki komend i scenariusze są **edukacyjne i ilustracyjne**. Rzeczywista składnia, zachowanie stateful sessions, obsługa wyjątków i dostępność komend zależą od wersji Junos oraz platformy. W szczególności nie przenoś bez testu zachowania fizycznych MX/EX/QFX na vSRX.
+
+**Koniec rozdziału 2.**
