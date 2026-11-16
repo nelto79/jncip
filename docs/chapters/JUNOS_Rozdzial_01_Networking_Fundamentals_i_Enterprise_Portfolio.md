@@ -83,15 +83,38 @@ show interfaces terse
 
 Nie zakładaj, że składnia i zakres widoku są identyczne na SRX, EX, MX i różnych wersjach Junos.
 
-## 1.5–1.8. IP, prefiksy, subnetting i binarny — nie tracimy lat Cisco, wykorzystujemy je [A]
+## 1.5. IP i maski — ile sieci tak naprawdę potrzebuje nowy biurowiec? [A]
 
-Nie będziemy od nowa wyjaśniać /24, /30, /31, /64 ani dodawania binarnego. Potrafisz policzyć adresy. Musisz tylko zobaczyć **zastosowanie do designu**:
+Nie musisz uczyć się od początku /24 ani /26. Zadaj sobie jednak pytanie projektowe: czy 320 użytkowników, 35 telefonów i 28 kamer powinno trafić do jednej sieci, bo „wszyscy są na tym samym piętrze”? Najczęściej to zła przesłanka. Oddzielasz **funkcję i politykę dostępu**: corporate, voice, cameras, IoT, guest, infrastruktura i OOB management. Następnie dopiero nadajesz odpowiedni prefiks. Nie kopiuj adresacji z poprzedniego site bez planu agregacji i tras na WAN.
 
-- Nie wyznaczaj podsieci wyłącznie według dzisiejszej liczby laptopów — uwzględnij urządzenia mobilne, IoT, adresy usług, rozrost site i model NAC/VRF.
-- /31 w L3 point-to-point między core i distribution jest często rozsądnym sposobem oszczędzania IPv4, jeżeli obie platformy i software ją wspierają.
-- IPv6 nie ma ARP, ale potrzebuje ND i poprawnych reguł ICMPv6; bezmyślne filtrowanie ICMPv6 potrafi zepsuć komunikację.
+**Most z Cisco:** planowanie SVI/VLAN i VRF jest podobne, ale na Junos bramy L3 w switching często reprezentuje **IRB** (Integrated Routing and Bridging), a ograniczanie routingu instancjami odbywa się z użyciem \`routing-instances\`. Szczegóły IRB i konfiguracji poznasz w rozdziale 14.
 
-**Przykład greenfield:** access na piętrze 2 ma VLAN użytkowników, voice i AP management. Czy jedno /24 „na cały site” jest wystarczające? Problem nie jest tylko w liczbie hostów. Jest w planie segmentacji, DHCP, bramach, NAC, routing instances i możliwościach rozbudowy.
+## 1.6. IPv4 kontra IPv6 — nie wystarczy „dołożyć AAAA w DNS” [A]
+
+W IPv4 potrzebujesz ARP do rozwiązania lokalnego MAC. W IPv6 do tego służy Neighbor Discovery, a do poprawnej pracy hostów często także Router Advertisements oraz ICMPv6. **Nie blokuj bezmyślnie całego ICMPv6**, bo możesz uszkodzić wykrywanie sąsiadów, Path MTU Discovery i inne fundamentalne funkcje. To praktyczny problem migracyjny również na Cisco.
+
+**Urządzenie: EX-DIST-01 — operational mode (jeśli obsługiwane przez model/release)**
+
+~~~junos
+show route table inet6.0
+show ipv6 neighbors
+~~~
+
+W Greenfield HLD zapisz jasno, które segmenty mają dual-stack, gdzie działają RA/SLAAC/DHCPv6 i jak NAC/firewall traktują IPv6. **IPv6 wymaga osobnego planu bezpieczeństwa**, nawet jeśli aplikacje używają jeszcze tylko IPv4.
+
+## 1.7. Subnetting i supernetting — oszczędność IP to nie jedyny cel [A]
+
+Wiesz, że /30 daje klasycznie dwa użyteczne adresy w L3 point-to-point, a /31 pozwala oszczędzić przestrzeń na wspieranych platformach. W nowym campuse projektuj jednak adresację tak, by dało się **agregować prefiksy per budynek/site**, ograniczać ilość tras w WAN i stosować czytelne ACL/policies. Dwieście rozsianych po całej korporacji /24 utrudnia późniejszą agregację.
+
+**Pytanie projektowe:** czy wszystkie lokalne VLAN-y biurowca mieszczą się w zarezerwowanym bloku adresacji dla danego site? Jeśli nie, masz problem projektowy jeszcze przed wprowadzeniem pierwszej komendy \`set interfaces irb\`.
+
+## 1.8. Binary, decimal i wildcard — wiedza Cisco, którą można zastosować bez powtórnego wkuwania [A]
+
+Znajomość bitów przydaje się, gdy liczysz wielkość podsieci, adresy hostów, rozbicie prefiksów, adresy multicast i selekcję tras. Z Cisco znasz **wildcard masks** w ACL oraz maski podsieci; nie przepisuj ich mechanicznie do Junos jako identycznej składni. W Junos używa się m.in. prefiksów w formacie CIDR oraz różnych mechanizmów dopasowania w **policy-statement**, **firewall filter** i **route-filter**, które mają własną składnię.
+
+**Do przećwiczenia:** weź \`10.80.0.0/21\`, rozbij na /24 dla VLAN-ów, następnie sprawdź, czy da się utrzymać sensowną agregację do core/WAN. To bardziej przydatne przy greenfield niż kolejne dziesięć sztucznych zadań „10010011 na dziesiętny”.
+
+**Przykład greenfield:** access na piętrze 2 ma VLAN użytkowników, voice i AP management. Czy jedno /24 „na cały site” jest wystarczające? Problem nie jest tylko w liczbie hostów. Jest w planie segmentacji, DHCP, bramach, NAC, routing instances i możliwości rozbudowy.
 
 ## 1.9. Longest Prefix Match — nie mylić z preferencją protokołu [A]
 
