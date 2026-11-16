@@ -1160,3 +1160,187 @@ flowchart LR
 
 To nie oznacza, że J-Web i CLI są identycznymi frontendami w każdej funkcji. Oznacza, że **obydwa zarządzają tym samym systemem konfiguracji**, który musisz rozumieć niezależnie od ekranu.
 
+
+
+---
+
+## 3.11. [EXT] Praktyczna organizacja pracy: display set, commit check, commit confirmed i porównanie zmian
+
+### 3.11.1. „Zielony commit complete” to dopiero początek
+
+Pamiętasz incydent z nocnej zmiany? Na Cisco ASR dopisałeś filtr, a potem pół sieci straciło reachability. Na Junos masz szansę przetestować konfigurację, zanim stanie się aktywna. Ale oto podchwytliwy fakt: **Junos nie wie, czy Twoja aplikacja ERP będzie działać** tylko dlatego, że przeanalizował konfigurację bez błędu.
+
+Podczas \`commit check\` system sprawdza składnię i wiele zależności oraz wymagań konfiguracji. Może wykryć błędną referencję albo niepoprawną strukturę. Nie musi natomiast wiedzieć, że nowy \`firewall filter\` odcina IP bastion hosta albo że next-hop wciąż odpowiada na ARP, ale nie prowadzi do serwera.
+
+Dla inżyniera Cisco to łatwa analogia: poprawne przyjęcie \`ip access-group\` nie dowodzi, że aplikacja będzie działać. **Configuration valid ≠ service healthy.**
+
+### 3.11.2. Zmiana to proces, nie pięć komend
+
+W profesjonalnym change management rozróżnij **precheck**, **candidate review**, **validation**, **activation**, **service verification** i **confirmation**. Nie przechodź od \`set\` prosto do \`commit\`, bo to skraca najważniejszy etap — świadomą ocenę diffu.
+
+**Urządzenie: R1-vSRX — Operational Mode, read-only precheck przed zmianą**
+
+~~~junos
+show version
+show system uptime
+show system alarms
+show chassis alarms
+show system users
+show system commit
+show configuration | display set
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode, wejście do prywatnej sesji zmiany**
+
+~~~junos
+configure private
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], zmiana wyłącznie w izolowanym LAB**
+
+~~~junos
+set system login message "CH03 - test change control"
+show | compare
+commit check
+~~~
+
+Dopiero kiedy \`show | compare\` pokazało **dokładnie to, co planowałeś**, i \`commit check\` zakończył się poprawnie, włączasz aktywację warunkową:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB**
+
+~~~junos
+commit confirmed 5
+~~~
+
+Teraz system pracuje z nową **active configuration**, ale uruchomił się mechanizm **oczekiwania na potwierdzenie**. Na koniec sprawdzasz, czy urządzenie nadal jest osiągalne, czy usługi działają, a change nie spowodował nieplanowanego skutku. Jeżeli jest dobrze, świadomie potwierdzasz.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], potwierdzenie dopiero PO service verification**
+
+~~~junos
+commit
+~~~
+
+### 3.11.3. Najważniejszy haczyk egzaminacyjny tego rozdziału: \`commit check\` też potwierdza \`commit confirmed\`
+
+Wyobraź sobie, że przed chwilą wydałeś \`commit confirmed 5\`, a następnie powiedziałeś do siebie: „Jeszcze raz zrobię \`commit check\`, bo to przecież tylko sprawdzenie”. I tu Junos może Cię zaskoczyć: **oficjalna dokumentacja potwierdza, że zarówno \`commit\`, jak i \`commit check\` mogą potwierdzić oczekujący \`commit confirmed\`**.
+
+Oznacza to, że wykonanie \`commit check\` już **po** warunkowym wdrożeniu nie musi być neutralnym testem — może zakończyć mechanizm automatycznego powrotu. To jedna z tych rzeczy, które koniecznie warto zapamiętać, bo są podchwytliwe i mają bezpośredni wpływ na produkcję.
+
+**Przed \`commit confirmed\`:** \`commit check\` służy do sprawdzania candidate.  
+**Po \`commit confirmed\`, gdy timer oczekuje:** \`commit check\` może potwierdzić zmianę i wyłączyć oczekujący rollback.
+
+Nie „poprawiaj” nawykowo konfiguracji albo nie wykonuj kolejnego commit przed rzeczywistą kontrolą osiągalności urządzenia. Po aktywacji sprawdzaj **stan operacyjny**; jeśli zostajesz w configuration mode, użyj \`run\`.
+
+**Urządzenie: R1-vSRX — Configuration Mode, po \`commit confirmed\`, odczyt stanu bez potwierdzania pending commit**
+
+~~~junos
+run show system commit
+run show version
+run show interfaces terse
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode, odczyt stanu bez modyfikacji**
+
+~~~junos
+show system commit
+show system alarms
+show interfaces terse
+~~~
+
+Sprawdź historię — może zawierać informację o **pending rollback in N minutes**. To dowodzi, że mechanizm ochronny jest jeszcze aktywny. Następnie wykonaj **właściwe testy usługi**, nie tylko kontrolę promptu.
+
+Źródło: [Juniper commit CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html).
+
+### 3.11.4. \`commit confirmed 5\` nie jest obietnicą, że po pięciu minutach SSH wróci
+
+Automatyczny rollback przywraca poprzednią konfigurację. Jeśli Twoja awaria wynikała wyłącznie ze złej konfiguracji, może to odzyskać reachability. Ale jeśli link fizyczny padł, upstream odciął Twój prefix albo urządzenie przestało działać, rollback **nie jest narzędziem naprawy hardware**.
+
+Druga pułapka: router mógł przeprowadzić zmianę routingową, której skutki **trwają po rollbacku**, bo sąsiedzi potrzebują konwergencji, a sesje stateful muszą zostać zestawione na nowo.
+
+Trzeci detal: dokumentacja Junipera wskazuje, że timeout \`commit confirmed\` opiera się na **czasie systemowym**. Gdy w trakcie zmieni się zegar, okres oczekiwania może się odpowiednio przesunąć. **Nie planuj eksperymentu NTP w środku pending confirmed commit.**
+
+### 3.11.5. Czy \`commit confirmed\` można uruchomić w \`configure private\`?
+
+Tak — na odpowiednio współczesnych wersjach Junos jest wspierany w private config. Tym bardziej ważne jest rozróżnienie **Twojej prywatnej candidate** od **globalnej aktywnej konfiguracji**. Przed aktywacją i potwierdzeniem sprawdź, czy w międzyczasie ktoś inny wykonał commit i czy Twoja candidate jest aktualna.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private]**
+
+~~~junos
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Jeśli dostaniesz konflikt z innym administratorem, **nie zmuszaj systemu do przypadkowego nadpisania zmian**. Oceń \`update\`, porównaj rezultat i uzgodnij zakres zmiany.
+
+### 3.11.6. \`commit comment\` i historia audytu
+
+W dużym środowisku samo „kto i kiedy” może nie wystarczyć. Warto opisać zmianę numerem ticketu, bez danych poufnych. Junos potrafi przechowywać komentarze związane z commit.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], przykład dopiero po precheck i zgodzie na change**
+
+~~~junos
+commit comment "CH03-LAB controlled configuration example"
+~~~
+
+To nie jest alternatywa dla ServiceNow Change Record i nie powinno się wykonywać dodatkowego commit wyłącznie po to, żeby zostawić notatkę. Zastosuj komentarz do **rzeczywistego** planowanego zatwierdzenia.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show system commit
+~~~
+
+Wynik pozwala ustalić kolejność commitów, operatorów oraz część informacji o zmianach. **Nie utożsamiaj jednak historii commit z pełnym systemem version control:** Git ma review, PR, odpowiedzialność autorów i audyt zmian między repo, a router przechowuje ograniczoną lokalną historię.
+
+### 3.11.7. Commit na przyszłość — kuszący, lecz ryzykowny
+
+Junos oferuje m.in. **\`commit at\`** do zaplanowanej aktywacji. Brzmi idealnie do nocnego maintenance window: przygotowujesz zmianę o 15:00, a ona sama włącza się o 23:00. Ale jeśli od rana do wieczora zmieni się stan infrastruktury, kandydat może być nieaktualny. Ponadto przy oczekującym zaplanowanym commit część innych zmian może zostać zablokowana.
+
+To już temat na zaawansowany change management. Na poziomie tego rozdziału **wiedza o istnieniu tej funkcji** jest przydatna, ale nie używaj jej do produkcji bez osobnego runbooka, sprawdzonego zegara/timezone, planu anulowania i uzgodnienia okna.
+
+### 3.11.8. Cisco ma mechanizmy bezpiecznego cofania — nie buduj fałszywej opowieści
+
+Mogłoby wyglądać, że Junos wynalazł transakcyjne zarządzanie, a IOS XE nigdy nie posiadał rollbacku. To byłoby nieprawdziwe. IOS XE na odpowiednich platformach ma mechanizmy **configuration replace**, archiwizację i confirmed rollback. Różnica, którą ćwiczysz, jest przede wszystkim w **codziennym, domyślnym modelu pracy CLI Junos**: edytujesz candidate i ją commitujesz.
+
+Dla doświadczonego inżyniera Cisco przejście jest więc prostsze niż wygląda: znasz problemy, które mechanizmy rollback mają rozwiązać. Nowe są **nawyki, nazwy, sekwencja i ich subtelne wyjątki**.
+
+### 3.11.9. Najbardziej praktyczny runbook do zapamiętania
+
+**FAZA 1 — przed zmianą:** sprawdź stan urządzenia, ścieżkę zarządzania, osoby zalogowane, backup, czas systemowy, OOB/console, istniejący pending commit, HLD i plan rollback.
+
+**FAZA 2 — candidate:** najlepiej kontrolowany \`configure private\`; przygotuj tylko potrzebny zakres, \`show | compare\`; zweryfikuj, że w diffie nie ma obcych zmian ani znikającego management.
+
+**FAZA 3 — validation:** \`commit check\` **przed** pierwszym \`commit confirmed\`; kontrola oczekiwanego efektu i dostępności platformy.
+
+**FAZA 4 — warunkowa aktywacja:** \`commit confirmed N\` dobrane do realistycznego czasu potrzebnego do testów, nie przypadkowe „1 minuta”.
+
+**FAZA 5 — service verification:** sprawdź realną usługę w obu kierunkach, BGP/OSPF, management, security, liczniki, monitoring i logi. Kontroluj timer przez \`show system commit\`, nie przez ponowne \`commit check\`.
+
+**FAZA 6 — decyzja:** potwierdź \`commit\` lub pozwól na rollback/wykonaj właściwą procedurę odtworzenia. Uzupełnij worknotes i backup po zmianie.
+
+~~~mermaid
+sequenceDiagram
+    participant N as Network Engineer
+    participant C as Candidate
+    participant J as Junos commit logic
+    participant A as Active
+    N->>C: set / load
+    N->>C: show | compare
+    N->>J: commit check
+    J-->>N: validation PASS (bez aktywacji)
+    N->>J: commit confirmed 5
+    J->>A: activate candidate
+    J-->>N: timer aktywny
+    N->>A: service tests (read-only)
+    alt Testy przeszły
+      N->>J: commit
+      J-->>N: confirmed, timer znika
+    else Testy nie przeszły / brak potwierdzenia
+      J->>A: automatic rollback po timeout
+      A-->>N: poprzedni config (konwergencja może zająć czas)
+    end
+~~~
+
+**Najważniejsze zdanie całego rozdziału:** Junos daje Ci kontrolę nad momentem aktywowania konfiguracji, ale **odpowiedzialność za jakość projektu, kolejność operacji i weryfikację aplikacji pozostaje po stronie inżyniera**.
+
