@@ -10,8 +10,10 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 
 1. docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md — obowiązujący, zunifikowany spis treści; zachowaj zakres i numerację.
 2. docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md — pełny rozdział 2 (nie skracaj, nie nadpisuj streszczeniem).
+2a. docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md — pełny rozdział 3 (3.1–3.11), warstwa CLI/candidate/commit/load/rollback/J-Web. Nie zastępuj streszczeniem i nie przenoś wszystkich gotchas na koniec.
 3. labs/ch02-four-vsrx/README.md — specyfikacja pierwszego większego labu.
 4. labs/ch02-four-vsrx/CODEX_TASK.md — kryteria implementacji i walidacji.
+5. labs/ch03-cli-change-management/README.md — lab z dwiema sesjami administratorów, konsolą i kontrolowanym commit confirmed; status PLANNED, dopóki nie ma rzeczywistych testów.
 
 ## Zasady dokumentacyjne
 
@@ -105,3 +107,14 @@ Dla rozdziału 2 odpowiedni rejestr źródeł: \`docs/research/CH02_GOTCHAS_ZROD
 - Przy bill of materials: licz niezależnie porty 1G i mGig/PoE, uplink speeds, optykę, zasilacze i redundancję, licencje Mist/security, support/SLA, potrzeby przyszłego rozwoju oraz kompatybilność z NAC/AAA i Wi-Fi. Nie wymyślaj cen, lead times ani pełnych orderable part numbers.
 - Do repo trafiają tylko bezpieczne, publiczne, ogólne szablony, nie produkcyjne IP, numery ofert, dane klientów ani klucze.
 - Jeżeli nie można potwierdzić 2026 modelu/release, pozostaw status **TO VERIFY**, zamiast zgadywać.
+
+
+## Specjalne zasady CH03 — konfiguracja i automatyczny rollback
+
+- Standardowy `configure` używa shared candidate; w `configure private` sprawdzaj stale candidate i konflikty `update`. `configure exclusive` wymaga koordynacji.
+- **`commit check` może potwierdzić oczekujący `commit confirmed`**. Nie dawaj w labie dodatkowego `commit check` już po warunkowej aktywacji.
+- `load override` nie jest alternatywą dla `load set` z krótkim fragmentem. Wskazuj zakres replacement i podawaj diff.
+- `rollback 0` odrzuca niezacommitowane zmiany; `rollback 1` ładuje poprzednią konfigurację do candidate. Historia numeryczna zmienia się po commit.
+- Rozdział 3 trenuj najpierw na bezpiecznym login banner, potem na shared/private, bez kasowania management. Nie stosuj fault injection bez rzeczywistego OOB/console.
+- Na EX4400 zarządzanie OOB zwykle jest przez `me0`, podczas gdy vSRX może mieć `fxp0`; nie zgaduj mapowania.
+- Dokumentacja: docs/research/CH03_JUNOS_CLI_GOTCHAS_I_ZRODLA_2026-11-16.md. Status labu dokumentuj jawnie jako PLANNED / STATIC VALIDATED / RUNTIME VALIDATED.
