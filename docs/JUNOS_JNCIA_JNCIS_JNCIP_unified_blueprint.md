@@ -21,7 +21,8 @@
 1.8. Konwersja systemu dziesiętnego na binarny i odwrotnie.  
 1.9. Longest Prefix Match — wybór najbardziej szczegółowego prefiksu.  
 1.10. Connection-oriented vs. connectionless protocols (TCP vs. UDP jako przykład).  
-1.11. Wprowadzenie do Class of Service (CoS) — po co sieć klasyfikuje ruch.
+1.11. Wprowadzenie do Class of Service (CoS) — po co sieć klasyfikuje ruch.  
+1.12. [EXT] **Juniper Enterprise Portfolio & Greenfield Design** — EX access/distribution/core, QFX campus fabric, SRX security, MX/SSR WAN edge, Mist WLAN, Junos OS vs Evolved vs AP/SSR firmware; podstawy HLD/LLD, wyboru SKU, PoE/uplink budget, BOM, lifecycle i sugerowane wersje JTAC. *Rozszerzenie praktyczne dla inżyniera; nie jest osobnym celem oficjalnego JNCIA.* Zobacz [`docs/chapters/JUNOS_Rozdzial_01_Networking_Fundamentals_i_Enterprise_Portfolio.md`](chapters/JUNOS_Rozdzial_01_Networking_Fundamentals_i_Enterprise_Portfolio.md).  
 
 ### 2. Junos OS Fundamentals — architektura systemu [A]
 2.1. Architektura oprogramowania Junos OS.  
