@@ -337,3 +337,235 @@ Można kupić sprzęt jednej firmy i mieć **cztery różne procesy zarządzania
 
 Dla oferty ważny jest więc **rozdział OS/firmware i licencji per rodzina**.
 
+
+
+### 1.12.11. Wersje systemu w 2026 — jak dobrać release i nie narobić sobie problemów przy patchowaniu?
+
+Do tej pory, pracując z Cisco, nie wpisywałeś przecież „najnowszy IOS XE” do Change Request bez sprawdzenia rekomendacji, fixów i zgodności platformy. Potrzebujesz tego samego na Junos — tylko dokładniejszego rozróżnienia.
+
+Juniper prowadzi oficjalny artykuł **JTAC KB21476: [Junos Software Versions — Suggested Releases to Consider and Evaluate](https://supportportal.juniper.net/s/article/Junos-Software-Versions-Suggested-Releases-to-Consider-and-Evaluate)**, ostatnio zaktualizowany **4 listopada 2026**. To punkt wyjścia do zakupu i testów regresyjnych, a **nie nakaz natychmiastowego upgrade wszystkich modeli**. Producent każe czytać release notes, znać ograniczenia danej platformy i zweryfikować kod we własnym wdrożeniu.
+
+**Najważniejsza zasada dla architekta:** „Junos 26.2 istnieje” **nie oznacza**, że 26.2 jest właściwy do EX4650, SRX380, EX9200 albo QFX5130. Sugerowany stabilny target może być starszy niż najnowszy dostępny release.
+
+#### Obecny punkt startowy do planowania — klasyczne EX i SRX (snapshot 16.11.2026)
+
+Dopiero teraz, kiedy wiesz, **po co** jest wersjonowanie per platform, warto zobaczyć zwięzłą tabelę.
+
+| Platforma | Sugerowana linia Junos wg JTAC KB21476 | Kiedy wpiszesz w projekt |
+|---|---|---|
+| EX4000 | **24.4R2-Sx** | compact/branch access |
+| EX4100, EX4100-F, EX4100-H | **24.4R2-Sx** | access w campus/branch |
+| EX4100-H-12T | **25.4R1-Sx** | wariant z osobnym targetem |
+| EX4400, EX4400-24X, EX4400-48XP/MXP | **24.4R2-Sx** | access lub dystrybucja zgodnie z SKU |
+| EX4650 | **24.4R2-Sx** | distribution/core |
+| EX9200 | **23.4R2-Sx** | modularny core |
+| EX4300-MP (istniejące wdrożenia) | **24.4R2-Sx** | legacy/istniejące środowiska |
+| SRX300/320/340/345/380 | **24.4R2-Sx** | branch perimeter |
+| SRX1500/1600/2300 | **23.4R2-Sx** | HQ/campus perimeter |
+| SRX4300 | **24.4R2-Sx** | większy perimeter |
+| vSRX 3.0 | **23.4R2-Sx** | lab/virtual firewall |
+| MX204 | **24.4R2-Sx** | routing edge |
+| MX304 | **24.4R2-Sx (latest SR)** | routing edge/aggr |
+
+**\`-Sx\` = rodzina service releases, nie rzeczywisty plik do pobrania.** Przed rolloutem wybierz konkretną wersję \`24.4R2-S<number>\` zgodnie z Software Downloads, platformą, Feature Explorer, Release Notes i kompatybilnością Mist.
+
+**Szczególny haczyk SRX300-series:** przy przejściu na **Junos 24.4R1 lub późniejszy** oficjalna tabela odsyła do **TSB92728**, czyli dodatkowych wymagań i ścieżki aktualizacji. Nie uruchamiaj masowego upgrade bez poznania tej procedury. To bardzo dobry przykład pytania, o które można potknąć się na produkcji, mimo doskonałej znajomości routingu.
+
+#### QFX — nie wszystkie używają tego samego Junos
+
+| Platforma | System operacyjny | Wskazana linia wg KB21476 |
+|---|---|---|
+| QFX5120-48Y / 48T / 32C | **Junos OS** | **25.2R2-Sx** |
+| QFX5130 (warianty 32CD, 48C/CM) | **Junos OS Evolved** | **25.2X100-D21-EVO** |
+| QFX5700 / QFX5700E | **Junos OS Evolved** | **25.2X100-D35-EVO** |
+| QFX5110 | **Junos OS** | **25.2R2-Sx** |
+
+Dla QFX z Junos Evolved widać zupełnie inną notację pakietu. **Nie dobieraj release dla core „z jednej tabeli dla QFX”**. W naszym przykładzie **QFX5130 to Evolved**, EX4650 i QFX5120 to klasyczny Junos.
+
+Źródło systemu QFX5130: [QFX5130 System Overview](https://www.juniper.net/documentation/us/en/hardware/qfx5130/topics/topic-map/qfx5130-system-overview.html); wersje per platforma: [JTAC KB21476](https://supportportal.juniper.net/s/article/Junos-Software-Versions-Suggested-Releases-to-Consider-and-Evaluate).
+
+#### WLAN i SSR — inne numery, inne kalendarze
+
+**Mist AP:** nie używa Junos; firmware AP dobierasz w Mist zgodnie z obsługiwanym modelem, regionem, funkcjami RF i guidance producenta. Nie wymyślaj wersji AP37 „24.4R2”.
+
+**SSR:** ma **oddzielny release train**, a nie Junos. W [oficjalnym kalendarzu SSR](https://support.juniper.net/support/eol/software/ssr/) wymieniony jest **SSR software 7.2** z datą first release 1 lipca 2026 i odrębnymi datami wsparcia. To **informacja o wydaniu**, nie rekomendacja, że 7.2 jest właściwy dla każdego SSR120/130.
+
+**Junos release lifetime:** sprawdzaj [Junos OS Dates & Milestones](https://support.juniper.net/support/eol/software/junos/), EoE/EoS i support dla konkretnego hardware. Przykładowo sama dostępność wersji 25.4/26.2 nie oznacza, że trafiła na każdą serię switchy.
+
+**Praktyczna checklista do CR/patchingu:**
+- Zapisz dokładny PID/serial, model Virtual Chassis (i wszystkie członki), licencje, aktualną wersję z \`show version\` i \`show chassis hardware\`.
+- Sprawdź czy obecny boot image, storage i upgrade path spełniają wymagania.
+- Wybierz target per platforma ze wsparciem producenta, sprawdź suggested release, known issues i wymagane security advisories.
+- Zweryfikuj zgodność z Mist/Wired Assurance i danymi typami optyki/PoE/portów.
+- Ustal rollback, management access, maintenance window i wpływ na VC/HA/EVPN.
+- Po upgrade przetestuj VLAN/IRB, uplink, routing adjacency, PoE, AP, NAC, logi i monitoring.
+
+**Urządzenie: EX-CORE-01 — tryb operational**
+
+~~~junos
+show version
+show chassis hardware
+show system storage
+show system alarms
+show chassis alarms
+~~~
+
+**Urządzenie: EX-ACCESS-VC01 — tryb operational (jeśli Virtual Chassis obsługiwany)**
+
+~~~junos
+show virtual-chassis status
+show version
+show chassis hardware
+~~~
+
+To pozwala zebrać podstawę pod decyzję, ale **nie zastępuje** pełnego precheck dla konkretnego modelu.
+
+### 1.12.12. Trzy wzorce greenfield: jak rozmawiać z klientem
+
+#### Scenariusz A — mały branch, 25 pracowników
+
+Klient ma jedną szafę, kilka AP, dwie drukarki i około 20 komputerów. Chce awaryjny ISP/LTE, prostą politykę guest/corp i nie chce osobnego kontrolera WLAN.
+
+**Koncepcja, nie oferta:** 1–2 przełączniki access z odpowiednimi portami PoE (np. EX4000-24P/48P lub EX4100-F), dobrane po policzeniu portów i zasilania, SRX300/320 lub SSR120 zależnie od modelu WAN/security, kilka Mist AP dobranych po RF survey, usługi Mist zgodnie z wymaganiami operacyjnymi.
+
+**Haczyk:** **jeden** switch access plus jeden SRX to nadal pojedyncze punkty awarii. Jeżeli klient wymaga wysokiej dostępności, minimalny BOM jest niewłaściwy. Zamówienie nie może wyprzedzać uzgodnienia SLA.
+
+#### Scenariusz B — średni site, ~120 użytkowników na dwa piętra
+
+Klient chce VLAN Voice, 802.1X, guest Wi-Fi, kamery i 10G uplinki.
+
+**Koncepcja:** kilka EX4100-48P/EX4400-48P (według wymaganej liczby portów i PoE), 1–2 EX4400-24X na collapsed core (jeżeli spełnia skalę/HA) albo EX4650, odpowiednia para SRX z planem HA/WAN, punkty AP34/36/37 w zależności od wymagań radio i dostępności, Mist Wired/Wi-Fi Assurance oraz NAC (istniejący ClearPass/ISE lub Mist Access Assurance po zaplanowaniu migracji).
+
+**Haczyk:** 120 użytkowników to **nie** 120 portów. Dodaj drukarki, AP, telefony, kamery, urządzenia sal konferencyjnych, helpdesk, dostęp administracyjny i spare. Następnie **oddziel porty 1G od portów mGig**, nie sumuj ich w jednej anonimowej kolumnie.
+
+#### Scenariusz C — HQ/campus na 3 piętrach, 320 stanowisk (case study do BOM)
+
+Na początku rozdziału klient powiedział: 320 stanowisk, 35 telefonów IP, 28 kamer i Wi-Fi 7. Załóżmy **18 AP jako wyłącznie wartość ilustracyjną**, którą RF designer ma później zastąpić z pomiarów. **Nie jest to rekomendowana liczba AP na trzy piętra bez survey.**
+
+Najpierw liczymy **fizyczne porty Ethernet** (przyjmujemy niezależne kable dla urządzeń; jeśli telefon ma PC passthrough, wynik może być inny):
+- 320 stanowisk PC,
+- 35 telefonów IP,
+- 28 kamer,
+- 18 AP (assumption),
+- **401 końcówek** przed zapasem i przed portami infrastruktury.
+
+Dopiero później wybieramy klasy portów:
+
+**1G copper:** PC + voice + kamery = 383.  
+**mGig/PoE dla AP:** 18 portów jako założenie; prędkość i potrzebną moc każdej końcówki uzgadniamy według modelu AP.
+
+**Przykład nieoptymalizowanego kandydata do analizy HLD:** 9 × EX4100-48P daje 432 porty 1G, a 3 × EX4400-24MP daje 72 porty mGig (po jednym na piętro). To oznacza 49 wolnych portów 1G, czyli około 11% zapasu w tej klasie, oraz aż 54 wolne mGig — **bardzo nierówną rezerwę**. Jest to materiał do dyskusji, a nie gotowy do zakupu BOM. Wariant może być zbyt drogi mGig i mieć zbyt małą rezerwę 1G, zależnie od polityki klienta.
+
+Jeśli klient wymaga np. **20% wolnych portów 1G na dzień odbioru**, 383/0.8 ≈ 479, więc trzeba zaplanować ok. 480 portów **1G** z odpowiednią dystrybucją po piętrach (np. 10 × 48-portowy 1G access, dopiero po rozbiciu na IDF). To **nie** oznacza, że wszystkie 480 portów muszą wspierać PoE++; podział na PoE/non-PoE rozstrzyga osobny rachunek urządzeń.
+
+Dla AP potrzebujemy co najmniej 18 odpowiednich mGig portów **we właściwych szafach** — nie centralnie na jednym piętrze. Zależnie od wymagań i cen można rozważyć mniejsze wyspy mGig/PoE, ale dopiero po sprawdzeniu port-mix EX4000/EX4100/EX4400.
+
+**Przykładowy szkic HLD (nie zlecenie zakupowe):**
+
+~~~mermaid
+flowchart TB
+ WAN1["ISP-A"] --> FW1["SRX pair / HA\nthroughput wg IPS/VPN"]
+ WAN2["ISP-B"] --> FW1
+ FW1 --> CORE1["Core-A\nEX4650 / inny model po capacity"]
+ FW1 --> CORE2["Core-B\nEX4650 / inny model po capacity"]
+ CORE1 --- CORE2
+ CORE1 --> F1["Floor 1 — IDF\nEX4100 1G + EX4400 mGig"]
+ CORE2 --> F1
+ CORE1 --> F2["Floor 2 — IDF\nEX4100 1G + EX4400 mGig"]
+ CORE2 --> F2
+ CORE1 --> F3["Floor 3 — IDF\nEX4100 1G + EX4400 mGig"]
+ CORE2 --> F3
+ F1 --> USERS1["PC / phones / AP / cameras"]
+ F2 --> USERS2["PC / phones / AP / cameras"]
+ F3 --> USERS3["PC / phones / AP / cameras"]
+~~~
+
+**Co jeszcze policzyć zanim oferta zostanie podpisana?** Uplinki 10/25/100G i liczba transceiverów, optyka (SM/MM, trasy, tłumienie), patchcordy, rack space, zasilanie A/B, liczba PSU, redundancy, AP mount kits, Site Survey, NAC i licencje, Mist subscription terms, obsługa firmware, okres support 3/5 lat, spares 1–2 sztuki, access to management cloud, bieżące RMA lead times.
+
+### 1.12.13. Od HLD do BOM — przykładowe kolumny i zapytania do producenta
+
+Do negocjacji z dostawcą nie wystarczy „EX4400 × 10”. **Musisz odróżnić logiczny model urządzenia od konkretnego orderable SKU**. Ten sam EX4400 może mieć inną konfigurację portów, typ zasilania, airflow, wariant optyki i wsparcie PoE.
+
+Praktyczny BOM powinien mieć co najmniej:
+- **Role / layer** (access floor 1, collapsed core A/B, WAN FW A/B, AP Wi-Fi);
+- **Model family + pełny hardware PID/SKU**;
+- **Quantity + spare quantity**;
+- **Port profile** (copper 1G, 2.5/5/10G, SFP+/SFP28, QSFP28) z uzasadnieniem;
+- **PoE** (zasilanie pojedynczego portu, łączny budżet przy redundancji);
+- **Uplinks** (liczba, prędkość, typ transceivera, długość/sztuki);
+- **Power** (PSU, AC/DC, redundancy, power cords, airflow);
+- **License/subscription** (Mist Wired/Wi-Fi/WAN/Access Assurance, security subscriptions, termin i sposób liczenia);
+- **Support & software** (data rozpoczęcia, okres, warunki RMA, sugerowany release, JTs/bugs i testy);
+- **Integration** (NAC, TACACS/RADIUS, DHCP/DNS, Syslog/SIEM, backup, ZTP, cloud egress);
+- **Source & assumptions** (link do specyfikacji, data weryfikacji, status „to confirm”, wycena dystrybutora).
+
+**Nie wymyślaj cen ani zamienników SKU.** Ceny, bundle i dostępność wymagają aktualnego quote od autoryzowanego kanału HPE Juniper Networking. Dopiero wtedy przygotowujesz *price-to-performance* warianty: minimalny, recommended, HA/expandable.
+
+**Pytania do architekta przed podpisaniem HLD:** Czy core ma być L3 boundary czy EVPN border? Czy potrzebujemy „dual-homed” access? Czy cloud-managed switching jest wymaganiem? Czy istniejące Cisco ISE/ClearPass ma zostać? Czy AP tuneluje do Mist Edge? Czy chcemy NAC per klient czy per AP? Czy są wymagania lokalizacji danych i dostępu z chmury? Czy planowane są późniejsze 25/100G? Czy dwa ISP są naprawdę niezależne fizycznie? Czy utrata szafy IDF lub zasilania A eliminuje cały site?
+
+### 1.12.14. Gotchas dla inżyniera Cisco i dla autora oferty — z życia
+
+**Haczyk 1 — EX4100-F ≠ EX4100.** „F” może oznaczać różnice w PSU/fans i możliwościach. Jeśli projekt wymaga redundantnych hot-swappable PSU na access, nie traktuj obu linii identycznie. [EX4100-F Models](https://www.juniper.net/documentation/us/en/hardware/ex4100-f/topics/concept/EX4100-f-models.html).
+
+**Haczyk 2 — EX4400-24X ≠ EX4400-24P.** Jedna rodzina, inne porty i role. Do optical aggregation model „X” to sensowny wybór; do 24 komputerów z PoE sam EX4400-24X może być błędem. [EX4400-24X](https://www.juniper.net/us/en/products/switches/ex-series/ex4400-24x-ethernet-switch/specs.html).
+
+**Haczyk 3 — VC porty mogą być fabrycznie zajęte dla Virtual Chassis.** Uplink QSFP z datasheet nie zawsze jest wolnym zwykłym uplinkiem bez świadomej konfiguracji. W EX4400 porty rear QSFP28 bywają domyślnie VCP, a wariant 24X wymaga określonego trybu. [EX4400 System Overview](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-system-overview.html).
+
+**Haczyk 4 — 48 portów PoE nie oznacza 48 × 90 W.** Liczy się **PoE budget konkretnego PSU**, a także zapas przy awarii jednego zasilacza. [EX4000 datasheet](https://www.juniper.net/gb/en/products/switches/ex-series/ex4000-line-of-ethernet-switches-datasheet.html).
+
+**Haczyk 5 — Mist ≠ Junos na AP.** AP ma osobne firmware; Mist Cloud jest usługą zarządzania, a ruch klientów może mieć local breakout. [Juniper wireless deployment](https://www.juniper.net/documentation/us/en/software/nce/juniper-ai-driven-wired-wireless-network-deployment-guide/wireless_network_deployment_juniper_aps.html).
+
+**Haczyk 6 — Juniper SSR ≠ Junos SRX.** W jednej ofercie na WAN mogą być dwie linie produktów z zupełnie innym systemem i procedurami. [SSR datasheet](https://www.juniper.net/us/en/products/routers/session-smart-router/session-smart-networking-datasheet.html).
+
+**Haczyk 7 — „nowy Junos” ≠ „sugerowany Junos”.** Gdy EX4400 ma suggested 24.4R2-Sx, nie wybieraj automatycznie 26.2 tylko dlatego, że 26.2 istnieje w kalendarzu wydań. [JTAC KB21476](https://supportportal.juniper.net/s/article/Junos-Software-Versions-Suggested-Releases-to-Consider-and-Evaluate).
+
+**Haczyk 8 — Evolved to inny software.** QFX5130 w campusie może wymagać obrazów Junos OS Evolved, podczas gdy EX4650 klasycznych Junos. [QFX5130](https://www.juniper.net/documentation/us/en/hardware/qfx5130/topics/topic-map/qfx5130-system-overview.html).
+
+**Haczyk 9 — porty access w BOM nie są zamienne 1:1.** Port 1G non-PoE nie zasili nowego AP Wi-Fi 7, a szybki uplink 100G nie musi być dostępny jako normalny port w obecnym trybie Virtual Chassis. Podziel port count na klasy.
+
+**Haczyk 10 — Cloud assurance to nie dowód licencji NAC.** Wired Assurance monitoruje działanie, a **Mist Access Assurance** jest oddzielną usługą NAC/licencjonowania klientów. [Access Assurance](https://www.juniper.net/documentation/us/en/software/mist/mist-access/mist-access.pdf).
+
+### 1.12.15. Zestaw dokumentów, z których korzystasz przy każdym greenfield
+
+Najpierw **Validated Designs** dla architektury kampusowej (jak połączyć urządzenia), potem **Datasheet + Hardware Explorer** dla SKU/portów, następnie **Feature Explorer** dla funkcji w konkretnej wersji, wreszcie **JTAC Suggested Releases i Release Notes** dla wdrożenia.
+
+- [Juniper Campus Fabric design & supported models](https://www.juniper.net/documentation/us/en/software/mist/mist-wired/topics/concept/choose-campus-fabric-topology.html)
+- [Juniper Campus migration HLD](https://www.juniper.net/documentation/us/en/software/mist/mist-wired/topics/concept/migrate-to-campus-fabric.html)
+- [Juniper AI-Driven Wired/Wireless Deployment Guide](https://www.juniper.net/documentation/us/en/software/nce/juniper-ai-driven-wired-wireless-network-deployment-guide/juniper-ai-driven-wired-wireless-network-deployment-guide.pdf)
+- [EX4000 datasheet](https://www.juniper.net/gb/en/products/switches/ex-series/ex4000-line-of-ethernet-switches-datasheet.html)
+- [EX4100/EX4400 models](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/concept/ex4400-models.html)
+- [EX4650 specs](https://www.juniper.net/us/en/products/switches/ex-series/ex4650-campus-aggregation-and-core-switch/specs.html)
+- [QFX5130 OS and ports](https://www.juniper.net/documentation/us/en/hardware/qfx5130/topics/topic-map/qfx5130-system-overview.html)
+- [Juniper AP portfolio](https://www.juniper.net/us/en/products/access-points.html)
+- [SRX portfolio](https://www.juniper.net/us/en/products/security/srx-series.html/)
+- [SSR datasheet](https://www.juniper.net/us/en/products/routers/session-smart-router/session-smart-networking-datasheet.html)
+- [JTAC KB21476 (recommended to consider/evaluate)](https://supportportal.juniper.net/s/article/Junos-Software-Versions-Suggested-Releases-to-Consider-and-Evaluate)
+- [Junos OS EoE/EoS](https://support.juniper.net/support/eol/software/junos/)
+- [SSR software milestones](https://support.juniper.net/support/eol/software/ssr/)
+- [Juniper Hardware Compatibility Tool](https://apps.juniper.net/hct/)
+- [Juniper Feature Explorer](https://apps.juniper.net/feature-explorer/)
+
+### 1.12.16. Najważniejsza umiejętność po tym podrozdziale
+
+Nie musisz pamiętać na pamięć, czy EX4100 ma 4 czy 6 konkretnych uplinków w każdym wariancie. Masz wiedzieć, **której rodziny i modelu poszukać, jakie pytanie zadać przed wyborem i gdzie sprawdzić szczegóły**, oraz rozpoznać typowe pułapki:
+
+- Access EX4000/EX4100/EX4400 i mGig PoE dla AP.
+- Collapsed core EX4400-24X albo EX4650 po capacity/HA.
+- Campus core QFX/EX4650/EX9200 zgodnie ze skalą.
+- Perimeter SRX, SD-WAN SSR (nie Junos), WAN routing MX tam, gdzie to uzasadnione.
+- Wi-Fi Mist AP + cloud assurance, opcjonalny Mist Edge zależnie od przepływu.
+- Aktualny rekomendowany release **per model** z oficjalnej KB, nie „najnowszy Junos”.
+
+**Ćwiczenie projektowe:** na podstawie case study 320 użytkowników przygotuj dwa HLD i dwa warianty orientacyjnego BOM: (A) traditional/collapsed core, (B) EVPN multihoming. Dla każdego pokaż port/PoE distribution per IDF, uplinks, dwa scenariusze failover, policy/ZTP/Mist, rozliczenie support i oddzielne listy ryzyk. **Nie dobieraj finalnych SKU i cen bez RF survey i wywiadu z klientem.**
+
+---
+
+## 1.RECAP. Miejsce tego rozdziału w pełnym podręczniku
+
+Punkty **1.1–1.11** to powtórka fundamentów JNCIA-Junos. **1.12 [EXT] to dodatkowy warsztat portfolio i greenfield**, który pomaga inżynierowi pracować przy rzeczywistych projektach i ofertach. Nie jest literalnym podpunktem blueprintu JNCIA, JNCIS ani JNCIP.
+
+Dalej: **rozdział 2** w tym repozytorium rozkłada na części działanie Junos OS, RE/PFE, transit i exception traffic. Po jego przejściu łatwiej zrozumieć, dlaczego EX i SRX mogą obydwa uruchamiać Junos, a jednak odpowiadać za inne funkcje architektury. Rozdziały **14–21** rozwijają switching, HA, 802.1X, CoS i EVPN.
+
+**Granica poprawności:** tu uczymy się shortlistingu i projektowania. Przed rzeczywistym przetargiem trzeba uzyskać **autoryzowany current BOM/quote** i potwierdzić kompatybilność funkcji, licencji, dostępność hardware i wersji Junos.
+
+**Blueprint:** 1.1–1.11 [A] oraz 1.12 [EXT] — praktyczne portfolio producenta i greenfield networking.
