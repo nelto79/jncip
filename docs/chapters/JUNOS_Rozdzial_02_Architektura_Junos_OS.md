@@ -648,6 +648,37 @@ show security flow statistics
 
 Gdy zobaczysz tryb **flow based**, spodziewaj się konieczności badania sesji, stref i polityk. Jeśli rzeczywisty system działa inaczej, nie zmieniaj globalnego trybu forwarding „żeby zgadzał się z podręcznikiem”. Zidentyfikuj wersję i zamierzony sposób działania labu.
 
+### Haczyk: \`reject\` i \`discard\` — dwa różne sposoby powiedzenia „nie”
+
+Wyobraź sobie dwa budynki z zamkniętym wejściem. Przy pierwszym recepcjonista mówi: „Nie wejdziesz, wejście zamknięte”. Przy drugim nie ma nikogo; dzwonisz i nikt nie odpowiada. W obu przypadkach nie wejdziesz, ale dla odwiedzającego rezultat **diagnostycznie wygląda inaczej**.
+
+W Junos trasa z akcją **\`reject\`** odrzuca ruch i może wygenerować odpowiedni komunikat ICMP unreachable. Trasa z **\`discard\`** odrzuca ruch **bez takiej odpowiedzi**. To nie tylko kwestia nazwy: przy \`discard\` klient może obserwować timeout, a przy \`reject\` może otrzymać wyraźniejszy sygnał nieosiągalności (zależnie od filtrów, limitów i platformy).
+
+**Urządzenie: R1-vSRX — configuration mode; wyłącznie demonstracja w izolowanym LAB, nie wykonuj obu na tej samej sieci**
+
+~~~junos
+set routing-options static route 203.0.113.0/24 reject
+~~~
+
+**Urządzenie: R1-vSRX — wariant alternatywny, nie równocześnie z powyższą trasą**
+
+~~~junos
+set routing-options static route 203.0.113.0/24 discard
+~~~
+
+**Urządzenie: R1-vSRX — operational mode**
+
+~~~junos
+show route 203.0.113.0/24 exact
+show route forwarding-table destination 203.0.113.1
+~~~
+
+Nie stosuj tego do istniejących tras firmowych — takie polecenia celowo niszczą osiągalność prefiksu! **Na pamięć:** \`reject\` = drop z sygnalizacją, \`discard\` = cichy drop. **Do zrozumienia:** wynik ping lub traceroute zależy od rodzaju nieosiągalności, nie tylko od samego routingu.
+
+Cisco-pomost: pamiętasz **Null0 / black-hole route**? W Junos domyślny mechanizm cichego odrzucenia odróżnia się od jawnego reject, a szczegóły generowania ICMP należy interpretować osobno.
+
+[Juniper CLI Reference — static route: reject/discard](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/static-edit-routing-options.html).
+
 ### 2.4.3. Najdłuższy prefiks — dlaczego 140 nie pojedzie „dowolną drogą”
 
 Ustalmy sytuację.
@@ -938,6 +969,28 @@ flowchart LR
 
 To samo już znasz z Cisco: SSH do loopback ostatniego ISR jest zwykłym ruchem routowanym na wcześniejszych hopach. **Klasa ruchu nie zależy od portu TCP 22, tylko od roli danego urządzenia w ścieżce.** Na SRX będzie to też decydować, czy analizujesz security policy tranzytową, czy zezwolenie na usługę lokalną.
 
+### Haczyk SRX: „ten sam security zone” nie gwarantuje automatycznego permit
+
+Pracując z Cisco C9500, łatwo pomyśleć: „Jeśli oba interfejsy są w tej samej zaufanej grupie, ruch po prostu przejdzie”. **Na SRX tego nie zakładaj.**
+
+Dla ruchu przekazywanego między interfejsami SRX **również w obrębie tej samej strefy** obowiązuje polityka bezpieczeństwa. W naszym labie cztery routery używają strefy \`LAB\`, ale potrzebujemy świadomie skonfigurowanej reguły **from-zone LAB to-zone LAB**.
+
+Jest jednak haczyk w drugą stronę. **Fabryczny SRX300 z domyślną konfiguracją \`trust\`/\`untrust\` może już mieć zainstalowane reguły zezwalające \`trust → untrust\` oraz określony ruch w \`trust\`.** To nie jest dowód, że każdy SRX i każdy vSRX ma globalną zasadę *permit by default*. To efekt konkretnej fabrycznej konfiguracji, której obecność sprawdzamy, a nie zakładamy.
+
+**Urządzenie: R1-vSRX — operational mode**
+
+~~~junos
+show configuration security policies | display set
+show security policies
+show security zones
+~~~
+
+**Zapamiętaj:** *brak jawnej polityki w Twoim przykładzie* oraz *istnienie fabrycznej polityki w urządzeniu* to dwie różne sytuacje. Nie ucz się ani reguły „intra-zone zawsze pozwala”, ani „każdy SRX zawsze blokuje trust-to-untrust”.
+
+**Cisco-pomost:** na Catalyst inter-VLAN routing bez ACL może po prostu działać, a na ASA/FTD stanowe reguły określają przepływy. SRX porównuj więc do stateful firewalla, nie tylko do SVI.
+
+Źródła: [Juniper Security Policies Overview](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html) i [fabryczne zasady SRX300](https://www.juniper.net/documentation/us/en/guided-setup/branch-srx-gs/topics/topic-map/step-1-p1-verify_defaults.html).
+
 ### 2.5.4. Transit na SRX: jeszcze jeden warunek
 
 Pamiętasz kontrolę na moście z sekcji 2.4? Właśnie tu ona działa.
@@ -1070,6 +1123,34 @@ Przykłady problemów i wyjątków:
 
 Zadanie inżyniera: rozpoznać **dlaczego taki pakiet może trafić do innej ścieżki** i jaki będzie efekt dla działania sieci.
 
+### Haczyk: zezwolenie na \`ping\` w strefie nie zawsze oznacza zezwolenie na konkretnym interfejsie
+
+Wyobraź sobie, że administrator wstawił duży napis przy wejściu do kompleksu: „Można dzwonić domofonem”. Ale przy drzwiach do jednego budynku lokalna instrukcja mówi: „Tu tylko SSH”. Która zasada obowiązuje przy tych drzwiach?
+
+Na SRX **host-inbound-traffic zdefiniowane na poziomie interfejsu ma pierwszeństwo przed ustawieniami na poziomie security zone**. Czyli włączenie \`system-services ping\` dla całej strefy nie musi sprawić, że każdy interfejs odpowie, jeśli istnieje własna definicja usług na konkretnym interfejsie.
+
+**Urządzenie: R1-vSRX — operational mode**
+
+~~~junos
+show configuration security zones | display set
+show security zones
+~~~
+
+Następny, często egzaminacyjnie podchwytliwy detal: **\`system-services\` i \`protocols\` w \`host-inbound-traffic\` nie są tą samą listą**. Ping/SSH to usługi; BGP/OSPF to protokoły sterujące. Jeżeli na SRX nie zestawia się BGP, samo dopuszczenie transit TCP/179 nie oznacza jeszcze, że zaakceptowano lokalny BGP.
+
+**Urządzenie: R1-vSRX — configuration mode; przykład pojedynczego interfejsu LAB**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/0.0 host-inbound-traffic protocols bgp
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+~~~
+
+**Uwaga:** przykład BGP nie konfiguruje samego peeringu ani nie jest potrzebny do laboratorium rozdziału 2. Nie uruchamiaj go bez przygotowania odpowiedniej konfiguracji protokołu.
+
+**Do zapamiętania:** interfejsowa definicja host-inbound ma pierwszeństwo przed definicją dla strefy; \`protocols bgp\` nie jest synonimem \`system-services ping\`.
+
+Źródła: [Juniper SRX Management Access — zone vs interface](https://supportportal.juniper.net/s/article/SRX-Getting-Started-Configure-Management-Access) oraz [Juniper BGP Overview — host-inbound protocols bgp](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/bgp-overview.html).
+
 ### 2.6.3. Dlaczego ping do bramy może nie działać, choć router doskonale routuje
 
 Pamiętasz dwa scenariusze z początku rozdziału? Teraz potrafisz je rozdzielić.
@@ -1162,6 +1243,29 @@ Oficjalna [referencja \`monitor traffic\`](https://www.juniper.net/documentation
 Jeżeli na MX/QFX chcesz zbadać zwykły transit, dobierz odpowiednie dla modelu **port mirroring/analyzer, liczniki i narzędzia PFE**. W naszym vSRX przydatne będą dodatkowo **security flow sessions**. W obu przypadkach nie opieraj diagnozy na pojedynczym, nieobecnym pakiecie w capture po stronie RE.
 
 Uwaga operatorska: dokumentacja Junipera ostrzega, że monitoring może wpływać na wydajność; eksperymentuj w izolowanym labie i ograniczaj \`count\`.
+
+### Haczyk: \`fxp0\` jest interfejsem management, ale nie zawsze ma własną tablicę routingu
+
+Masz intuicję z Cisco: **dedicated management port** albo \`Mgmt-vrf\` oddzielają ruch operatora od sieci użytkowników. W Junos fizyczny \`fxp0\` to zwykle interfejs zarządzający, ale **nie utożsamiaj samego dedykowanego portu z automatycznym istnieniem niezależnego VRF**.
+
+Dokumentacja Junipera wyjaśnia, że bez dedykowanego management routing instance ruch management może korzystać z domyślnej instancji \`inet.0\`. Dopiero odpowiednia konfiguracja **\`management-instance\`** pozwala logicznie odseparować routing zarządzania, jeśli model i release ją obsługują.
+
+Możesz więc mieć SSH dostępne przez \`fxp0\`, a mimo to doświadczyć problemu spowodowanego wyborem trasy w domyślnej tablicy. To nie jest sprzeczność: dedykowany port fizyczny i dedykowany routing instance to **dwa różne pojęcia**.
+
+**Urządzenie: R1-vSRX — operational mode; sprawdź obsługę komend na swoim obrazie**
+
+~~~junos
+show interfaces terse | match fxp0
+show configuration system management-instance
+show route table inet.0
+show route table mgmt_junos.inet.0
+~~~
+
+Nie zmieniaj globalnie \`management-instance\` w działającym środowisku bez planu odtworzenia dostępu — takie zmiany mogą odciąć SSH i monitoring.
+
+**Cisco-pomost:** osobny port \`GigabitEthernet0/0\` na routerze nie jest automatycznie tym samym co umieszczenie go w \`Mgmt-vrf\`. Najpierw sprawdzasz model separacji, potem projektujesz routing.
+
+Źródło: [Juniper — Management Interface in a Dedicated Instance](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/topic-map/management-interface-in-non-default-instance.html).
 
 ### 2.6.7. Jak chroni się control plane
 
