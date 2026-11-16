@@ -1700,6 +1700,28 @@ exit
 
 **Co właśnie udowodniłeś?** Ruch host-bound i transit nie są tym samym.
 
+### Haczyk praktyczny: zmiana security policy nie zawsze działa na istniejące sesje tak samo
+
+Znasz to z Cisco ASA/FTD: zmieniłeś ACL lub politykę, nowy ruch jest blokowany, ale stary flow potrafi zachowywać się inaczej. **Na Junos SRX ważne jest, jakiej dokładnie zmiany dokonałeś**, a nie tylko, że nacisnąłeś commit.
+
+Juniper rozróżnia dwie sytuacje:
+
+- **Zmiana warunków już istniejącej polityki:** funkcja \`policy-rematch\` jest **domyślnie wyłączona**, więc nie zakładaj automatycznej ponownej kontroli wszystkich istniejących sesji po każdej edycji. Nowa sesja i istniejąca sesja mogą mieć inny rezultat.
+- **Usunięcie, dezaktywacja lub zmiana nazwy polityki, do której należy sesja:** dokumentacja podaje, że **domyślnie taka aktywna sesja jest zamykana**. Opcja \`policy-rematch extensive\`, jeśli jest obsługiwana i świadomie skonfigurowana, może przeanalizować istniejące sesje ponownie, aby sprawdzić, czy pozwala na nie inna polityka.
+
+To ważne, ponieważ nasze ćwiczenie poniżej używa **\`deactivate policy ALLOW-LAB\`**, a nie jedynie zmiany jej adresów źródłowych. W tym eksperymencie nie oczekuj, że stary flow musi trwać aż do timeoutu — domyślnie może zostać usunięty natychmiast.
+
+**Urządzenie: R1-vSRX — operational mode**
+
+~~~junos
+show configuration security policies | display set
+show security flow session source-prefix 192.0.2.10/32
+~~~
+
+**Zapamiętaj metodę, nie samą flagę:** przed i po zmianie porównaj definicję policy, konfigurację \`policy-rematch\`, wynik \`show security flow session\` i zachowanie **nowego połączenia**. Nie czyść wszystkich sesji tylko po to, żeby „sprawdzić, co się stanie”, jeśli urządzenie nie jest izolowanym labem.
+
+Źródło: [Juniper CLI Reference — policy-rematch](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/security-edit-policy-rematch.html). Nie kopiuj automatycznie \`policy-rematch extensive\` do produkcji: zmienia semantykę obsługi sesji, a dostępność zależy od wersji i platformy.
+
 ### 2.LAB.12. Kontrolowana awaria B — router odpowiada, ale nie przepuszcza hostów
 
 Teraz odwrócimy sytuację. R1 ma nadal odpowiadać na ping do własnego interfejsu, ale nowy ruch tranzytowy PC-A → PC-B ma zostać zablokowany.
@@ -1721,7 +1743,7 @@ ping 192.0.2.1
 ping 198.51.100.10
 ~~~
 
-**Przewidywanie:** ping do R1 odpowie, ale nowa sesja PC-A → PC-B zostanie zablokowana przez brak pasującego permit. Uwaga: **istniejąca sesja SRX może jeszcze przez pewien czas działać** po zmianie policy. Dlatego do wiarygodnego testu użyj nowego strumienia albo poczekaj na wygaśnięcie właściwej sesji. Nie kasuj wszystkich sesji produkcyjnego SRX.
+**Przewidywanie:** ping do R1 odpowie, ale nowa sesja PC-A → PC-B zostanie zablokowana przez brak pasującego permit. Przy **dezaktywacji polityki** Juniper opisuje domyślne **zamknięcie sesji związanych z tą polityką**; nie myl tego z edycją warunków aktywnej polityki, po której bez `policy-rematch` istniejące sesje mogą zachowywać dotychczasowy stan. Sprawdź stan sesji przed i po zmianie, zamiast opierać się na samym ping. Nie czyść wszystkich sesji produkcyjnego SRX.
 
 **Urządzenie: R1-vSRX — tryb operational, kontrola laboratoryjna**
 
