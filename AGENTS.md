@@ -69,3 +69,12 @@ Użytkownik **nie chce encyklopedycznego materiału ani zestawu tabel do wykucia
 - Każda grafika ma mieć (a) związek z dokładnie omawianym problemem, (b) wyjaśnienie przed i po, (c) tekst alternatywny, (d) właściwą atrybucję i licencję. Zero przypadkowych obrazów dekoracyjnych.
 - Utrzymuj dokument źródeł grafik: docs/visuals/IMAGE_SOURCES.md. Rozróżniaj grafiki zewnętrzne hotlinkowane z Wikimedia od obrazów przechowywanych lokalnie. Nie twierdź, że pobrano plik do repo, jeżeli jest tylko link zewnętrzny.
 - Odróżniaj sprzętowe platformy Cisco (Catalyst/QFP/ASIC), MX/EX/QFX i wirtualny vSRX. Cisco CEF i Junos PFE mają analogiczne cele, lecz nie identyczną implementację.
+
+## Integracja oficjalnych pytań i problemów z materiałami lekcyjnymi
+
+- Gdy użytkownik prosi o pytania egzaminacyjne, **najpierw zbadaj jawne źródła**: oficjalne Juniper/HPE practice exams (z dostępem tylko tam, gdzie faktycznie możliwy), pytania po webcastach, dokumentację Day One, Juniper CLI Reference, FAQ/KB oraz dyskusje inżynierów.
+- Oddziel trzy kategorie: **(1) pytanie rzeczywiście opublikowane w źródle**, **(2) temat/diagram producenta z pytaniem sformułowanym przez autora**, **(3) własne ćwiczenie laboratoryjne**. Nie przedstawiaj przykładów własnych jako prawdziwych pytań egzaminacyjnych.
+- **Nie kopiuj całych banków pytań ani wielu zadań z komercyjnych i nieautoryzowanych źródeł.** Oficjalny practice exam może wymagać interaktywnego uruchomienia; nie twierdź, że odczytałeś pytania, jeśli widoczna była tylko strona opisowa.
+- **Wyjaśnienie odpowiedzi ma być wplecione w wykład** w sekcji omawiającej daną mechanikę, a nie dodane jako osobny spis źródłowych Q&A na końcu. Buduj z tego mini-scenariusz: problem → przewidywanie → przyczyna → mechanizm → skutek → weryfikacja CLI → odniesienie do Cisco.
+- Zostaw link do pierwotnego materiału przy właściwym wyjaśnieniu. Pochodzenie kwerendy i wersji dokumentuj osobno dla autorów, np. docs/research/CH02_OFICJALNE_PYTANIA_I_POCHODZENIE_ZRODEL.md.
+- Pytania z forów są wskazówkami dydaktycznymi, **nie autorytatywną odpowiedzią techniczną**; rozwiązania konfrontuj z dokumentacją Juniper i odpowiednią wersją platformy.
