@@ -16,6 +16,7 @@ Własny podręcznik i repozytorium laboratoriów do nauki **JNCIA-Junos (JN0-106
 - JNCIA i JNCIS stanowią podstawę; wspólne rozdziały rozwijają temat do JNCIP.
 - Rozdział 2 (wersja wizualna, 16 listopada 2026) zawiera liczne analogie Cisco IOS XE ↔ Junos, diagramy Mermaid i grafiki JPG/PNG z legalnymi licencjami, obok lekcji RE/PFE, laboratoriów 4×vSRX i troubleshootingu.
 - [Źródła grafik, autorzy i licencje](docs/visuals/IMAGE_SOURCES.md) — osobna dokumentacja mediów.
+- [Pochodzenie pytań i kwerenda oficjalnych źródeł JNCIA/Junos](docs/research/CH02_OFICJALNE_PYTANIA_I_POCHODZENIE_ZRODEL.md) — notatka dla autora i Codexa; wyjaśnienia zawarto wewnątrz rozdziału 2.
 - [Archiwum oryginalnego rozdziału 2 v1](docs/archive/JUNOS_Rozdzial_02_Architektura_Junos_OS_v1_2026-11-15.md) pozostaje dostępne do porównania.
 - Pierwsza topologia: **4 × vSRX + 2 × VPCS**, cztery połączenia tworzące romb (dwie trasy do sieci zdalnej).
 - Najpierw statyczny routing i analiza ścieżki; protokoły dynamiczne w kolejnych lekcjach.
