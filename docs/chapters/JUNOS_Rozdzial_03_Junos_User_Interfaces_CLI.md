@@ -1969,3 +1969,98 @@ Uznaj rozdział za opanowany, jeśli potrafisz **bez notatek**:
 
 Jeśli nie potrafisz, nie ucz się na pamięć kolejnej tabeli. Wróć do eksperymentów A, B, D i E, zadaj sobie pytanie „**co zostało zatwierdzone, a co jeszcze nie?**”, i sprawdź hipotezę.
 
+
+
+---
+
+## 3.REF. Ściąga operatorska — dopiero po zrozumieniu mechanizmów [EXT]
+
+Gdy czytasz tabelę poniżej, nie traktuj jej jak listy do wykucia. To mapa pytań, które pojawiają się przy nocnym change'u: **co obserwuję, co edytuję, co porównuję, co zatwierdzam i jak wracam?** Odpowiedzią na każde pytanie jest konkretne polecenie.
+
+| Pytanie inżyniera | Polecenie/rodzina | Najważniejszy haczyk |
+|---|---|---|
+| Który tryb CLI? | prompt \`>\` / \`#\` | Uprawnienia nie wynikają z samego promptu |
+| Czy inni operatorzy pracują? | \`show system users\`, \`status\` | Shared candidate może zawierać cudze zmiany |
+| Jak wejść do edytora? | \`configure\`, \`configure private\`, \`configure exclusive\` | Private nie izoluje od zmian active przez innych |
+| Jak poruszać się po konfiguracji? | \`edit\`, \`up\`, \`top\`, \`exit\` | \`exit\` zależy od poziomu |
+| Jak sprawdzić operational bez wychodzenia? | \`run show ...\` | Nie każde operational show jest obsługiwane przez \`run\` |
+| Jak znaleźć składnię? | \`?\`, \`Tab\`, \`help apropos\` | Zależność od platformy/release |
+| Jak skrócić wyjście? | \`match\`, \`except\`, \`find\`, \`last\` | \`find\` pokazuje kontekst po pierwszym trafieniu |
+| Ile mam rekordów? | \`pipe count\` | **Liczy linie, nie trasy** |
+| Jak zobaczyć konfigurację jako set? | \`display set\` | Dotyczy konfiguracji, nie wszystkich operational show |
+| Jak sprawdzić dziedziczenie? | \`display inheritance\` | Widok lokalny może być niekompletny |
+| Jak dopisać/wycofać statement? | \`set\`, \`delete\`, \`activate\`, \`deactivate\` | \`delete\` gałęzi może usunąć cały interfejs |
+| Jak załadować plik set? | \`load set\` | Nie używaj \`override\` do fragmentów |
+| Jak wczytać fragment drzewa? | \`load merge\`, \`load replace\` | \`replace:\` decyduje o zakresie zastąpienia |
+| Jak zastąpić cały config? | \`load override\` | Bardzo wysokie ryzyko utraty management |
+| Jak porównać candidate? | \`show | compare\` | Plus/minus nie gwarantuje poprawności projektu |
+| Jak sprawdzić zapisane wersje? | \`show system commit\`, \`show system rollback\` | \`rollback n\` ładuje candidate |
+| Jak sprawdzić config? | \`commit check\` | **Po commit confirmed może potwierdzić zmianę** |
+| Jak warunkowo wdrożyć zmianę? | \`commit confirmed N\` | Test usług przed \`commit\` |
+| Jak przywrócić stary config? | \`rollback 1\`, \`rollback rescue\` | Zwykle wymaga kolejnego commit |
+| Jak zapisać plik roboczy? | \`save /var/tmp/...\` | Save ≠ commit, local file ≠ off-device backup |
+
+**Dodatkowe pojęcie dla poziomu Professional:** \`commit and-quit\` to wygodna forma zatwierdzenia i opuszczenia configuration mode po sukcesie. Z uwagi na to, że w jednej chwili aktywuje zmianę, **nie wybieraj jej zamiast \`commit confirmed\` przy ryzykownym zdalnym change'u**.
+
+**Urządzenie: R1-vSRX — Configuration Mode, przykład polecenia do świadomego użycia po pełnej weryfikacji**
+
+~~~junos
+commit and-quit
+~~~
+
+---
+
+## 3.SOURCES. Dokumentacja, pytania i ograniczenia materiału
+
+**Wszystkie linki poniżej są oficjalnymi źródłami Juniper/HPE, poza nazwanymi analogiami Cisco i autorskimi scenariuszami.** Dokumentacja potwierdza semantykę mechanizmów; nie oznacza, że każdy fragment jest dostępny we wszystkich rodzinach sprzętu. W szczególności **żadna przykładowa komenda z tej lekcji nie została tutaj zweryfikowana na uruchomionym vSRX**.
+
+1. [CLI Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-overview.html) — rola CLI i tryby.
+2. [CLI Configuration Mode Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-configuration.html) — hierarchia i polecenia edycyjne.
+3. [Overview of the Configure Command](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configure-command.html) — shared/private/exclusive, update i konflikty.
+4. [CLI Environment Settings](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-environment-settings.html) — screen-length, autocomplete, prompt.
+5. [help CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/help-mode-operation.html) — help apropos, topic i reference.
+6. [pipe CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/pipe.html) — match, except, find, count, compare.
+7. [show | display CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-pipe-display.html) — set/inheritance/XML/JSON.
+8. [Configuration Groups](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html) — widok dziedziczonych statementów.
+9. [Modifying Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/modifying-configuration.html) — copy, rename, replace pattern.
+10. [load CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/load.html) — set, merge, override, replace, update, patch.
+11. [Loading Configuration Files](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-config-files-loading.html) — plik, terminal, relative i replace.
+12. [save Configuration Mode](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/save-cli-config.html) — zapisywanie konfiguracji jako ASCII.
+13. [Filtering Operational Command Output](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/filtering-operational-command.html) — compare, pipe i kontekst.
+14. [rollback CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/rollback.html) — numeracja i zakres.
+15. [show system rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-rollback.html) — bezpieczny odczyt i porównania historii.
+16. [show system commit](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-commit.html) — historia, pending rollback.
+17. [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html) — confirmed, check, at, comment, synchronize.
+18. [Commit the Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html) — model candidate/active.
+19. [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html) — tworzenie i przywracanie.
+20. [J-Web for Firewalls and Switches](https://www.juniper.net/documentation/product/us/en/j-web/) — platformy, pakiety i wydania.
+21. [J-Web secure access](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/secure-web-access-remote-management.html) — HTTPS, certyfikaty.
+22. [J-Web EX Management Access](https://www.juniper.net/documentation/us/en/software/jweb-ex/jweb-ex-application-package/topics/task/ex-series-management-access-j-web.html) — ścieżka GUI.
+23. [J-Web SRX Setup Wizard](https://www.juniper.net/documentation/us/en/software/jweb-srx25.4/jweb-srx/topics/topic-map/j-web-setup-wizard.html) — funkcje GUI dla konkretnego wydania.
+24. [Day One: Exploring the Junos CLI, Second Edition](https://www.juniper.net/documentation/en_US/day-one-books/ExploreJunosCLI_2ndEd.pdf) — przykład uczenia się CLI i commit confirmed; starsze wydanie, nie źródło aktualnej platform-specific składni.
+25. [Day One: Beginner's Guide to Learning Junos](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf) — kontekst szkoleniowy i podstawy rollback.
+
+**Źródła pytań:** zawarte w rozdziale pytania typu „co się stanie?” są **autorskimi zadaniami dydaktycznymi** opartymi na funkcjach potwierdzonych w dokumentacji, nie rzekomo wykradzionymi pytaniami egzaminu. W przypadku JNCIA Practice Exam nie deklaruję odczytu zawartości jego interaktywnego banku. Dla rozdziału 3 źródłem wartościowych gotchas są m.in. szczegółowe opisy \`configure\` i \`commit\`, które zostały przetworzone w scenariusze.
+
+**Ograniczenie ważne dla inżyniera:** przykłady używają standardowego Junos CLI na vSRX jako modelu. Platformy SRX w HA cluster, Virtual Chassis, Junos OS Evolved, wydania z konfiguracją ephemeral/dynamic, FIPS oraz różne pakiety J-Web mogą mieć **inne zachowania albo ograniczenia**. Każdą komendę konfrontuj z właściwym wydaniem i dokumentacją producenta.
+
+---
+
+## 3.END. Końcowa lekcja — czym Junos naprawdę zmienia Twoją pracę?
+
+Wyobraź sobie ponownie godzinę 03:07. Przygotowujesz zmianę w dużej sieci. Masz do wyboru dwa sposoby myślenia.
+
+Pierwszy mówi: „Mam 50 linii do wklejenia. Mam nadzieję, że wszystko zadziała”.
+
+Drugi mówi: „Wiem, jakie **pięć rezultatów** musi być spełnionych, zanim zakończę change: właściwy diff, poprawna walidacja konfiguracji, aktywna sesja zarządzająca, sprawna usługa i udokumentowany rollback”.
+
+Tym drugim sposobem będziemy pracować w Junos.
+
+Nie musisz uczyć się na pamięć kilkuset poleceń. Musisz umieć rozpoznać, **co zmieniasz i czy to już działa**, odróżnić shared candidate od private, sprawdzić wynik przed commit, świadomie użyć \`load\` oraz przewidzieć konsekwencje \`rollback\`.
+
+W następnym rozdziale skonfigurujemy system od początku — konta, uwierzytelnianie, interfejsy management, NTP, syslog i rescue. Teraz masz narzędzia, aby robić to bezpieczniej.
+
+**Blueprint — Rozdział 3: Junos User Interfaces — CLI, konfiguracja i J-Web [A], 3.1–3.10 oraz 3.11 [EXT].**  
+**Stan labu:** PLANNED / not runtime validated.  
+**Plik kanoniczny:** \`docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md\`.
+
