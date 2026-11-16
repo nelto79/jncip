@@ -78,3 +78,19 @@ Użytkownik **nie chce encyklopedycznego materiału ani zestawu tabel do wykucia
 - **Wyjaśnienie odpowiedzi ma być wplecione w wykład** w sekcji omawiającej daną mechanikę, a nie dodane jako osobny spis źródłowych Q&A na końcu. Buduj z tego mini-scenariusz: problem → przewidywanie → przyczyna → mechanizm → skutek → weryfikacja CLI → odniesienie do Cisco.
 - Zostaw link do pierwotnego materiału przy właściwym wyjaśnieniu. Pochodzenie kwerendy i wersji dokumentuj osobno dla autorów, np. docs/research/CH02_OFICJALNE_PYTANIA_I_POCHODZENIE_ZRODEL.md.
 - Pytania z forów są wskazówkami dydaktycznymi, **nie autorytatywną odpowiedzią techniczną**; rozwiązania konfrontuj z dokumentacją Juniper i odpowiednią wersją platformy.
+
+## Obowiązkowa kwerenda gotchas przy każdym rozdziale
+
+**Przed napisaniem lub rozbudową każdego rozdziału wykonaj aktywne wyszukiwanie podchwytliwych zachowań Junos** w oficjalnej dokumentacji Juniper/HPE, CLI Reference, Day One, KB i dyskusjach społeczności. Szukaj zwłaszcza różnic z Cisco IOS/IOS XE, nieintuicyjnych wartości domyślnych, wyjątków platformowych, stanów hidden/inactive, osobnego RE/PFE, sesji SRX, priorytetu konfiguracji, fałszywych wniosków z pojedynczej komendy i zagadnień typowych dla troubleshootingu.
+
+Każdy wartościowy haczyk **wplataj organicznie do właściwej lekcji**, nie zbieraj wszystkich na końcu:
+1. **Znana intuicja Cisco / pytanie egzaminacyjne** — skąd bierze się pomyłka?
+2. **Kontrprzykład Junos** — na której platformie/release i z jakimi ustawieniami?
+3. **Przyczyna i skutek** — co robi pakiet, control plane, PFE, security policy lub sesja?
+4. **CLI i praktyczny dowód** — oznacz hostname nad każdym blokiem komend; porównaj polecenia Cisco ↔ Junos.
+5. **Co zapamiętać** — niewielka reguła/wyjątek, nie kolejne wielostronicowe definicje; odnośnik do zweryfikowanego źródła.
+6. **Scenariusz laboratoryjny**, jeśli da się go bezpiecznie odtworzyć bez modyfikowania produkcyjnych systemów.
+
+**Nie nazywaj własnych scenariuszy prawdziwymi pytaniami z egzaminu.** Pytanie z forum nie jest certyfikowanym twierdzeniem — porównaj je z oficjalnym producentem. Różnice zależne od wydania/jednostki zaznaczaj jawnie. Nie powielaj mitów „default permit/deny” bez rozróżnienia factory-default config i default software behavior.
+
+Dla rozdziału 2 odpowiedni rejestr źródeł: \`docs/research/CH02_GOTCHAS_ZRODLA_I_WERYFIKACJA.md\`. Dla kolejnych rozdziałów prowadź analogiczny krótki rejestr redakcyjny w \`docs/research/\`; finalny uczeń ma spotkać wyjaśnienia **wewnątrz wykładu**, nie osobno na końcu.
