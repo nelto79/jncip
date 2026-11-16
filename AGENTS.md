@@ -60,3 +60,12 @@ Użytkownik **nie chce encyklopedycznego materiału ani zestawu tabel do wykucia
 9. Utrzymuj pełną techniczną precyzję i zakres blueprintu. Nie rezygnuj z głębi, by brzmieć bardziej swobodnie.
 10. Nie kopiuj specyficznego języka konkretnych instruktorów; wzoruj się na wysokiej jakości wyjaśniania, energii, przykładach i stopniowaniu trudności.
 11. Najważniejszy punkt odniesienia stylistycznego: docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md (v2).
+
+## Cisco ↔ Junos: transfer wiedzy oraz ilustracje
+
+- **Każdy rozdział ma regularnie wykorzystywać wiedzę o Cisco IOS/IOS XE**: co użytkownik już zna (RIB/FIB, CEF, C9500 SVI, CoPP, ACL, BGP/OSPF, HA), jaki problem rozwiązuje Junos, jakie są podobieństwa i **gdzie kończy się analogia**. W co najmniej kluczowych sekcjach rozdziału umieszczaj **Most z Cisco** w toku lekcji, nie tylko końcową tabelę.
+- Dla CLI przedstaw **nazwę urządzenia bezpośrednio nad każdym blokiem komend**, osobno Cisco i Junos. Najpierw explain why, potem komendy i expected interpretation. Nie używaj mechanicznego tłumaczenia pojedynczych słów Cisco na Junos.
+- **Ilustracje są wymaganym elementem dydaktyki, kiedy pomagają zobaczyć proces, topologię lub ruch pakietu.** Dodawaj diagramy Mermaid bezpośrednio do Markdown, a odpowiednie JPG/PNG osadzaj z pewnych źródeł z jasno określoną licencją do ponownego wykorzystania.
+- Każda grafika ma mieć (a) związek z dokładnie omawianym problemem, (b) wyjaśnienie przed i po, (c) tekst alternatywny, (d) właściwą atrybucję i licencję. Zero przypadkowych obrazów dekoracyjnych.
+- Utrzymuj dokument źródeł grafik: docs/visuals/IMAGE_SOURCES.md. Rozróżniaj grafiki zewnętrzne hotlinkowane z Wikimedia od obrazów przechowywanych lokalnie. Nie twierdź, że pobrano plik do repo, jeżeli jest tylko link zewnętrzny.
+- Odróżniaj sprzętowe platformy Cisco (Catalyst/QFP/ASIC), MX/EX/QFX i wirtualny vSRX. Cisco CEF i Junos PFE mają analogiczne cele, lecz nie identyczną implementację.
