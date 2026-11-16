@@ -143,6 +143,18 @@ flowchart LR
 
 Źródła techniczne: [Cisco CEF](https://www.cisco.com/c/en/us/td/docs/ios/ipswitch/configuration/guide/convert/ips_cef/cef_basic_config.html) oraz [Juniper forwarding table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
 
+#### Pytanie z prawdziwego webcastu JNCIA: czym właściwie różnią się RE i PFE?
+
+Podczas oficjalnego [webcastu JNCIA-Junos, którego pytania opublikowano w społeczności Junipera](https://community.juniper.net/discussion/do-you-have-questions-about-the-jncia-junos-exam), jeden z uczestników zapytał właśnie o różnicę między Routing Engine i Packet Forwarding Engine. Zamiast podawać dwa hasła ze słownika, przeanalizujmy awarię.
+
+Na Cisco Catalyst 9500, gdy OSPF przelicza topologię, **nie uruchamiasz procesu OSPF oddzielnie dla każdego pakietu**. Control plane przygotowuje trasę, a dataplane/Cisco CEF i ASIC wykorzystują gotowe informacje. W Junos jest podobnie: **RE utrzymuje protokoły, RIB i główną tablicę forwarding, a PFE posiada własną zainstalowaną tablicę do przekazywania zwykłego transit**.
+
+Wyobraź sobie, że proces routingu na RE nie może chwilowo aktualizować tras. Część już zaprogramowanego forwardingu może jeszcze działać, mimo że nowe zmiany topologii nie są prawidłowo obsługiwane. Teraz odwrotnie: CPU i SSH na RE są dostępne, ale dataplane ma usterkę. Użytkownicy nadal mogą stracić połączenia. To **dwie różne awarie**, których nie rozwiążesz jednym „ping działa”.
+
+Uwaga na pułapkę w swobodnych odpowiedziach z forów: stwierdzenie, że „PFE jest podzbiorem RE”, bywa używane jako skrót opisujący pochodzenie tablic. **Nie jest to poprawny uniwersalny opis struktury sprzętowej** — RE i PFE mają odrębne role, a na wielu platformach również odrębne elementy wykonawcze.
+
+Wniosek do zapamiętania: RE przygotowuje i aktualizuje wiedzę sterującą; PFE korzysta z niej podczas przekazywania ruchu. Tak właśnie możesz przełożyć swoje rozumienie Cisco RP/CEF na Junos.
+
 ### 2.1.3. Junos to nie jeden ogromny proces
 
 W Cisco spotkałeś różne procesy i podsystemy IOS XE. Junos również składa się z wyspecjalizowanych usług, często określanych jako **daemons**. Nie musisz znać wszystkich. Na początku poznaj cztery postacie naszej historii.
@@ -282,6 +294,16 @@ show configuration security zones | display set
 Zadaj sobie pytanie: **które z powyższych komend dowodzą, że PC-A rozmawia z PC-B?** Żadna samodzielnie. Właśnie dlatego po nich następuje test end-to-end.
 
 Źródła: [Cisco CoPP na Catalyst](https://www.cisco.com/c/en/us/td/docs/switches/lan/c9000/qos/quality-of-service-configuration-guide/control-plane-policing.html), [Juniper Junos RE forwarding table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
+
+#### Dlaczego dwie płaszczyzny, a nie jeden „superprocesor”?
+
+W rzeczywistym [wątku Juniper Elevate o RE i forwarding engine](https://community.juniper.net/discussion/routing-engine-and-forwarding-engine) zadano między innymi pytanie o powód tego podziału oraz o to, co dzieje się, gdy w forwarding table brak wpisu do sieci docelowej.
+
+Powód jest inżynierski: gdyby pakiety klienta musiały za każdym razem korzystać z tego samego CPU, które obsługuje OSPF, BGP, SSH i konfigurację, gwałtowny wzrost obciążenia użytkowników mógłby zatrzymać aktualizację tras. Rozdzielenie pracy umożliwia szybki forwarding, a control plane zachowuje przestrzeń na zarządzanie topologią. Znasz podobną zasadę z Cisco CEF i ASIC.
+
+Druga część pytania to pułapka. **Jeśli pakiet nie ma użytecznej trasy, nie oznacza to automatycznie, że PFE pośle go do rpd, który wymyśli odpowiedź.** W zależności od platformy, konfiguracji i istniejących wpisów forwarding może nastąpić odrzucenie lub specjalna obsługa. Nie wolno utożsamiać „no route” z „exception to RE”.
+
+Kiedy na Cisco widzisz niekompletną adjacency, nie mówisz: „skoro OSPF działa, to wszystko dobrze”. W Junos stosuj dokładnie ten sam rygor: czy istnieje RIB entry, czy jest właściwy next-hop i czy forwarding może rzeczywiście z niego skorzystać?
 
 ### 2.2.3. Wspólna historia jednego pakietu
 
@@ -527,6 +549,14 @@ Jeśli potrafisz to powiedzieć bez patrzenia w notatki, rozumiesz sens RE. Nie 
 
 ---
 
+#### Pytanie z Juniper FAQ: po co GRES, skoro urządzenie ma zapasowy RE?
+
+W [FAQ Juniper dotyczącym Graceful Routing Engine Switchover](https://supportportal.juniper.net/s/article/EOE-EOL-GRES-FAQ-for-EX-Virtual-Chassis) pojawia się pytanie o powód używania GRES. To odpowiednik sytuacji dobrze znanej z Cisco SSO: **drugi moduł kontrolny w obudowie nie dowodzi jeszcze, że zachowasz forwarding i sesje protokołów**.
+
+Wyobraź sobie dwie dyspozytornie. Druga ma komputery i ludzi, ale jeśli nie ma aktualnej mapy dróg i informacji o pracujących zwrotnicach, samo przeniesienie dyspozytora nie wystarczy. **GRES** na wspieranych urządzeniach Junos służy m.in. do utrzymania informacji kernel/interfejsów i ciągłości forwardingu podczas przełączenia RE; nie oznacza samodzielnie pełnej ciągłości control plane. Do zachowania stanu protokołów na odpowiednich platformach stosuje się wymagane mechanizmy, np. GR lub NSR.
+
+To rozszerzenie pod przyszły rozdział o HA, nie dodatkowa pozycja egzaminu JNCIA. Potwierdza je [dokumentacja Juniper dotycząca GRES](https://www.juniper.net/documentation/us/en/software/junos/high-availability/topics/topic-map/gres-understanding.html). Najważniejsze, byś nie stawiał znaku równości między **backup RE**, **forwarding continuity** i **protocol continuity**.
+
 ## 2.4. Packet Forwarding Engine — co się dzieje z pakietem po podjęciu decyzji? [A]
 
 ### 2.4.1. Kierowca nie musi dzwonić do nawigacji przy każdym skrzyżowaniu
@@ -649,6 +679,24 @@ show pfe route
 ~~~
 
 **Najważniejsze do zapamiętania:** **show route forwarding-table przedstawia master forwarding table na RE, nie gwarantuje pełnego odczytu hardware PFE.** Gdy jesteś na vSRX, realny przesył pakietów potwierdzają również testy end-to-end i **show security flow session**.
+
+#### Prawdziwe pytanie z Juniper Community: dlaczego next-hop ma typ \`hold\`?
+
+Inżynier w [dyskusji o \`hold\` w \`show route forwarding-table\`](https://community.juniper.net/discussion/hold-entry-in-show-route-forwarding-table) trafił na wpis, który nie nadawał się jeszcze do normalnego forwarding, i zapytał o rozwiązanie next-hopu. To znacznie lepszy punkt wyjścia do nauki niż definicja słowa „adjacency”.
+
+Wyobraź sobie, że R1 zna trasę do sieci za R2 i next-hop \`10.12.0.2\`, ale nie zna poprawnego **adresu MAC sąsiedniego R2 na właściwym interfejsie**. Prawidłowy wynik routingu nadal nie daje możliwości przygotowania ramki Ethernet. Na Cisco szukałbyś problemu w CEF adjacency i ARP. W Junos sprawdzisz next-hop type oraz stan ARP/portu.
+
+W dokumentacji Junos typ \`hold\` oznacza oczekiwanie na rozwiązanie next-hopu do odpowiedniego typu, np. unicast. W przykładzie z dyskusji wpis stał się użyteczny po poprawnej odpowiedzi ARP. Nie zakładaj jednak, że każda platforma Junos i każdy vSRX wyświetlają taki stan identycznie.
+
+**Urządzenie: R1-vSRX — tryb operational, przy wspieranej składni**
+
+~~~junos
+show route forwarding-table extensive
+show arp
+show interfaces ge-0/0/0 extensive
+~~~
+
+Szukasz nie „magicznej” komendy, lecz odpowiedzi: który **next-hop** nie został rozwiązany, na jakim VLAN-ie/porcie i co przeszkadza w zdobyciu prawidłowego MAC? Oficjalna [referencja forwarding table Junos](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html) opisuje te typy.
 
 ### 2.4.5. Gdy dataplane ma problem, nie musi umrzeć cały router
 
