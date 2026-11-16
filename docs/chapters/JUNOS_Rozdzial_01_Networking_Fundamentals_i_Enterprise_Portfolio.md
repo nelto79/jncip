@@ -304,6 +304,16 @@ Zanim wpiszesz AP47 do oferty, sprawdź **konkretny wariant antenowy** (np. inte
 
 Źródła: [oficjalne porównanie AP i radia](https://www.juniper.net/documentation/us/en/software/nce/juniper-ai-driven-wired-wireless-network-deployment-guide/wireless_network_deployment_juniper_aps.html) i [portfolio Juniper AP](https://www.juniper.net/us/en/products/access-points.html), [local vs tunneled datapath / Mist Edge](https://www.juniper.net/documentation/us/en/software/nce/juniper-ai-driven-wired-wireless-network-deployment-guide/wireless_network_deployment_juniper_aps.html).
 
+#### Mały szczegół z AP47, który potrafi wysadzić drogi projekt Wi-Fi 7
+
+Na papierze AP47 to znakomity punkt dostępowy. Ale oficjalny [AP47 Deployment Guide](https://www.juniper.net/documentation/us/en/hardware/ap47/ap47.pdf) wyraźnie podaje, że dla **pełnej funkcjonalności** wymaga **IEEE 802.3bt** i pobiera około **29 W**. Przy **IEEE 802.3at** AP może działać, ale **z ograniczeniami** — w określonych warunkach ma zmniejszoną liczbę aktywnych spatial streams/radiów. Czyli sam fakt, że AP wstał i zalogował się do Mist, **nie dowodzi**, że spełni zamówiony profil 4x4.
+
+W dodatku [Juniper opisuje dual-uplink AP47](https://www.juniper.net/documentation/us/en/software/mist/mist-wireless/topics/topic-map/wifi-7-tech-ref.html): jeśli zapewnisz dwa poprawne źródła 802.3bt, można zaprojektować **hitless PoE failover**; przy innych kombinacjach zasilania mogą wystąpić ograniczenia lub restart podczas utraty jednego zasilacza.
+
+**Analogia Cisco:** sama etykieta „Catalyst PoE” na przełączniku nie daje gwarancji, że każde AP Wi-Fi 7 pracuje w pełnym trybie. W BOM liczy się zgodny **standard PoE, budżet przy utracie PSU, liczba portów z właściwą mocą, mGig i wariant radiowy**.
+
+**Pytanie dla projektanta:** kiedy architekt proponuje 18 × AP47 i 18 portów mGig, czy w BOM zapisał też **18 portów z wystarczającym 802.3bt** oraz ich łączny pobór po uwzględnieniu redundancji PSU? Jeśli nie, projekt jest niedokończony.
+
 **Gotcha:** **AP47 nie oznacza „AP na Junos 24.4”**. AP ma firmware zarządzane w Mist, dlatego w matrycy software nie wpisujemy mu Junos OS. W projekcie notujesz osobno **firmware AP**, licencję Mist i release Junos na switchu EX.
 
 ### 1.12.8. SRX — security/WAN edge od małego oddziału po duży campus
