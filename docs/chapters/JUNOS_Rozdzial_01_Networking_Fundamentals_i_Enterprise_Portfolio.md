@@ -204,3 +204,136 @@ PoE+/PoE++ to nie samo „może zasilić AP”. Na BOM podaj wymagany standard i
 
 **Wired Assurance** w Mist daje telemetryczne informacje o użytkownikach, AP/switch portach i Service Level Expectations (SLE). Z Cisco skojarz to z operacyjnym monitoringiem Catalyst Center i Cisco DNA/Catalyst Assurance, ale architektura chmury i wymogi licencyjne są inne.
 
+
+
+### 1.12.5. Distribution i core — kiedy EX4400, a kiedy EX4650 / QFX / EX9200?
+
+W Cisco szybko postawiłbyś granicę: 9300 na access, 9500 na distribution/core, a może 9600 jako modularny core. W Juniperze podobny proces projektowy prowadzi do innych rodzin i wariantów, ale **nie do idealnego mapowania 9300 ↔ EX4400**.
+
+**Małe i średnie biuro — collapsed core.** Masz dwa redundantne urządzenia distribution/core, a do nich połączone access switche. Nie musisz koniecznie budować trzech odrębnych warstw tylko dlatego, że w szkoleniu jest rysunek „3-tier”. Właśnie w takim przypadku **EX4400-24X** ma sens: oferuje **24 × 1/10GbE (SFP/SFP+) oraz 2 × 40/100GbE uplink**, plus obsługiwane moduły uplink — to switch do agregacji/rdzenia, nie ten sam produkt co 24 porty miedziane EX4400-24P. Na większe wymagania 25/100G rozważ **EX4650**.
+
+**Średni lub większy campus — łącza 10/25/100G.** **EX4650-48Y** w 1U oferuje **48 × 10/25GbE oraz 8 × 40/100GbE**. Gdy wiesz, że wiele szaf IDF będzie oddawać 10/25GbE i ma być rezerwa na wzrost, EX4650 jest naturalnym kandydatem do sprawdzenia, ale musisz policzyć pojemność portów i uplinków oraz wymagany model HA. Nie kupujesz 1U „bo jest szybki”; sprawdzasz także, czy potrzebujesz odpowiedniej liczby 1G, 25G czy 100G.
+
+**Duży campus lub fabric z dużą gęstością uplinków.** **QFX5120** ma warianty 25/100G, które oficjalne projekty Junipera wykorzystują w campus core/distribution/services block. **QFX5130** zapewnia wyższą gęstość 100/400G i uruchamia **Junos OS Evolved** — nie kupuj go jak prostego zamiennika EX4650 do biura liczącego 30 osób. **QFX5700** jest również platformą Junos OS Evolved dla wymagających fabric. **EX9200** to rodzina modularna, dla której znaczenie mają chassis, karty, sloty, zasilanie oraz dobór właściwego hardware i wersji — ekonomicznie i operacyjnie inna liga niż fixed EX.
+
+**Dygresja z życia:** klienci często pytają „czy potrzebuję EX9200, bo główny core ma być future proof?”. Odpowiedź nie zależy od nazwy core. Jeśli dwa EX4650 zapewniają wszystkie porty, właściwy failover i wymaganą skalę, modularny chassis może być niepotrzebną komplikacją. Jeśli natomiast sieć wymaga wielu kart liniowych, gęstości 100/400G i skali routingu/fabric, fixed 1U może przestać wystarczać.
+
+| Poziom projektu | Kandydat do rozważenia | Weryfikuj przed BOM |
+|---|---|---|
+| Collapsed core mały/średni site | EX4400-24X | 24×1/10G, 2×40/100G, moduły, model VC/fabric |
+| Distribution/core ze światłowodami 25/100G | EX4650-48Y | 48×10/25G, 8×40/100G, HA/EVPN, PoE **nie dotyczy** |
+| Większy campus services block/aggregation | QFX5120 (odpowiedni wariant) | 10/25/100G, EX/QFX interoperability, EVPN, VC vs ESI-LAG |
+| Wysoka gęstość 100/400G | QFX5130 / QFX5700 | **Junos OS Evolved**, porty i optyka, wymagania fabric |
+| Modularny campus core | EX9200 | chassis i line cards, PFE/RE, redundantne PSU, lifecycle |
+
+Źródła: [EX4400-24X](https://www.juniper.net/us/en/products/switches/ex-series/ex4400-24x-ethernet-switch/specs.html), [EX4650](https://www.juniper.net/us/en/products/switches/ex-series/ex4650-campus-aggregation-and-core-switch/specs.html), [oficjalna lista platform dla Campus Fabric](https://www.juniper.net/documentation/us/en/software/mist/mist-wired/topics/concept/choose-campus-fabric-topology.html), [QFX5130 Junos OS Evolved](https://www.juniper.net/documentation/us/en/hardware/qfx5130/topics/topic-map/qfx5130-system-overview.html).
+
+**Gotcha z Cisco:** *„QFX zawsze = Data Center, EX zawsze = tylko access”* jest nieprawdą. Oficjalna architektura Campus Fabric umieszcza wybrane EX4400 i EX4650 w core/distribution, a QFX5120/QFX5130 również w campusie. Patrz na **konkretny SKU i potrzebne porty**, nie sam prefiks nazwy.
+
+### 1.12.6. Jakie architektury naprawdę proponuje Juniper?
+
+Dla początkującego w Junos dwie rzeczy mogą wyglądać podobnie na diagramie: *dwa core switche i cztery access switche*. Jednak sposób połączenia i konwergencji może być zupełnie inny.
+
+**Tradycyjny campus z access, distribution, core** to coś, co znasz z Cisco. OSPF lub BGP w core, klasyczne VLAN-y i bramy, redundancja przez właściwe protokoły oraz kontrola STP. Jest to nadal użyteczny model organizacyjny i może być odpowiednim HLD.
+
+**Collapsed core / EVPN multihoming** usuwa potrzebę osobnej fizycznej warstwy distribution w mniejszym campuse. Juniper dokumentuje **EVPN multihoming** z redundantnymi uplinkami, które pozwalają ograniczyć zależność od klasycznego STP w szkielecie. Nie oznacza to „STP już nie istnieje” — urządzenia brzegowe i dowolne połączenia L2 nadal wymagają właściwej ochrony przed pętlami. W Cisco intuicyjnym punktem porównania jest redundantny L2 access do pary core/distribution przez MC-LAG/StackWise Virtual/VSS, ale **mechanika EVPN ESI-LAG nie jest tym samym co StackWise**.
+
+**Campus Fabric Core-Distribution (CRB/ERB).** Gdy masz wiele budynków i chcesz operacyjnie kontrolować, gdzie znajdują się bramy VLAN/VRF, Juniper proponuje fabric z osobnymi rolami core, distribution i access. **CRB** (centrally routed bridging) i **ERB** (edge routed bridging) różnią się m.in. miejscem realizacji routingu i gateway. To są decyzje HLD — nie wpisujesz „EVPN” do BOM bez rozstrzygnięcia, gdzie ma kończyć się L2.
+
+**Campus Fabric IP Clos.** Dla większych wdrożeń używa routed underlay i EVPN-VXLAN overlay, ECMP, możliwości segmentacji oraz podejścia wielostopniowego. W zamian wymaga kompetencji BGP/EVPN, monitoringu underlay, planowania VTEP/loopback i zrozumienia sieci overlay. Dla 2 szaf na jednym piętrze taka złożoność może być zbędna.
+
+~~~mermaid
+flowchart LR
+ subgraph TRAD["Tradycyjne 3 warstwy"]
+    C1["Core"] --- D1["Distribution"]
+    D1 --- A1["Access"] 
+ end
+ subgraph COLL["Collapsed core / EVPN multihoming"]
+    C2["Core+Distribution pair"] --- A2["Access VC / ESI-LAG"]
+ end
+ subgraph FAB["Campus IP Clos"]
+    S1["Spine / Core"] --- L1["Leaf / Distribution"]
+    L1 --- A3["Access / Endpoint"]
+ end
+~~~
+
+**Pytanie do architekta:** „Czy potrzebujemy L2 extension między budynkami i host mobility? Kto będzie gateway w każdym VLAN-ie? Jak działa failover, jeśli fizycznie utracimy jeden core?” Bez tych odpowiedzi nazwa „Campus Fabric” nie daje pełnego projektu.
+
+Oficjalne projekty: [topologie Campus Fabric](https://www.juniper.net/documentation/us/en/software/mist/mist-wired/topics/concept/choose-campus-fabric-topology.html), [EVPN multihoming](https://www.juniper.net/documentation/us/en/software/mist/mist-wired/topics/task/campus-fabric-evpn-multi-homing.html), [Core-Distribution](https://www.juniper.net/documentation/us/en/software/mist/mist-wired/topics/task/campus-fabric-core-distribution-configuration.html), [migracja tradycyjnego campus do fabric](https://www.juniper.net/documentation/us/en/software/mist/mist-wired/topics/concept/migrate-to-campus-fabric.html).
+
+### 1.12.7. WLAN: Juniper Mist AP — gdzie jest odpowiednik Cisco WLC 9800?
+
+Tutaj najłatwiej o bardzo kosztowne nieporozumienie. Znasz Cisco 9800: kontroler, profile/tagi WLAN, CAPWAP, central/flex switching, HA SSO. **Nie próbuj szukać „Juniper WLC 9800” w każdej ofercie.** Juniper Mist stosuje inną architekturę zarządzania.
+
+**Mist Cloud** dostarcza zarządzanie, telemetrykę, Wi-Fi Assurance, RF automation, SLE i analitykę. **Mist AP** uruchamia odrębne firmware, a nie Junos. **Ruch klientów może być przekazywany lokalnie** przez AP i LAN zgodnie z SSID/VLAN. Nie musi za każdym razem przechodzić przez chmurę. Jeśli projekt wymaga tunelowania centralnego trafficu do DC/DMZ, stosuje się **Mist Edge**, odpowiednio zaprojektowany i licencjonowany.
+
+**Most z Cisco:** myśl o Cisco 9800 Local/FlexConnect i Catalyst Center/Assurance, ale pamiętaj, że umiejscowienie control/management/data plane oraz operacyjne funkcje Mist Edge mają inny model niż tradycyjny WLC.
+
+Gdy projektujesz nowe biuro, dobór AP zaczynasz od **RF site survey**, a nie od rachunku „1 AP na 70 m²”. O ścianach, źródłach zakłóceń, roamingu i liczbie klientów nie opowie Ci folder sprzedażowy.
+
+Przykładowe dostępne modele:
+- **AP24 / AP34 / AP45(E)**: rodziny **Wi-Fi 6E**; AP24/34 typowo 2×2, AP45 klasa 4×4 i scenariusze wyższej gęstości.
+- **AP36 / AP37 / AP47**: rodziny **Wi-Fi 7**; AP36 i AP37 oferują różne warianty anten i funkcji, AP47 to wysokowydajny 4×4:4 z dedykowanym radiem scanning.
+- **AP64**: Wi-Fi 6E dla odpowiednich instalacji zewnętrznych.
+- **AP66**: Wi-Fi 7 do trudnych warunków indoor/outdoor.
+
+Zanim wpiszesz AP47 do oferty, sprawdź **konkretny wariant antenowy** (np. internal/directional/external), radio 6 GHz w danym regionie, wymagany 802.3bt/PoE, uplink mGig/10G, redundancję uplinków i licencję Mist Wi-Fi Assurance.
+
+Źródła: [oficjalne porównanie AP i radia](https://www.juniper.net/documentation/us/en/software/nce/juniper-ai-driven-wired-wireless-network-deployment-guide/wireless_network_deployment_juniper_aps.html) i [portfolio Juniper AP](https://www.juniper.net/us/en/products/access-points.html), [local vs tunneled datapath / Mist Edge](https://www.juniper.net/documentation/us/en/software/nce/juniper-ai-driven-wired-wireless-network-deployment-guide/wireless_network_deployment_juniper_aps.html).
+
+**Gotcha:** **AP47 nie oznacza „AP na Junos 24.4”**. AP ma firmware zarządzane w Mist, dlatego w matrycy software nie wpisujemy mu Junos OS. W projekcie notujesz osobno **firmware AP**, licencję Mist i release Junos na switchu EX.
+
+### 1.12.8. SRX — security/WAN edge od małego oddziału po duży campus
+
+Wyobraź sobie trzy obiekty:
+- **punkt sprzedaży / mały oddział**, 20 osób, jeden uplink ISP i backup LTE;
+- **średni regionalny site**, 200 osób, dwa ISP i IPS/SSL/segmentation;
+- **duży HQ**, wiele VLAN/VRF, wysokie przepustowości firewall/IPS i wymóg HA.
+
+Nie wybieraj SRX na podstawie samego maksymalnego firewall throughput. To tak, jak wybrać silnik samochodu po prędkości maksymalnej, ignorując spalanie, obciążenie i rodzaj drogi.
+
+**SRX300/SRX320** to małe urządzenia branch (desktop); **SRX340/SRX345** są typowym krokiem wyżej dla większych branch offices; **SRX380** jest wydajniejszym branch/security WAN gateway. W campus/regional HQ masz m.in. **SRX1500, SRX1600, SRX2300, SRX4300**, z zupełnie innymi skalami ruchu, liczby sesji, portów i redundancji.
+
+Kluczowa rzecz przy bidowaniu: datasheet podaje różne wielkości **Firewall / IPS / VPN throughput**. Dla przykładu SRX1600 w oficjalnym zestawieniu osiąga nominalnie **24 Gb/s firewall, 21 Gb/s IPS, 18 Gb/s VPN**; SRX2300 odpowiednio **39 / 35 / 36 Gb/s**. To nie gwarancja identycznej przepustowości przy wszystkich usługach równocześnie i w konkretnym miksie małych pakietów. **Oferta 5 Gb/s ISP przy włączonym IPS musi uwzględniać wynik IPS, nie marketingową liczbę firewall.**
+
+Przykładowe rodziny:
+| Klasa/rola | Modele do porównania | Co zdecydować przed BOM |
+|---|---|---|
+| Mały branch/retail | SRX300 / SRX320 | 1/2 WAN, porty lokalne, VPN, liczba sesji, lifecycle |
+| Średni branch | SRX340 / SRX345 / SRX380 | IPS/VPN, HA, porty WAN, wymagania licencji i zasilania |
+| Regionalny HQ / campus perimeter | SRX1500 / SRX1600 | porty 10/25G, NGFW, redundantne edge |
+| Większy campus | SRX2300 / SRX4300 | wyższy throughput, IPS, porty, skala sesji/HA |
+| Bardzo duży DC/perimeter | SRX4700 / SRX5800 | tylko jeśli uzasadniają to pojemność, interfejsy, model licencji |
+
+**Most z Cisco:** porównujesz do Cisco Secure Firewall / FTD, a nie do Catalyst 9500. Na SRX masz **security zones**, policies, stateful sessions i możliwość routingu. **Routing reachability ≠ security permit** — to utrwalaliśmy w rozdziale 2.
+
+Źródła i parametry: [oficjalna rodzina SRX](https://www.juniper.net/us/en/products/security/srx-series.html/), [WAN Assurance obsługiwane SRX](https://www.juniper.net/us/en/products/cloud-services/juniper-wan-assurance-datasheet.html).
+
+### 1.12.9. A co ze sprzętowym WAN routerem, SSR i MX?
+
+Nie każdy nowy enterprise site potrzebuje osobnego routera WAN przed SRX. Czasem firewall jest też BGP WAN edge. Czasem potrzebujesz **SSR**, aby realizować rozproszony SD-WAN oparty na sesjach. Czasem masz dużą sieć MPLS/interconnect i wybierasz **MX**.
+
+**Juniper SSR** to osobna linia **Session Smart Routing software**, a nie Junos. Przykładowo aktualne dokumenty wymieniają **SSR120 (small branch)**, **SSR130 (medium branch)**, **SSR400/440 (branch-in-a-box)** oraz **SSR1200/1300/1400/1500** do większych lokalizacji/centrów danych. Architektura SSR wykorzystuje inny model routingu i zarządzania niż typowy SRX z Junos. Nie obiecuj klientowi, że inżynier zaloguje się do SSR i zobaczy identyczne \`show route\` jak na SRX.
+
+**MX204/MX304** i większe MX to kierunek na rozbudowane routing edge, enterprise/carrier aggregation, gdzie istotne są protokoły, skalowanie i zaawansowane funkcje WAN. W zwykłym oddziale SRX albo SSR często odpowie lepiej na wymagania biznesowe. Nie przypisuj MX roli access switcha.
+
+**Mist WAN Assurance** może obejmować zarówno SSR, jak i wspierane SRX. Ale to nie oznacza identycznego systemu operacyjnego na obu platformach.
+
+Źródła: [Session Smart Router](https://www.juniper.net/us/en/products/routers/session-smart-router.html), [SSR modele, throughput i pozycjonowanie](https://www.juniper.net/us/en/products/routers/session-smart-router/session-smart-networking-datasheet.html), [Juniper Router portfolio](https://www.juniper.net/us/en/products/routers.html), [WAN Assurance](https://www.juniper.net/us/en/products/cloud-services/juniper-wan-assurance-datasheet.html).
+
+### 1.12.10. Junos, Junos OS Evolved, Mist AP firmware, SSR — cztery różne światy
+
+Można kupić sprzęt jednej firmy i mieć **cztery różne procesy zarządzania oprogramowaniem**.
+
+**Junos OS:** typowo EX4000/EX4100/EX4400/EX4650/EX9200, wiele QFX5120, SRX i MX. Znasz CLI \`show version\`, \`commit\`, \`show route\`.
+
+**Junos OS Evolved:** np. QFX5130 i QFX5700, z własnymi obrazami **-EVO**. Interfejs CLI jest znajomy, ale nie jest to ten sam pakiet systemowy co na EX4400. Nie próbuj ładować obrazu Evolved na klasyczne EX.
+
+**Mist AP firmware:** oprogramowanie punktów dostępowych AP24/AP37/AP47 itd. aktualizowane zgodnie z mechaniką Mist; **nie Junos OS**.
+
+**Session Smart Routing software:** oprogramowanie SSR, którego cykl wydań jest osobny od Junos.
+
+**Mist Cloud, Wired/Wi-Fi/WAN Assurance, Access Assurance** to usługi platformy chmurowej i subskrypcje — nie wymienia się ich „wersji Junos” jak w routerze.
+
+Dla oferty ważny jest więc **rozdział OS/firmware i licencji per rodzina**.
+
