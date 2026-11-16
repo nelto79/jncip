@@ -159,3 +159,308 @@ Przewidywanie: po \`set\` diff będzie zawierał dodany login message; po \`roll
 
 Jeśli nie zniknie — sprawdź, czy edytujesz wspólną konfigurację równocześnie z inną sesją, czy pozostajesz w innym edit level, czy w międzyczasie ktoś wykonał commit.
 
+
+
+---
+
+## 3.3. Nawigacja po hierarchii konfiguracji i poleceniach CLI [A]
+
+### 3.3.1. Dlaczego hierarchia jest wielką zaletą — i pierwszą pułapką inżyniera Cisco?
+
+Na Cisco znasz takie podejście: \`interface GigabitEthernet1/0/12\`, potem \`description\`, \`switchport mode access\`, następnie \`exit\` i kolejna sekcja. W Junos prawie cała konfiguracja jest **drzewem**, a nie jedynie sekwencją poleceń. Zamiast zapamiętać plik od góry do dołu, możesz odnaleźć właściwą **gałąź**: \`system\`, \`interfaces\`, \`routing-options\`, \`protocols\`, \`policy-options\`, \`security\`.
+
+Wyobraź sobie wielki biurowiec, a w nim pokoje. Jeśli przebywasz w pokoju \`[edit interfaces ge-0/0/1]\` i dopisujesz \`set description "UPLINK"\`, to edytujesz **opis tylko tego interfejsu**. Jeżeli z tego miejsca zaczniesz wpisywać \`set system host-name...\`, polecenie nie odwoła się automatycznie do root. W Junos **kontekst ma znaczenie**.
+
+Zobacz najpierw jeden fragment hierarchii. To **przykład struktury**, a nie wynik odczytany z Twojego vSRX.
+
+**Urządzenie: R1-vSRX — przykład widoku Configuration Mode [edit interfaces]**
+
+~~~junos
+interfaces {
+    ge-0/0/1 {
+        description "UPLINK-TO-R2";
+        unit 0 {
+            family inet {
+                address 10.12.0.1/30;
+            }
+        }
+    }
+}
+~~~
+
+\`ge-0/0/1\` to port fizyczny, \`unit 0\` to logiczny interfejs, \`family inet\` określa rodzaj adresowania, a \`address\` konkretną wartość. Dla Cisco intuicyjnie możesz to porównać do interfejsu z adresem L3, ale **Juniper rozdziela interfejs fizyczny, logiczną jednostkę i family**.
+
+Teraz to samo zobaczymy jako polecenia **set**:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
+
+~~~junos
+set interfaces ge-0/0/1 description "UPLINK-TO-R2"
+set interfaces ge-0/0/1 unit 0 family inet address 10.12.0.1/30
+show interfaces ge-0/0/1
+show | compare
+~~~
+
+Jeśli R1 ma już taką adresację od wcześniejszego laboratorium, traktuj te linie jako **odczyt/rekonstrukcję istniejącej konfiguracji**, nie jako bezrefleksyjną zmianę. Prawidłowy workflow zaczyna się od \`show interfaces ge-0/0/1\` oraz sprawdzenia rzeczywistej roli portu.
+
+### 3.3.2. Poruszamy się po drzewie — praktyka zamiast listy pojęć
+
+Wolisz wejść do pokoju i pisać krócej? Tak, ale pamiętaj, gdzie jesteś.
+
+**Urządzenie: R1-vSRX — Configuration Mode, demonstracja na istniejącym interfejsie**
+
+~~~junos
+top
+edit interfaces ge-0/0/1
+show
+up
+top
+show interfaces ge-0/0/1
+~~~
+
+Po \`edit interfaces ge-0/0/1\` prompt powinien wskazywać \`[edit interfaces ge-0/0/1]\`; \`up\` wraca do \`[edit interfaces]\`; \`top\` przenosi do \`[edit]\`. Nie musisz powtarzać pełnej ścieżki, gdy jesteś głęboko zagnieżdżony.
+
+**Haczyk:** \`exit\` **nie zawsze wychodzi z configuration mode**. W zagnieżdżonym miejscu zwykle przechodzi poziom wyżej; dopiero przy \`[edit]\` kończy tryb konfiguracji. Jest też jawne \`exit configuration-mode\`.
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+top
+edit interfaces ge-0/0/1 unit 0
+up
+exit
+top
+exit
+~~~
+
+Ostatnie \`exit\` kończy tryb configuration, ale przy niezapisanych zmianach może pojawić się pytanie. **Nie ucz się mechanicznie polecenia \`exit\` bez obserwacji \`[edit ...]\` nad promptem.**
+
+### 3.3.3. \`top\`, \`up\`, \`edit\`, \`run\` — mapa piętra
+
+~~~mermaid
+flowchart TB
+  ROOT["[edit]"] --> SYS["[edit system]"]
+  ROOT --> IF["[edit interfaces]"]
+  IF --> GE["[edit interfaces ge-0/0/1]"]
+  GE --> UNIT["[edit interfaces ge-0/0/1 unit 0]"]
+  UNIT --> IP["[edit interfaces ge-0/0/1 unit 0 family inet]"]
+  IP -. "up" .-> UNIT
+  IP -. "top" .-> ROOT
+  GE -. "edit unit 0" .-> UNIT
+  GE -. "run show interfaces terse" .-> OP["Operational command"]
+~~~
+
+Przygodne pytanie instruktora: stoisz w \`[edit interfaces ge-0/0/1 unit 0 family inet]\`. Chcesz sprawdzić, czy routing table pokazuje trasę connected. Czy musisz wyjść pięć razy przez \`exit\`? **Nie.** Używasz \`run show route\`.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit interfaces ge-0/0/1 unit 0 family inet]**
+
+~~~junos
+run show route
+top
+~~~
+
+### 3.3.4. Wybieranie dokładnej ścieżki i pułapka z \`delete\`
+
+Załóżmy, że w hierarchii portu znajduje się opis, MTU i adres. Chcesz usunąć sam opis. Na Cisco to \`no description\`. W Junos to \`delete interfaces ge-0/0/1 description\` z root konfiguracji albo po wejściu do interfejsu po prostu \`delete description\`.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
+
+~~~junos
+delete interfaces ge-0/0/1 description
+show | compare
+~~~
+
+**Gotcha:** \`delete interfaces ge-0/0/1\` usuwa **całą gałąź**, w tym adres, unit i inne parametry. To fundamentalna różnica między odłączeniem jednego liścia a wycięciem całego drzewa. Dlatego zanim wykonasz \`delete\`, przeczytaj ścieżkę i sprawdź \`show | compare\`.
+
+Jeżeli komenda była jedynie ćwiczeniem, cofnij niezatwierdzoną zmianę:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], tylko jeśli nie chcesz zachować żadnych niezacommitowanych zmian**
+
+~~~junos
+rollback 0
+show | compare
+~~~
+
+**Nie rób \`rollback 0\` w shared candidate, jeśli inni administratorzy mają tam własne niezatwierdzone poprawki.**
+
+---
+
+## 3.4. Pomoc kontekstowa i uzupełnianie poleceń [A]
+
+### 3.4.1. Najbardziej niedoceniane narzędzie inżyniera: nie Google, tylko \`?\`
+
+W Cisco możesz wpisywać \`?\` i wybierać możliwe opcje. Junos również oferuje pomoc kontekstową, często bardzo bogatą. Podczas egzaminu, laboratorium i change'u **nie musisz pamiętać pełnej składni każdej komendy**. Musisz wiedzieć, gdzie znaleźć dalszy element drzewa.
+
+Powiedzmy, że nigdy wcześniej nie konfigurowałeś konkretnie \`system login message\`. Nie googluj przypadkowego wpisu z forum. Zapytaj CLI o możliwe następne parametry.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show ?
+show interfaces ?
+help apropos "commit"
+help topic interfaces
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+top
+set system ?
+set interfaces ?
+help reference system
+~~~
+
+**Uwaga:** znaki \`?\` oznaczają interaktywny mechanizm pomocy. Jeżeli wgrywasz plik poleceń, nie traktuj tych przykładów jako linijek konfiguracji do \`load set\`. Dostępność konkretnych tematów \`help topic\`/\`help reference\` zależy od wydania i obecności pakietu dokumentacji.
+
+### 3.4.2. Tab, Space i jednoznaczność
+
+\`Tab\` pomaga dokończyć rozpoznawalne słowo kluczowe i nazwy. Junos może również wykorzystywać spację jako autocomplete, zgodnie z ustawieniem \`CLI complete-on-space\`. Jeśli wpisałeś zbyt krótki, niejednoznaczny fragment, CLI nie powinno zgadywać, czy chodzi Ci o \`interfaces\`, \`interface-range\` czy inną opcję.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show cli
+set cli complete-on-space on
+show cli
+~~~
+
+**To ustawienie wpływa na Twoją interaktywną sesję CLI**, nie jest zmianą konfiguracji wszystkich interfejsów urządzenia. Sprawdź wersję przed użyciem konkretnej formy polecenia.
+
+**Ćwiczenie:** wpisz \`show int\`, naciśnij \`Tab\`, a następnie porównaj zachowanie przy \`show interfaces te\`. Klucz do skutecznego używania autocomplete to znalezienie **wystarczająco jednoznacznego prefiksu**, a nie liczenie na magię.
+
+### 3.4.3. Ustawienia terminala, które ratują długą noc
+
+Gdy analizujesz długi output, stronicowanie \`---(more)---\` pomaga go czytać. Przy automatyzacji może przeszkadzać. Junos pozwala sterować liczbą wierszy i szerokością terminala.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show cli
+set cli screen-length 0
+set cli screen-width 160
+show cli
+~~~
+
+\`screen-length 0\` oznacza brak pauz po każdym ekranie. Jest wygodne dla skryptów i kopiowania outputu, ale przy dużej tablicy BGP terminal może zalać Cię tysiącami linii. Wtedy zamiast zwiększać scrollback, użyj \`| match\`, \`| find\` albo \`| no-more\` tylko dla konkretnej komendy.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+set cli screen-length 24
+show cli
+~~~
+
+**Cisco-moment:** \`terminal length 0\` w Cisco i \`set cli screen-length 0\` w Junos rozwiązują bardzo podobny problem z paginacją.
+
+### 3.4.4. Co, jeśli CLI nie zna komendy?
+
+Podczas migracji Cisco → Junos łatwo wpaść w nawyk „komenda powinna istnieć, bo jest logiczna”. Ale CLI Junos jest **zależny od platformy i wydania**. Polecenie PFE z MX nie musi działać na vSRX, a funkcje J-Web dostępne na EX nie muszą działać na innym urządzeniu.
+
+Rzetelna reakcja:
+1. Wpisz \`?\` w miejscu, gdzie spodziewasz się argumentu.
+2. Sprawdź \`show version\`.
+3. Sprawdź [Junos CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/).
+4. Zweryfikuj rodzaj platformy (EX, MX, QFX, SRX, Junos Evolved).
+5. Dopiero potem twierdź, że polecenie jest niedostępne lub ma inną nazwę.
+
+Nie ucz się diagnozy „router zepsuty” na podstawie \`syntax error\` po wklejeniu cudzej komendy.
+
+---
+
+## 3.5. Filtrowanie wyników poleceń — twoja lupa do CLI [A]
+
+### 3.5.1. Nie odczytujesz całej książki telefonicznej, żeby znaleźć jeden numer
+
+Na C9500 znasz \`show run | section\`, \`show ... | include\`, \`exclude\` i \`begin\`. W Junos filtrujesz wyniki przez znak pipe \`|\`, ale masz też narzędzia typowe dla wyświetlania **konfiguracji jako danych strukturalnych**.
+
+**Najważniejszy błąd, którego chcę Cię oduczyć:** \`show route | count\` **nie liczy tras**. Zlicza **wiersze tekstu powstałego z danego polecenia**. Jeśli wiersz route zajmuje trzy linie, wynik count nie odpowiada liczbie prefiksów.
+
+### 3.5.2. Szukasz jednej wiadomości, nie tysiąca linii
+
+Przypuśćmy, że monitorujesz incydent z interfejsem \`ge-0/0/1\` i BGP. W logu jest kilkadziesiąt tysięcy wpisów. Nie kopiuj wszystkiego do ticketu.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show interfaces terse | match ge-0/0/1
+show log messages | match "rpd|bgp|ge-0/0/1"
+show log messages | except "SNMP"
+show log messages | last 30
+show interfaces extensive | find "ge-0/0/1"
+~~~
+
+- \`match\` — wybiera linie pasujące do wzorca.
+- \`except\` — wyklucza linie pasujące do wzorca.
+- \`last\` — pokazuje końcową część wyjścia (w pewnych warunkach co najmniej rozmiar ekranu).
+- \`find\` — zaczyna wyświetlanie od pierwszego trafienia i pokazuje także **dalszy kontekst**, nie tylko pasujące linie.
+
+**Gotcha:** \`find\` i \`match\` **nie są zamienne**. Gdy szukasz statusu portu wraz z kolejnymi licznikami, \`find\` może dać potrzebny kontekst. Gdy chcesz jedynie wpisy ze słowem „error”, \`match\` da krótszy wynik.
+
+### 3.5.3. Dwa filtry mogą naraz zmienić sens wyniku
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show log messages | match "rpd" | match "BGP"
+show interfaces terse | match "ge-" | count
+show log messages | no-more
+~~~
+
+Przy dwóch \`match\` wynik to linie spełniające **oba** warunki, a nie „rpd lub BGP”. Wzorzec z \`|\` **wewnątrz cytowanego regex** oznacza alternatywę. To zachowanie przydaje się przy analizie określonego procesu.
+
+W przypadku \`| count\` zatrzymaj się i zapytaj: **co właśnie policzyłem?** Jeżeli wcześniej filtrowałeś linie z \`ge-\`, policzyłeś linie tekstu pasujące do wzorca. Nie porty „up”, nie trasy „active”, chyba że wynik był specjalnie przetworzony w taki sposób, by każda linia odpowiadała dokładnie jednej pozycji.
+
+### 3.5.4. \`display set\` — najlepszy pomost do modelu „linia po linii”
+
+Wyobraź sobie, że musisz przekazać koledze konfigurację pojedynczego interfejsu. W Cisco wysyłasz fragment \`show run interface\`. W Junos możesz wybrać czytelny **widok hierarchiczny** albo **linie set**. To nie są dwie niezależne konfiguracje. To dwa sposoby oglądania tej samej konfiguracji.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show configuration interfaces ge-0/0/1
+show configuration interfaces ge-0/0/1 | display set
+show configuration system | display set
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+top
+show interfaces ge-0/0/1
+show interfaces ge-0/0/1 | display set
+show | display inheritance
+~~~
+
+\`display set\` pokazuje konfigurację jako polecenia możliwe do odtworzenia. **Nie zmienia** bieżącej konfiguracji. I nie używaj go jako rzekomego „tłumacza” dowolnych wyników \`show route\` na komendy set — dotyczy **struktury konfiguracji**.
+
+### 3.5.5. Właściwy obraz konfiguracji bywa ukryty przez dziedziczenie
+
+Na Junos istnieją **configuration groups**. Interfejs może dziedziczyć parametry, których **nie zobaczysz wprost** w jego bezpośredniej sekcji. To podobne do sytuacji, gdy w Cisco przyzwyczaiłeś się do jednego miejsca na konfigurację, a część stanu pochodzi z template, policy lub domyślnego profilu.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode (w przypadku używania groups)**
+
+~~~junos
+show configuration interfaces ge-0/0/1
+show configuration interfaces ge-0/0/1 | display inheritance
+show configuration interfaces ge-0/0/1 | display set
+~~~
+
+**Praktyczne pytanie:** dlaczego port ma określony MTU, choć nie widzę go w zwykłym \`show configuration interfaces ge-0/0/1\`? Jednym z tropów jest **inheritance**. Szczegółowa konfiguracja \`apply-groups\` należy do rozdziału 4, lecz już teraz musisz wiedzieć, że brak linii w widoku lokalnym **nie musi oznaczać braku efektu**.
+
+### 3.5.6. Widoki do archiwizacji i automatyzacji
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show configuration | display set
+show configuration | display xml
+show configuration | display json
+~~~
+
+Wyświetlanie XML/JSON zależy od rodzaju danych i wydania; ma znaczenie przy automatyzacji oraz integracjach NETCONF. Nie uczmy się tutaj całego YANG/NETCONF — zapamiętaj, że hierarchiczny Junos **dobrze nadaje się do strukturalnego przetwarzania konfiguracji**, a nie tylko do tekstowych zrzutów.
+
+**Nie umieszczaj w publicznym repozytorium bez filtrowania pełnych \`show configuration\`: mogą zawierać adresy zarządzania, informacje o kontach, community, sekrety albo dane infrastruktury.**
+
+Źródła sekcji: [CLI pipe command](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/pipe.html), [Filtering Operational Command Output](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/filtering-operational-command.html), [configuration groups](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html).
+
