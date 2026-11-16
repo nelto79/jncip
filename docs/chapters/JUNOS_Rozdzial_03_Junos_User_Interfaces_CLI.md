@@ -983,3 +983,180 @@ flowchart TD
 
 Źródła sekcji: [load CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/load.html), [Loading Configuration Files](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-config-files-loading.html), [save CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/save-cli-config.html).
 
+
+
+---
+
+## 3.9. Rollback — powrót do poprzedniej konfiguracji bez zgadywania [A]
+
+### 3.9.1. O 03:18 aplikacja działa gorzej. Co teraz?
+
+Wyobraź sobie, że wdrożyłeś politykę BGP, a użytkownicy zaczynają zgłaszać utratę części tras. Ktoś podpowiada: „Cofnij konfigurację do poprzedniej wersji”. Na Cisco IOS XE sprawdziłbyś archiwum, configuration replace, historię zmian albo przygotowany rollback plan. W Junos **historia kolejnych zatwierdzonych konfiguracji jest częścią codziennego workflow**.
+
+Ale uważaj: **\`rollback\` nie oznacza automatycznego aktywowania starej konfiguracji**. Zazwyczaj ładuje starszą wersję do candidate, którą nadal musisz obejrzeć, zweryfikować i zatwierdzić. To kolejny element świadomego zarządzania ryzykiem.
+
+### 3.9.2. \`rollback 0\` kontra \`rollback 1\`: największa pułapka dla osób po Cisco
+
+Załóżmy, że o 03:00 router działał na konfiguracji A. O 03:05 dodałeś zmiany w candidate B, ale jeszcze nie zrobiłeś commit.
+
+**\`rollback 0\`** przywróci w candidate aktualną **active A** i odrzuci niezacommitowane zmiany B.
+
+Teraz załóżmy, że commit już się odbył i active to B. Chcesz wrócić do **poprzedniej zatwierdzonej wersji A**. Wtedy zwykle użyjesz **\`rollback 1\`**, porównasz candidate z active, a następnie wykonasz commit.
+
+~~~mermaid
+flowchart LR
+   A["Aktywna wersja A"] -->|"edytujesz candidate"| B["Candidate B"]
+   B -->|"rollback 0"| A
+   B -->|"commit"| C["Aktywna wersja B"]
+   C -->|"rollback 1"| D["Candidate z poprzednią wersją A"]
+   D -->|"commit"| E["Nowa aktywna wersja A"]
+~~~
+
+**Na pamięć:** \`rollback 0\` to zwykle odrzucenie aktualnych zmian candidate; \`rollback 1\` ładuje poprzedni commit do candidate. **Do zrozumienia:** po wcześniejszym rollbacku 1 i wykonaniu commit powstaje kolejna pozycja historii — numeracja jest względem **aktualnej** historii, nie stałym identyfikatorem „tej dobrej wersji z poniedziałku”.
+
+### 3.9.3. Najpierw obejrzyj, nie cofaj na ślepo
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show system commit
+show system rollback 0
+show system rollback 1
+show system rollback 0 compare 1
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], dopiero po identyfikacji właściwej wersji**
+
+~~~junos
+rollback 1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**Następny krok nie jest automatycznym \`commit\`!** Najpierw sprawdź stan SSH i kontrolę nad urządzeniem, routing, sesje i usługę, której dotyczył incydent. Dopiero przy satysfakcjonującym wyniku potwierdź zmianę. Pamiętaj, że \`commit check\` również potrafi potwierdzić oczekujący \`commit confirmed\` — weryfikacja powinna być zaplanowana świadomie.
+
+### 3.9.4. Historia konfiguracji nie jest nieograniczona
+
+Juniper typowo przechowuje **do 50 wersji**, licząc bieżącą i 49 wcześniejszych (numery \`0\`–\`49\`). Nie opisuj tego jako „50 starych backupów plus current”. Ponadto przechowywane kopie nie są tym samym co **zewnętrzny system backupów** — awaria nośnika, wymiana urządzenia lub problemy z dostępem mogą sprawić, że historia lokalna nie wystarczy.
+
+Źródło: [rollback CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/rollback.html).
+
+### 3.9.5. Rescue configuration — ostatnia pewna przystań
+
+Wyobraź sobie, że wykonałeś wiele commitów, wymieniasz urządzenie lub masz problem z dostępnością historii. Możesz utrzymywać **rescue configuration** — ręcznie zapisaną, sprawdzoną dobrą konfigurację.
+
+**Haczyk:** rescue **nie musi istnieć**, jeśli operator nigdy jej nie zapisał. Nie jest też automatycznym gwarantem odzyskania wszystkich usług: jeśli zapisałeś złą konfigurację jako rescue, ona nie stanie się dobra tylko dlatego, że ma tę nazwę.
+
+**Urządzenie: R1-vSRX — Operational Mode, zapis znanej dobrej konfiguracji po pozytywnej walidacji i zgodzie zmiany**
+
+~~~junos
+request system configuration rescue save
+show system commit
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], przywrócenie istniejącej rescue, wyłącznie LAB lub zatwierdzona procedura recovery**
+
+~~~junos
+rollback rescue
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Do potwierdzenia i testów stosuj ten sam rygor co przy każdej zmianie. Szczegółowa administracja rescue jest w rozdziale **4.13**, ale tutaj poznajesz jej znaczenie jako części workflow rollback.
+
+Źródło: [Juniper Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html).
+
+### 3.9.6. Rollback nie przywraca całego świata
+
+Nieoczywisty, ale zawodowo krytyczny fakt: rollback **konfiguracji** nie oznacza cofnięcia stanu całego systemu operacyjnego, tabel sesji i wszystkich zewnętrznych systemów.
+
+Jeżeli zmiana policy zdążyła zerwać sesje BGP albo VPN, powrót konfiguracji **nie zawsze przywróci je natychmiast**; protokoły potrzebują konwergencji. Jeżeli zmieniłeś politykę routingu, sąsiad może potrzebować odświeżenia lub przeliczenia. Jeśli błąd dotyczy fizycznej warstwy, żaden rollback nie naprawi włókna.
+
+**Porównanie Cisco:** \`configure replace\` także nie cofa czasu dla TCP sessions ani nie wskrzesza ruchu na uszkodzonym kablu. Zawsze testuj **service restoration**, a nie tylko „commit complete”.
+
+---
+
+## 3.10. J-Web — dlaczego istnieje GUI i czemu nie zastępuje rozumienia CLI [A]
+
+### 3.10.1. Inżynier CLI patrzy z podejrzliwością na przeglądarkę
+
+Znane uczucie: pracowałeś latami na Cisco IOS XE, więc kiedy ktoś pokazuje GUI do zarządzania urządzeniem, pierwsza myśl brzmi: „Po co mi to, skoro mam konsolę?”. Często CLI będzie szybsze i precyzyjniejsze, ale nie oznacza to, że GUI jest zabawką.
+
+**J-Web** jest przeglądarkowym interfejsem zarządzania dostępnym na określonych rodzinach i wydaniach Junos, przede wszystkim EX i SRX, z funkcjami zależnymi od platformy. Pozwala wykonywać czynności konfiguracji, przeglądania stanu, monitoringu i troubleshootingu.
+
+**Porównanie Cisco:** Cisco Device Manager/GUI dla określonych platform albo Cisco Catalyst Center dają interfejsy wizualne, ale **J-Web jest GUI powiązanym z konkretnym urządzeniem**, a nie automatycznie odpowiednikiem centralnego Catalyst Center. Mist Cloud to jeszcze inna warstwa zarządzania. Nie utożsamiaj tych produktów.
+
+### 3.10.2. Dlaczego pierwsze pytanie brzmi „na jakim urządzeniu i release?”
+
+Jeśli instrukcja mówi „uruchom J-Web na MX, EX, QFX, SRX tak samo”, to za chwilę trafisz na problem dostępności. Juniper publikuje osobne dokumentacje **J-Web for Security Firewalls and Switches** i informacje o wsparciu w Feature Explorer. Nawet w jednej rodzinie funkcje i nawigacja GUI zmieniają się w kolejnych wersjach.
+
+Przed konfiguracją:
+1. Sprawdź \`show version\` i model.
+2. Zweryfikuj wsparcie J-Web dla modelu i release.
+3. Sprawdź, czy usługa web management jest włączona i na którym interfejsie.
+4. Oceń, czy powinien to być interfejs zarządzający odseparowany od użytkowników.
+5. Zweryfikuj **HTTPS, certyfikat, ograniczenia administracyjne i ewentualne security zone/host-inbound** na SRX.
+
+### 3.10.3. Włączenie J-Web — nie twórzmy niezabezpieczonego panelu w sieci firmowej
+
+W dokumentacji producenta występują zarówno HTTP, jak i HTTPS. **Nie włączaj HTTP na dowolnym interfejsie produkcyjnym tylko po to, by łatwiej zobaczyć GUI.** W praktyce preferujesz HTTPS z właściwym certyfikatem i ograniczonym źródłem dostępu.
+
+Poniżej fragment **ilustracyjny**: zakłada, że odpowiedni certyfikat \`CH03-WEB-CERT\` **już istnieje** i został poprawnie zainstalowany. Nie jest to kompletny gotowy projekt PKI. Interfejs \`fxp0.0\` musi faktycznie istnieć i być przeznaczony do management na danym urządzeniu.
+
+**Urządzenie: EX-ACCESS-01 — Configuration Mode [edit], ilustracja dla wspieranego modelu i wydania**
+
+~~~junos
+set system services web-management https local-certificate CH03-WEB-CERT
+set system services web-management https interface fxp0.0
+show | compare
+commit check
+~~~
+
+**Nie wykonuj \`commit\` zanim nie zweryfikujesz certyfikatu, interfejsu i ACL/firewall ochrony management.** Na niektórych modelach SRX wymagane są odrębne warunki dostępności usługi i stref. Na części wirtualnych platform i hypervisorów funkcje J-Web mogą być nieobsługiwane.
+
+Źródło: [Secure Web Access for Remote Management](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/secure-web-access-remote-management.html), [web-management CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/web-management-edit-system.html).
+
+### 3.10.4. Jak wygląda praktyczny przegląd J-Web
+
+W systemie EX z odpowiednim pakietem J-Web producent dokumentuje ścieżkę:
+
+**J-Web (EX, odpowiedni pakiet) → Configure → System Properties → Management Access** — do ustawień bezpiecznego dostępu przez HTTPS.
+
+To przykład **konkretnej ścieżki menu dla określonej gałęzi GUI**, nie uniwersalna obietnica dla J-Web na SRX 25.4. J-Web na SRX może mieć osobny Setup Wizard i nawigację zależną od release.
+
+Na wspieranym SRX w nowoczesnym J-Web możesz zobaczyć kreator standalone/HA, konfigurację interfejsów/stref, przegląd policies i monitoring. Jeśli ekran nie zgadza się z przewodnikiem sprzed pięciu lat, sprawdź **wersję J-Web i dokumentację wydania**, zamiast zgadywać nazwy przycisków.
+
+### 3.10.5. Cztery pułapki J-Web
+
+**Pierwsza:** urządzenie ma Junos, ale nie musi mieć J-Web w Twojej konkretnej kombinacji platform/release.
+
+**Druga:** dostęp do GUI wymaga **odpowiedniego management reachability**, a na SRX także zasad security. Sam ping do urządzenia nie dowodzi, że TCP/443 jest dozwolony.
+
+**Trzecia:** GUI korzysta z tego samego świata konfiguracji Junos; nie zakładaj, że równoczesne zmiany w CLI i GUI są zawsze od siebie bezpiecznie odseparowane.
+
+**Czwarta:** „widzę zielony interfejs” nie jest dowodem, że aplikacja klienta działa. Po konfiguracji GUI nadal wykonujesz verification w CLI i na urządzeniu końcowym.
+
+Oficjalne źródła: [J-Web for Firewalls and Switches](https://www.juniper.net/documentation/product/us/en/j-web/), [J-Web Feature Explorer](https://apps.juniper.net/feature-explorer/feature/7987?fn=J-Web+graphical+user+interface), [J-Web EX Management Access](https://www.juniper.net/documentation/us/en/software/jweb-ex/jweb-ex-application-package/topics/task/ex-series-management-access-j-web.html), [SRX J-Web Setup Wizard](https://www.juniper.net/documentation/us/en/software/jweb-srx25.4/jweb-srx/topics/topic-map/j-web-setup-wizard.html).
+
+### 3.10.6. Czy potrzebujemy obrazka GUI?
+
+Tak, **gdy dokładny layout pomaga wykonać zadanie**, ale screenshot z konkretnej wersji J-Web może zdezaktualizować się szybciej niż sam mechanizm. Dlatego dla podręcznika:
+- połącz własny **diagram koncepcyjny CLI ↔ J-Web ↔ candidate/commit** z tekstem;
+- wskaż [oficjalną stronę dostępu do J-Web](https://www.juniper.net/documentation/us/en/software/jweb-srx24.2/jweb-srx/topics/topic-map/j-web-security-starting.html), gdzie dostępne są zrzuty Setup Wizard;
+- nie kopiuj zdjęć i screenshotów producenta do publicznego repo bez zweryfikowanych praw do ponownej publikacji.
+
+~~~mermaid
+flowchart LR
+   USER["Administrator"] --> CLI["Junos CLI (SSH/Console)"]
+   USER --> GUI["J-Web (HTTPS)"]
+   CLI --> MGMT["Junos configuration subsystem"]
+   GUI --> MGMT
+   MGMT --> CAN["Candidate / validation"]
+   CAN --> COM["Commit"]
+   COM --> ACT["Active configuration i procesy"]
+~~~
+
+To nie oznacza, że J-Web i CLI są identycznymi frontendami w każdej funkcji. Oznacza, że **obydwa zarządzają tym samym systemem konfiguracji**, który musisz rozumieć niezależnie od ekranu.
+
