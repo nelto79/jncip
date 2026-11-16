@@ -717,3 +717,269 @@ Junos pozwala dodawać komentarze do sekcji konfiguracji, m.in. poleceniem \`ann
 
 Nie zaczynaj od masowego komentowania konfiguracji produkcyjnej. Ćwiczenie wykonywane na wyizolowanym obiekcie pokażemy w laboratorium 3.LAB; szczegółową składnię sprawdź przez \`annotate ?\` oraz aktualną [CLI Configuration Mode Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-configuration.html).
 
+
+
+---
+
+## 3.8. Przeglądanie, porównywanie i wczytywanie plików konfiguracji [A]
+
+### 3.8.1. Zadanie z rzeczywistej pracy: architekt przysłał 120 linii zmian
+
+Jest środa, 17:30. Architekt przysyła plik z dwudziestoma nowymi VLAN-ami, filtrami i opisami portów dla lokalizacji we Francji. W Cisco zwykle analizujesz skrypt konfiguracyjny, planujesz kolejność, być może korzystasz z \`configure replace\` i archiwizacji. W Junos masz możliwość **wczytania pliku do candidate**, obejrzenia dokładnej różnicy i dopiero potem zatwierdzenia.
+
+Ale tutaj pojawia się większe zagrożenie niż literówka: **zły tryb importu**. Ten sam plik może być nieszkodliwym dopisaniem fragmentu albo zastąpieniem kompletnej konfiguracji urządzenia — zależnie od tego, jakiego \`load\` użyjesz.
+
+Wyobraź sobie edycję dokumentu:
+- **merge**: dopisz lub uzupełnij określone akapity;
+- **set**: wykonaj sekwencję instrukcji edycyjnych zapisanych jako komendy;
+- **replace**: wymień wskazane akapity oznaczone do zastąpienia;
+- **override**: **wyrzuć cały dotychczasowy dokument i wczytaj kompletny nowy**;
+- **update**: również wczytaj pełny dokument, ale porównuj zmienione części bardziej selektywnie;
+- **patch**: zastosuj różnicę/łatkę zamiast pełnego tekstu.
+
+To nie jest sprawa gustu. \`load override\` użyty omyłkowo do pliku z trzema interfejsami może spowodować, że **candidate będzie zawierać tylko te trzy interfejsy i zabraknie reszty konfiguracji**. Po commit tracisz użytkowników, management, BGP i wiele więcej.
+
+### 3.8.2. Zanim coś załadujesz: cztery bezpieczne pytania
+
+Zanim użyjesz \`load\`, sprawdź:
+1. Czy plik jest w formacie **hierarchicznym Junos**, zestawie \`set\`, czy patch?
+2. Czy chcesz **dodać fragment**, **wymienić oznaczony blok**, czy **zastąpić pełną konfigurację**?
+3. Czy znajdujesz się w \`configure private\`, a jeśli tak, czy inni administratorzy już zmienili active?
+4. Czy masz konsolę/OOB, kopię ostatniej dobrej konfiguracji i plan odtworzenia dostępu?
+
+Nawet jeśli wszystkie odpowiedzi są dobre, **\`commit check\` nie sprawdzi, czy nowy BGP peer jest osiągalny**. Po zmianie musisz testować usługę.
+
+### 3.8.3. Przeglądanie active i candidate bez zmieniania czegokolwiek
+
+**Urządzenie: R1-vSRX — Operational Mode, odczyt aktywnej konfiguracji**
+
+~~~junos
+show configuration
+show configuration system host-name
+show configuration interfaces ge-0/0/1 | display set
+show system commit
+show system rollback 1
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode, odczyt candidate**
+
+~~~junos
+top
+show
+show | display set
+show | compare
+~~~
+
+Warto od razu nauczyć się jednej różnicy:
+- **Operational \`show configuration\`** to odczyt aktualnej, zatwierdzonej konfiguracji.
+- **Configuration \`show\`** pokazuje edytowaną candidate.
+- **\`show | compare\`** w configuration mode mówi, co candidate zmieniłaby względem active.
+
+Nie kopiuj bezmyślnie konfiguracji z sekcji \`show\` jako „tej, co już działa” — chyba że wiesz, w jakim trybie był operator.
+
+### 3.8.4. \`show | compare\` — czytanie diffu jak inspektor przed zatwierdzeniem
+
+Załóżmy, że dodałeś nowy opis portu i zmieniłeś parametr. Junos pokaże różnicę, na której możesz wychwycić literówkę przed zmianą produkcyjną.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], przykład ilustracyjnego diffu**
+
+~~~diff
+[edit interfaces ge-0/0/1]
+- description "WAN OLD";
++ description "WAN NEW";
+~~~
+
+Minus oznacza element usuwany ze starej wersji, plus — dodawany do candidate. Ale to **format porównania**, nie polecenia CLI do uruchomienia.
+
+Haczyk: **dwa plusy w diffie nie gwarantują, że zmiana jest właściwa**. Możesz poprawnie wprowadzić błędną nazwę route-map, złą sieć źródłową w ACL albo wyłączyć port uplink. Poprawność wyniku zależy od HLD/change plan i testów.
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+show | compare
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode, porównanie dwóch zapisanych wersji bez ładowania ich do candidate**
+
+~~~junos
+show system rollback 0 compare 1
+show system rollback 1
+show configuration | compare rollback 1
+~~~
+
+To druga bardzo ważna różnica. **Nie musisz wykonywać \`rollback 1\`, żeby zobaczyć dawną konfigurację!** Możesz ją odczytać i porównać bez naruszania candidate.
+
+### 3.8.5. \`load set\` — gdy plik wygląda jak gotowe komendy Junos
+
+Załóżmy, że architekt przygotował niewielką, bezpieczną zmianę: opis portu i tekst login banner. Plik zawiera pełne linie \`set\`. To dobry przypadek dla **\`load set\`**, nie dla \`load override\`.
+
+**Plik dla urządzenia R1-vSRX — \`/var/tmp/ch03-change.set\` (przykładowa zawartość)**
+
+~~~junos
+set system login message "CH03 LAB - maintenance test"
+set interfaces ge-0/0/1 description "CH03-LINK"
+~~~
+
+Załóżmy, że plik został wcześniej **bezpiecznie przesłany** do R1 i potwierdzono jego treść. Nie podaję hasła ani rzeczywistego URL serwera produkcyjnego.
+
+**Urządzenie: R1-vSRX — Operational Mode, odczyt pliku przed importem**
+
+~~~junos
+file show /var/tmp/ch03-change.set
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB**
+
+~~~junos
+load set /var/tmp/ch03-change.set
+show | compare
+commit check
+~~~
+
+**Przewidź wynik:** \`load set\` dopisze/zmieni wskazane statementy w candidate. Nie powinien usuwać całej konfiguracji BGP, AAA czy pozostałych interfejsów. Jednak jeśli plik zawierałby polecenia \`delete\`, to **mogłyby zostać wykonane podczas ładowania** — sprawdź zawartość, nie tylko rozszerzenie \`.set\`.
+
+Jeśli wolisz nie tworzyć pliku na dysku, możesz użyć \`load set terminal\`. Po wpisaniu lub wklejeniu zawartości terminala kończysz strumień przez **Ctrl+D na nowej linii**.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB — rozpoczęcie importu z terminala**
+
+~~~junos
+load set terminal
+~~~
+
+**Dane wklejane dla R1-vSRX po wyświetleniu prośby o wejście — nie osobne polecenia uruchamiane z shell**
+
+~~~junos
+set system login message "CH03-LAB FROM TERMINAL"
+set interfaces ge-0/0/1 description "CH03-UPLINK"
+~~~
+
+Po **Ctrl+D** wykonaj \`show | compare\`. Nie myl końca wejścia terminalowego z \`commit\`: to dwa oddzielne etapy.
+
+### 3.8.6. \`load merge\` — złącz fragment hierarchii
+
+Architekt przesyła plik w postaci drzewa Junos, a nie \`set\`. Do dodania sekcji lub aktualizacji wartości służy \`load merge\`. W praktyce zachowanie przy konflikcie istniejących i przychodzących statementów wymaga uważnego odczytu diffu. Nie przyjmuj, że merge zawsze jest w 100% addytywne.
+
+**Plik dla R1-vSRX — \`/var/tmp/ch03-merge.conf\` (fragment konfiguracji hierarchicznej)**
+
+~~~junos
+system {
+    login {
+        message "CH03-MERGE-LAB";
+    }
+}
+interfaces {
+    ge-0/0/1 {
+        description "CH03-MERGED";
+    }
+}
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB**
+
+~~~junos
+load merge /var/tmp/ch03-merge.conf
+show | compare
+commit check
+~~~
+
+Weryfikujesz, że zmienił się tylko banner i opis portu — **zamiast zgadywać na podstawie słowa „merge”**. Jeśli architekt wysłał niepoprawny fragment, loader może zgłosić błąd zanim dojdzie do commit.
+
+### 3.8.7. \`load replace\` — specjalny znacznik zastąpienia gałęzi
+
+To polecenie jest częstą pułapką egzaminacyjną. \`load replace\` **nie oznacza po prostu „zastąp całą konfigurację”**. Szuka specjalnych znaczników **\`replace:\`** we wczytywanej konfiguracji i zastępuje odpowiednie statementy.
+
+Załóżmy, że masz laboratoryjną policy \`CH03-ORDER\` z trzema termami. Chcesz wymienić całą zawartość tej policy, ale nie ruszać innych \`policy-options\`.
+
+**Plik dla R1-vSRX — \`/var/tmp/ch03-replace.conf\` (zastąpienie wyłącznie laboratoryjnej policy)**
+
+~~~junos
+policy-options {
+    replace: policy-statement CH03-ORDER {
+        term ALLOW-LAB {
+            then accept;
+        }
+        term OTHER {
+            then reject;
+        }
+    }
+}
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB**
+
+~~~junos
+load replace /var/tmp/ch03-replace.conf
+show policy-options policy-statement CH03-ORDER
+show | compare
+commit check
+~~~
+
+**Pułapka:** jeśli \`replace:\` umieścisz o jeden poziom wyżej, możesz niechcący zastąpić dużo większą część konfiguracji. W naszym przykładzie nie zastępujemy \`policy-options\` jako całości, tylko jeden nazwany obiekt.
+
+### 3.8.8. \`load override\` — wielki czerwony przycisk
+
+Przygotowanie do greenfield to jedna sytuacja: nowy EX ma otrzymać **pełną, poprawną konfigurację bazową**. Zastąpienie całej candidate może być zamierzone. Ale przy zmianie kilku portów na produkcji \`override\` jest zwykle **niewłaściwym** narzędziem.
+
+**Polecenie poniżej jest NIEBEZPIECZNE na istniejącym urządzeniu; zapis wyłącznie jako przykład do rozpoznania, NIE URUCHAMIAJ bez odseparowanego labu, pełnego backupu i konsoli.**
+
+**Urządzenie: R1-vSRX — Configuration Mode, tylko koncept do analizy skutku**
+
+~~~junos
+load override /var/tmp/FULL-DEVICE-CONFIG.conf
+~~~
+
+Po takim load candidate pochodzi z całego pliku, nie jest dopisanym fragmentem. Jeżeli plik zawierał tylko jeden port, **pozostałe elementy kandydackiej konfiguracji mogą zniknąć**, a po commit możesz stracić dostęp do urządzenia.
+
+**Pamiętaj:** sam \`load override\` zmienia candidate; krytyczny moment wejścia zmiany w życie to **commit**. To właśnie daje możliwość zobaczenia diffu i przerwania niebezpiecznej operacji zanim stanie się aktywna.
+
+### 3.8.9. \`load update\` i \`load patch\` — gdy zwykły merge nie wystarcza
+
+Dwa mniej popularne tryby mają praktyczne znaczenie w automatyzacji:
+- \`load update\` wczytuje pełną konfigurację, podobnie jak \`override\`, ale oznacza jako zmodyfikowane tylko faktyczne różnice.
+- \`load patch\` stosuje różnicę, zamiast zwykłego fragmentu konfiguracji; używa się go m.in. do odtwarzania zmian z diffów.
+
+**Nie jest to równoznaczne z bezpiecznym importem dowolnego pliku.** Na egzaminie Associate trzeba kojarzyć różnicę, a do automatyzacji poziomu Professional — rozumieć semantykę, szczególnie gdy commit scripts i dynamiczne funkcje odnoszą się do zmienionych obiektów.
+
+**Gotcha:** \`load update\` nie jest „update mojej private candidate” — to **inny mechanizm** niż polecenie \`update\` w \`configure private\`. Te same słowa, inne zadanie!
+
+### 3.8.10. Gdzie znajduje się plik i co można z nim zrobić?
+
+Plik dostarczony przez architekta nie pojawia się magicznie w \`/var/tmp\`. Musisz go bezpiecznie przenieść (np. SCP/SFTP lub zatwierdzony system zarządzania konfiguracją), sprawdzić integralność i ścieżkę. Junos udostępnia także polecenia operacyjne do pracy z plikami.
+
+**Urządzenie: R1-vSRX — Operational Mode, odczyt zawartości plików w izolowanym LAB**
+
+~~~junos
+file list /var/tmp/
+file show /var/tmp/ch03-change.set
+~~~
+
+Nie usuwaj przypadkowych plików systemowych „dla miejsca”. Również nie przechowuj w GitHubie realnych kluczy prywatnych, kont, community ani pełnej konfiguracji produkcyjnej.
+
+### 3.8.11. Bezpieczny import według change plan
+
+Wyobraź sobie, że klient zgłasza konkretną zmianę VLAN/port i chcesz mieć audytowalny wynik. Najpierw wykonaj read-only precheck. Później importuj **wyłącznie właściwym trybem**. Następnie porównaj candidate z active, sprawdź poprawność, aktywuj tymczasowo z mechanizmem powrotu, wykonaj test i potwierdź.
+
+~~~mermaid
+flowchart TD
+  INPUT["Otrzymałeś plik konfiguracyjny"] --> Q{"Jaki format i zakres?"}
+  Q -->|"linie set / mały fragment"| SET["load set"]
+  Q -->|"fragment hierarchy"| MERGE["load merge"]
+  Q -->|"znaczniki replace: w hierarchy"| REPL["load replace"]
+  Q -->|"pełny kompletny config"| OVR["load override lub load update — wymaga ostrożności"]
+  SET --> COMP["show | compare"]
+  MERGE --> COMP
+  REPL --> COMP
+  OVR --> COMP
+  COMP --> OK{"Czy diff jest zgodny z planem?"}
+  OK -->|"Nie"| STOP["Przerwij — NIE commituj"]
+  OK -->|"Tak"| CHK["commit check"]
+  CHK --> CONF["commit confirmed"]
+  CONF --> TEST["Sprawdź dostęp, routing, usługi, logi"]
+  TEST -->|"PASS"| FIN["commit"]
+  TEST -->|"FAIL"| ROL["Rollback / nie potwierdzaj"]
+~~~
+
+**Nie daj się oszukać eleganckiemu diagramowi:** \`commit confirmed\` nie jest niezawodnym mechanizmem naprawy każdej usterki, a \`commit check\` w szczególnych okolicznościach może **potwierdzić wcześniejszy pending confirmed commit** — szczegóły w 3.11.
+
+Źródła sekcji: [load CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/load.html), [Loading Configuration Files](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-config-files-loading.html), [save CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/save-cli-config.html).
+
