@@ -464,3 +464,256 @@ Wyświetlanie XML/JSON zależy od rodzaju danych i wydania; ma znaczenie przy au
 
 Źródła sekcji: [CLI pipe command](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/pipe.html), [Filtering Operational Command Output](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/filtering-operational-command.html), [configuration groups](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html).
 
+
+
+---
+
+## 3.6. Active vs candidate — architektura transakcji, która zmienia styl pracy [A]
+
+### 3.6.1. Dlaczego „brudnopis” nie oznacza „prywatny brudnopis”
+
+W naszej historii z 03:07 opisałem **candidate** jako projekt zmiany. Teraz pojawia się pierwsza pułapka. W typowym **\`configure\`**, gdy dwóch administratorów otworzy konfigurację jednocześnie, korzystają z **wspólnego candidate**. To nie są dwie niezależne kopie.
+
+Wyobraź sobie dwóch inżynierów edytujących jeden wspólny dokument online:
+- Ty dodajesz opis portu uplink.
+- Kolega zmienia politykę dla BGP.
+- Ty wykonujesz \`commit\`.
+
+W zależności od sposobu pracy **zatwierdziłeś obie zmiany**, choć zgłoszenie ServiceNow obejmowało wyłącznie Twój port. To potencjalny problem audytowy, a nie wada jakiejś jednej komendy.
+
+~~~mermaid
+flowchart TD
+  AA["Administrator A: set interface description"] --> SH["Shared candidate (configure)"]
+  BB["Administrator B: set routing policy"] --> SH
+  SH --> COM["Commit z dowolnej sesji uprawnionej"]
+  COM --> ACT["Nowa active config: obie zmiany"]
+  PA["Administrator A: configure private"] --> P1["Private candidate A"]
+  PB["Administrator B: configure private"] --> P2["Private candidate B"]
+  P1 --> CHECK["Sprawdzenie aktualnego active i konfliktów"]
+  P2 --> CHECK
+  CHECK --> ACT
+~~~
+
+**Do zapamiętania na pamięć:** \`configure\` = zwykle wspólny candidate; \`configure private\` = prywatna kopia robocza; \`configure exclusive\` = blokada edycji/commit shared candidate dla innych administratorów. **Do zrozumienia:** private nie oznacza, że stan sieci w tle przestaje się zmieniać.
+
+### 3.6.2. Który tryb edycji wybrać o 03:07?
+
+Jeśli musisz przygotować niewielką zmianę, zwykły \`configure\` wystarczy **tylko wtedy, gdy świadomie kontrolujesz współdzielony stan konfiguracji**. W większym zespole częściej rozważysz \`configure private\` lub formalnie uzgodniony \`configure exclusive\`. Nie używaj \`exclusive\` bez uzgodnienia z innymi operatorami — może blokować potrzebne zmiany i utrudniać incydent.
+
+**Urządzenie: R1-vSRX — Operational Mode, wariant wspólny**
+
+~~~junos
+configure
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode, wariant prywatny**
+
+~~~junos
+configure private
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode, wariant wyłączny (tylko przy zgodzie zespołu)**
+
+~~~junos
+configure exclusive
+~~~
+
+**To warianty alternatywne**, nie trzy następujące po sobie linijki. Każda rozpoczyna inny model współpracy; po eksperymencie kończ konfigurację przed wybraniem następnego wariantu.
+
+### 3.6.3. Gotcha private: kolega zatwierdził zmianę, gdy Ty pracowałeś
+
+Wyobraź sobie, że na początku Twojej prywatnej sesji active ma numer wersji X. W międzyczasie administrator B zmienia hostname lub politykę i wykonuje commit. Teraz Twoja private candidate powstała ze **starszego active**. Junos nie musi automatycznie przyjąć jej jako nowej konfiguracji systemu.
+
+Dokumentacja Juniper mówi o sprawdzaniu zmian dokonanych przez innych; w zależności od sytuacji commit może zgłosić konflikt. Polecenie **\`update\`** synchronizuje prywatną kopię z ostatnio zatwierdzoną konfiguracją, próbując zachować Twoje zmiany. Przy konflikcie trzeba go rozwiązać — \`update\` nie jest magicznym narzędziem „always merge”.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private]**
+
+~~~junos
+status
+show | compare
+update
+show | compare
+commit check
+~~~
+
+**Nie wykonuj tego jak mechanicznego skryptu**: najpierw sprawdź, czy rzeczywiście potrzebujesz \`update\` i jaki konflikt wystąpił. Jeśli private candidate zawiera niezależne zmiany, \`update\` może się powieść. Jeśli dotykaliście tych samych obiektów, wymagana będzie ręczna decyzja inżyniera.
+
+**Most z Cisco:** możesz pomyśleć o „configuration lock” w IOS XE i automatyzacji przez controller, ale **Junos configure private** ma własną semantykę candidate i konfliktów. Sam fakt pracy w prywatnym edytorze nie zamraża live routing.
+
+### 3.6.4. Gotcha exclusive: lock nie jest HA
+
+Dokumentacja producenta podaje, że \`configure exclusive\` blokuje shared candidate dla innych operatorów. Jeśli w trakcie takiej sesji wykonasz \`commit confirmed\`, a potem nastąpi automatyczny rollback z powodu braku potwierdzenia, **blokada exclusive może zostać zdjęta**. Możesz zobaczyć komunikat o cofniętym dostępie do lock, mimo że nadal masz sesję.
+
+To ma sens: nie chcemy, żeby opuszczone okno serwisowe trzymało „zamek” przez wieczność.
+
+**Do zrozumienia:** blokada konfiguracji jest zabezpieczeniem organizacyjnym, nie zapewnia redundancji routera ani ochrony przed niepoprawną trasą.
+
+### 3.6.5. Kandydat po zmianach — czy on jeszcze jest prywatny?
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show system users
+show system commit
+show configuration system host-name
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+status
+show | compare
+run show system users
+~~~
+
+Zbierz trzy dowody: kto pracuje na urządzeniu, jaki jest stan pending commit oraz czy candidate różni się od active. **Nie traktuj samego promptu \`#\` jako dowodu prywatności sesji.**
+
+Źródła: [Overview of the Configure Command](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configure-command.html), [configure CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/configure.html).
+
+---
+
+## 3.7. Modyfikowanie, usuwanie, zarządzanie i zapisywanie [A]
+
+### 3.7.1. Zanim użyjesz \`set\`, zrozum różnicę między parametrem a gałęzią
+
+W Cisco znasz \`no ip address\`, \`no description\`, \`shutdown\`, \`default interface\`. W Junos konfiguracja jest drzewem, więc możesz usunąć **wartość**, **statement** albo **całą gałąź**. Skutki zależą od miejsca drzewa, nie tylko od słowa \`delete\`.
+
+Rozważmy dwa przykłady:
+- Usuń \`description\` z interfejsu — zwykle mały wpływ operacyjny.
+- Usuń cały \`interfaces ge-0/0/1\` — możesz stracić adres, L2/L3 i dostęp do urządzenia.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], wyłącznie LAB**
+
+~~~junos
+set interfaces ge-0/0/1 description "WAN-PRIMARY-LAB"
+show interfaces ge-0/0/1
+delete interfaces ge-0/0/1 description
+show interfaces ge-0/0/1
+show | compare
+~~~
+
+W przykładzie pokazuję bezpieczny rodzaj zmiany — opis — i sposób jej odwrócenia przed commit. **Nie usuwaj całego portu**, by przećwiczyć \`delete\`.
+
+### 3.7.2. \`deactivate\` nie usuwa konfiguracji: zostawia ją „w szufladzie”
+
+Załóżmy, że masz skonfigurowaną trasę statyczną i chcesz ją tymczasowo wyłączyć, ale nie chcesz zapomnieć next-hopu oraz prefiksu. W Cisco często zrobiłbyś \`no ip route\`, a potem musiał odtwarzać wpis. Junos może oznaczyć dany statement jako **inactive**, aby pozostał w konfiguracji, lecz nie był stosowany po commit.
+
+Na naszym ćwiczeniu wybierzemy bezpieczniejszą gałąź — **description nie jest idealnym przykładem stanu inactive**, więc posłużymy się dedykowaną **testową trasą do dokumentacyjnego prefiksu**, a nie realnym uplinkiem.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB; nigdy nie używaj realnego prefiksu produkcyjnego**
+
+~~~junos
+set routing-options static route 203.0.113.0/24 discard
+deactivate routing-options static route 203.0.113.0/24
+show routing-options | display set
+show | compare
+~~~
+
+W hierarchicznym widoku przed \`static route\` powinieneś zobaczyć oznaczenie \`inactive:\` (forma outputu zależy od kontekstu). W takim stanie wpis jest zachowany, ale nie powinien ustanawiać używanej trasy w active. Jeśli dopiero przygotowujesz candidate, nie musi jeszcze istnieć żaden aktywny wpis dla tej trasy.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], w tym samym izolowanym LAB**
+
+~~~junos
+activate routing-options static route 203.0.113.0/24
+show | compare
+delete routing-options static route 203.0.113.0/24
+show | compare
+~~~
+
+Widzisz różnicę:
+- \`deactivate\`: zaznacz statement jako nieaktywny.
+- \`activate\`: przywróć aktywność w candidate.
+- \`delete\`: usuń statement z candidate.
+
+**Gotcha:** dezaktywowanie statementu po commit **może mieć realny wpływ na routing, sesje i user traffic**. To nie to samo co ukrycie linijki przed operatorem.
+
+### 3.7.3. \`rename\`, \`copy\`, \`insert\`, \`annotate\` — edytor zamiast przepisywania
+
+Projektujesz 20 identycznych portów access. Zamiast przepisywać wszystkie parametry możesz skopiować odpowiedni fragment i zmienić jego identyfikator. Ale kopiowanie całości portu oznacza również kopiowanie **adresów, filtrów, VLAN-ów i opisów**, dlatego najpierw obejrzyj różnicę.
+
+Poniższy przykład używa **gałęzi \`policy-options prefix-list\`**, żeby nie ryzykować zniszczenia istniejącego interfejsu:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
+
+~~~junos
+set policy-options prefix-list LAB-SOURCES 192.0.2.0/24
+copy policy-options prefix-list LAB-SOURCES to LAB-SOURCES-COPY
+show policy-options | display set
+delete policy-options prefix-list LAB-SOURCES-COPY
+delete policy-options prefix-list LAB-SOURCES
+show | compare
+~~~
+
+W podobnym stylu możesz \`rename\` wybrane obiekty. **Nie zmieniaj nazwy policy albo security zone bez zbadania wszystkich referencji**, ponieważ Junos może odrzucić commit lub zmienić powiązania, a skutki dla przepływu ruchu zależą od obiektu.
+
+\`insert\` jest ważny przy **uporządkowanych elementach**, np. termach policy lub firewall filters. Kolejność termów bywa merytoryczną częścią decyzji! W Cisco znasz sequence numbers w route-map/ACL; Junos pozwala zmieniać kolejność za pomocą edytora.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB, przykład pozycji termów**
+
+~~~junos
+set policy-options policy-statement CH03-ORDER term FIRST then accept
+set policy-options policy-statement CH03-ORDER term SECOND then reject
+insert policy-options policy-statement CH03-ORDER term SECOND before term FIRST
+show policy-options policy-statement CH03-ORDER
+delete policy-options policy-statement CH03-ORDER
+show | compare
+~~~
+
+**Cel:** zobaczyć zmianę **kolejności ewaluacji**. Sama konfiguracja testowej policy nie wpływa na routing, dopóki nie zastosujesz jej w odpowiednim miejscu. Nie wyciągaj z tego wniosku, że każda policy bez \`from\` w produkcji jest nieszkodliwa.
+
+### 3.7.4. \`replace pattern\` — potężne, ale zdradliwe
+
+Wyobraź sobie migrację nazewnictwa 200 portów. Na Cisco często używasz skryptu i sprawdzasz \`show archive config differences\`. Junos pozwala przeszukać i zamienić identyfikatory lub wartości w **candidate configuration** za pomocą \`replace pattern\`, w tym wyrażeń regularnych.
+
+Problem polega na tym, że **jedno zbyt szerokie wyrażenie może zmienić wiele obiektów**. Gdy wrzucisz tam adresację, nazwy interfejsów i ACL, nie możesz ufać samemu „commit complete”.
+
+Bezpieczny test wykonajmy na jednym specjalnie utworzonym opisie:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
+
+~~~junos
+set interfaces ge-0/0/1 description "CH03-OLD-DESCRIPTION"
+replace pattern CH03-OLD-DESCRIPTION with CH03-NEW-DESCRIPTION
+show | compare
+~~~
+
+**Nie wykonuj globalnego \`replace pattern 10. with 172.\`** w produkcji. Mechanizm regex, escapowanie kropek oraz pełny zakres gałęzi mogą objąć więcej, niż chciałeś. Dokumentacja Juniper wyjaśnia także \`upto n\` — liczba dotyczy **obiektów**, a nie koniecznie pojedynczych wystąpień tekstu w jednym obiekcie.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], cofnięcie niezacommitowanej próby — tylko po sprawdzeniu, że nie ma innych zmian do zachowania**
+
+~~~junos
+rollback 0
+show | compare
+~~~
+
+Źródło: [Juniper replace command](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/replace.html).
+
+### 3.7.5. \`save\` — czy zapis pliku oznacza commit? Nie!
+
+To następna pułapka dla inżyniera przyzwyczajonego do \`copy running-config startup-config\`.
+
+W Junos \`save /var/tmp/...\` uruchomione w configuration mode zapisuje wybraną konfigurację **jako tekstowy plik**. Nie oznacza, że zmiany weszły do active. Wykonanie \`commit\` jest inną operacją. Natomiast samo **\`commit\` zapisuje i aktywuje** konfigurację — typowo nie potrzebujesz osobnego odpowiednika \`write memory\`.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
+
+~~~junos
+top
+save /var/tmp/ch03-candidate-backup.conf
+show | compare
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode po wyjściu z konfiguracji**
+
+~~~junos
+file list /var/tmp/ detail
+show configuration system host-name
+~~~
+
+Plik w \`/var/tmp\` jest przydatną lokalną kopią roboczą, ale **nie jest trwałym systemem backupu off-device**. Nie trzymaj jedynego ratunku na tym samym dysku routera. Przy upgrade, czyszczeniu storage albo awarii nośnika możesz go stracić.
+
+### 3.7.6. \`annotate\` — dlaczego opis w konfiguracji jest przydatny, a kiedy bywa problemem
+
+Junos pozwala dodawać komentarze do sekcji konfiguracji, m.in. poleceniem \`annotate\`. To pomaga wyjaśnić nietypową politykę i cel zmiany, ale **komentarz nie zastępuje CMDB, dokumentacji HLD ani worknotes w ServiceNow**.
+
+Nie zaczynaj od masowego komentowania konfiguracji produkcyjnej. Ćwiczenie wykonywane na wyizolowanym obiekcie pokażemy w laboratorium 3.LAB; szczegółową składnię sprawdź przez \`annotate ?\` oraz aktualną [CLI Configuration Mode Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-configuration.html).
+
