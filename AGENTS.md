@@ -6,6 +6,8 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 
 ## Canonical source of truth
 
+**Rozdział 1**: docs/chapters/JUNOS_Rozdzial_01_Networking_Fundamentals_i_Enterprise_Portfolio.md — fundamenty + [EXT] portfolio Campus LAN, HLD/BOM i wersje Junos. Portfolio jest zmienne w czasie; sprawdzaj datasheets, supported models, Juniper JTAC KB21476 i release notes, zwłaszcza przed projektowaniem ofert.
+
 1. docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md — obowiązujący, zunifikowany spis treści; zachowaj zakres i numerację.
 2. docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md — pełny rozdział 2 (nie skracaj, nie nadpisuj streszczeniem).
 3. labs/ch02-four-vsrx/README.md — specyfikacja pierwszego większego labu.
@@ -94,3 +96,12 @@ Każdy wartościowy haczyk **wplataj organicznie do właściwej lekcji**, nie zb
 **Nie nazywaj własnych scenariuszy prawdziwymi pytaniami z egzaminu.** Pytanie z forum nie jest certyfikowanym twierdzeniem — porównaj je z oficjalnym producentem. Różnice zależne od wydania/jednostki zaznaczaj jawnie. Nie powielaj mitów „default permit/deny” bez rozróżnienia factory-default config i default software behavior.
 
 Dla rozdziału 2 odpowiedni rejestr źródeł: \`docs/research/CH02_GOTCHAS_ZRODLA_I_WERYFIKACJA.md\`. Dla kolejnych rozdziałów prowadź analogiczny krótki rejestr redakcyjny w \`docs/research/\`; finalny uczeń ma spotkać wyjaśnienia **wewnątrz wykładu**, nie osobno na końcu.
+
+## Portfolio producenta i projektowanie greenfield — obowiązkowe na przyszłość
+
+- W rozdziale 1.12 [EXT] oraz przyszłych rozdziałach doboru sprzętu rozróżniaj **access / distribution / core / wireless / security / WAN**, ale nigdy nie upraszczaj do „jedna rodzina = tylko jedna warstwa”. Dobieraj konkretne modele i pełne SKU per role.
+- Zawsze porównuj do Cisco (Catalyst 9200/9300/9500, ASA/FTD, Catalyst 9800, ISR/ASR, Catalyst Center) z wyjaśnieniem ograniczeń analogii. Mist AP ≠ Junos i SSR ≠ Junos.
+- Podczas podawania wersji oprogramowania sprawdzaj **konkretną rodzinę i model, Suggested Releases JTAC KB21476, Hardware/Feature Explorer, Release Notes, EoE/EoS**. Nigdy nie sugeruj jednego release dla wszystkich EX/QFX/SRX ani nie udawaj, że „-Sx” to dokładny obraz do instalacji. Snapshot zawsze datuj.
+- Przy bill of materials: licz niezależnie porty 1G i mGig/PoE, uplink speeds, optykę, zasilacze i redundancję, licencje Mist/security, support/SLA, potrzeby przyszłego rozwoju oraz kompatybilność z NAC/AAA i Wi-Fi. Nie wymyślaj cen, lead times ani pełnych orderable part numbers.
+- Do repo trafiają tylko bezpieczne, publiczne, ogólne szablony, nie produkcyjne IP, numery ofert, dane klientów ani klucze.
+- Jeżeli nie można potwierdzić 2026 modelu/release, pozostaw status **TO VERIFY**, zamiast zgadywać.
