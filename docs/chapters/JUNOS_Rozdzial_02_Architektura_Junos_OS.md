@@ -729,6 +729,16 @@ show security flow statistics
 
 ---
 
+#### Historia z Day One: dwie równe trasy w RIB, jedna używana przez forwarding?
+
+W [*Day One: Beginner’s Guide to Learning Junos*, rozdział o routing policy](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf) pokazano pouczający przykład: router może znać dwa next-hopy o porównywalnym koszcie, a sposób instalowania i używania tych ścieżek w forwarding zależy od konkretnego zachowania Junos, platformy i ustawień.
+
+Znasz to z Cisco ECMP. Sam fakt, że OSPF zna dwóch sąsiadów, nie dowodzi, jak będą rozłożone **konkretne strumienie**. W Cisco sprawdzisz \`show ip cef\`; w Junos — routing table, forwarding table oraz realną ścieżkę ruchu.
+
+W starszym przykładzie książki autorzy używają **forwarding-table export policy**, aby zmienić mechanizm load balancing. Nie traktuj jednak przykładu ze starszego wydania jako uniwersalnego domyślnego zachowania każdego nowoczesnego EX, MX, QFX i vSRX. **Na egzaminie rozdziału 2 masz zrozumieć różnicę RIB/FIB; konfigurację load balancing rozpracujemy później.**
+
+Wyobraź sobie pytanie instruktora: „R1 zna dwie drogi przez R2 i R3. Czy możesz wskazać, którędy przejdzie rzeczywista sesja PC-A → PC-B, patrząc wyłącznie na listę sąsiadów OSPF?” Nie — musisz sprawdzić informacje forwarding i potwierdzić je testem.
+
 ## 2.5. Transit traffic — idziemy z pakietem od źródła do celu [A]
 
 ### 2.5.1. Kiedy pakiet jest tranzytem?
@@ -825,6 +835,21 @@ flowchart LR
 **W Cisco:** \`show ip cef\` + \`show adjacency\` pomagają wyjaśnić tę drogę. **W Junos:** \`show route\` + \`show route forwarding-table\` + \`show arp\` + test na portach i — dla SRX — \`show security flow session\`.
 
 Gdy ARP nie działa na **R1 ↔ R2**, powrót do \`show route\` i ponowne wczytanie teorii OSPF nie naprawi problemu. Trzeba znaleźć konkretny brak w lokalnym rozwiązywaniu next-hopu.
+
+#### Jeden SSH, różna kategoria pakietu na kolejnych routerach
+
+W [*Day One: Beginner’s Guide to Learning Junos*, rycina 1.12](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf) autorzy przedstawiają przypadek połączenia do zdalnego routera, które po drodze przechodzi przez inne routery. Wykorzystajmy tę sytuację jak pytanie zadane podczas korepetycji.
+
+PC-A otwiera SSH do **adresu R4** przez R1 i R2. Czy jest to „ruch do control plane” na wszystkich trzech routerach, skoro aplikacją jest SSH? **Nie.** Dla R1 i R2 adres docelowy nie jest lokalny — to **transit**. Dopiero R4 musi obsłużyć lokalną usługę SSH — **host-bound/exception**.
+
+~~~mermaid
+flowchart LR
+  A["PC-A — SSH do IP R4"] --> B["R1 — transit"]
+  B --> C["R2 — transit"]
+  C --> D["R4 — host-bound"]
+~~~
+
+To samo już znasz z Cisco: SSH do loopback ostatniego ISR jest zwykłym ruchem routowanym na wcześniejszych hopach. **Klasa ruchu nie zależy od portu TCP 22, tylko od roli danego urządzenia w ścieżce.** Na SRX będzie to też decydować, czy analizujesz security policy tranzytową, czy zezwolenie na usługę lokalną.
 
 ### 2.5.4. Transit na SRX: jeszcze jeden warunek
 
@@ -932,6 +957,18 @@ flowchart TD
 
 **Cisco-punkt odniesienia:** myślisz o normalnym CEF forwarding oraz osobnej ścieżce **punt do CPU** i ochronie CoPP. **Junos:** rozdzielasz PFE, RE, wyjątki i właściwe mechanizmy platformy.
 
+#### Oryginalna zagadka z Juniper Community: SCP przez router — transit czy exception?
+
+W [dyskusji „Exception Traffic example”](https://community.juniper.net/discussion/exception-traffic-example) uczestnik porównywał różne przypadki ruchu SCP/SFTP, w tym ruch **przechodzący przez router** oraz ruch skierowany do **jego własnego interfejsu lub loopbacku**.
+
+Wyobraź sobie dwa eksperymenty:
+- PC-A wysyła plik SCP do serwera PC-B, a R1 przekazuje ruch. **R1 jest tranzytem**, choć to protokół z rodziny bezpiecznego zdalnego dostępu.
+- PC-A wysyła plik na adres samego R1, np. \`lo0\`. **R1 jest odbiorcą lokalnym** i musi obsłużyć odpowiednią usługę oraz ograniczenia dostępu.
+
+Sama nazwa „SCP” nie rozstrzyga sprawy. Dokładnie tak samo na Cisco ISR lub Catalyst z funkcjami L3: port TCP 22 nie sprawia, że ruch do dowolnego serwera za routerem magicznie staje się control plane traffic. **Patrz na destination IP i urządzenie, które analizujesz.**
+
+To ćwiczenie uczy więcej niż pytanie „zaznacz definicję exception traffic”, bo pozwala przewidzieć zachowanie przy zmianie jednego parametru — **adresu docelowego**.
+
 ### 2.6.2. Skąd się bierze packet punt?
 
 Wyobraź sobie zautomatyzowaną sortownię. Większość paczek idzie taśmociągiem. Ale raz na jakiś czas skaner zobaczy szczególny przypadek: paczkę, której system automatyczny nie może obsłużyć zwykłą regułą. Odkłada ją do stanowiska operatora.
@@ -1005,6 +1042,16 @@ Tak samo router może ograniczać pakiety do RE, ale przekazywać ruch użytkown
 
 Zrób sobie małą zasadę diagnostyczną: **zawsze rozdziel odpowiedzi generowane przez router od pakietów, które router tylko przekazuje**.
 
+#### Kto generuje ICMP, gdy TTL wygaśnie — RE czy PFE?
+
+W [dyskusji o Routing Engine i Forwarding Engine](https://community.juniper.net/discussion/routing-engine-and-forwarding-engine) padło właśnie takie pytanie. Wyobraź sobie pakiet, który dociera do R2 z TTL=1. Po zmniejszeniu TTL router nie może przekazać pakietu dalej. Potrzebna jest specjalna reakcja, być może ICMP Time Exceeded.
+
+Błędem byłoby zapamiętanie „każdy ICMP trafia do RE”. W starszych [materiałach szkoleniowych Junipera o Exception Traffic Processing](https://www.juniper.net/content/dam/www/assets/eguides/jp/ja/introduction-to-the-junos-operating-system.pdf) opisano, że pewne wyjątki, takie jak TTL expired, mogą być przetwarzane przez **PFE**. Dokładna ścieżka i generowanie odpowiedzi zależą od platformy i oprogramowania.
+
+Dlaczego ma Cię to obchodzić? Bo **traceroute z gwiazdką na jednym hopie nie oznacza automatycznie, że dataplane nie przekazuje zwykłych pakietów**. Ograniczenie generowania ICMP Time Exceeded może współistnieć z prawidłowym routingiem host-host.
+
+Na Cisco znasz podobny motyw: część wyjątków obsługiwana jest sprzętowo, a część trafia do procesora; dlatego CoPP i odpowiedzi ICMP musisz interpretować w kontekście modelu i wydania.
+
 ### 2.6.6. Jak oglądać ruch do RE bez udawania, że widzimy cały dataplane?
 
 W Junos masz narzędzie **monitor traffic**, ale traktuj je rozsądnie. W typowych zastosowaniach obserwujesz pakiety widoczne z perspektywy RE/host stack. Nie jest to uniwersalny sniffer każdej ramki przechodzącej przez sprzętowy PFE.
@@ -1018,6 +1065,16 @@ monitor traffic interface ge-0/0/2 no-resolve matching "icmp" count 10
 Uruchom tę komendę podczas pingowania **lokalnego IP R1** z PC-A. Potem uruchom ping PC-A → PC-B. Jeśli monitor traffic nie pokaże ruchu transit, a test end-to-end oraz sesja SRX pokazują pakiety, nie traktuj tego jako sprzeczności.
 
 **Dobrze zapamiętaj:** brak pakietu w zrzucie z RE **nie jest dowodem**, że nie dotarł do urządzenia.
+
+#### Prawdziwy problem z MX104: dlaczego \`monitor traffic\` nie widzi transit?
+
+W [dyskusji Juniper o packet capture na MX104](https://community.juniper.net/discussion/is-it-possible-do-packet-capture-on-mx104-without-use-analyzer) inżynier chciał przechwycić ruch między portami na potrzeby diagnostyki MTU. Kluczem do odpowiedzi nie była nowa składnia, lecz **zrozumienie miejsca, w którym działa narzędzie**.
+
+Oficjalna [referencja \`monitor traffic\`](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-traffic.html) mówi, że wyświetla pakiety otrzymywane i wysyłane przez **Routing Engine**. Zatem brak pakietu w takim zrzucie **nie dowodzi**, że PFE go nie przekazuje. Znasz analogiczne ograniczenia debugowania CPU przy hardware-switched traffic na Cisco C9500.
+
+Jeżeli na MX/QFX chcesz zbadać zwykły transit, dobierz odpowiednie dla modelu **port mirroring/analyzer, liczniki i narzędzia PFE**. W naszym vSRX przydatne będą dodatkowo **security flow sessions**. W obu przypadkach nie opieraj diagnozy na pojedynczym, nieobecnym pakiecie w capture po stronie RE.
+
+Uwaga operatorska: dokumentacja Junipera ostrzega, że monitoring może wpływać na wydajność; eksperymentuj w izolowanym labie i ograniczaj \`count\`.
 
 ### 2.6.7. Jak chroni się control plane
 
@@ -1086,6 +1143,16 @@ flowchart LR
 ~~~
 
 **Cisco-punkt odniesienia:** myślisz o dwóch statycznych trasach, z których jedna ma wyższy administrative distance (*floating static route*). W Junos do podobnego celu użyjemy podstawowego next-hopu i **qualified-next-hop z inną route preference**. Pamiętaj, że **preferencja Cisco i preferencja Junos nie mają tych samych domyślnych wartości**, a statyczny routing sam nie wykrywa każdej awarii odległego łącza.
+
+#### Pytanie z oficjalnego webcastu JNCIA: czy ćwiczenia na vSRX naprawdę są potrzebne?
+
+Na [JNCIA-Junos webcast, którego pytania i odpowiedzi opublikowano w społeczności Junipera](https://community.juniper.net/discussion/do-you-have-questions-about-the-jncia-junos-exam), ktoś zapytał, czy warto ćwiczyć na **vSRX**. Instruktor zdecydowanie zachęcał do praktyki i wskazał Juniper vLabs.
+
+Przełóż to na swoje doświadczenie Cisco: trudno dobrze rozumieć CEF adjacency, jeśli nigdy nie wywołałeś błędu ARP, którego nie naprawi ani jedna zmiana OSPF. Z Junos jest tak samo. **Nie wystarczy pamiętać, że RE i PFE mają oddzielne zadania. Trzeba na własne oczy zobaczyć, kiedy host-bound ping działa, a transit nie, i odwrotnie.**
+
+Dlatego mamy cztery vSRX, nie tylko jeden: przećwiczysz błędny next-hop, stateful security i alternatywną drogę przez R3. Pamiętaj jednak, że vSRX nie odwzorowuje sprzętowego ASIC w EX/QFX/MX. Do tych aspektów wybierzemy później odpowiednią platformę laboratoryjną.
+
+Dodatkowe sprawdzanie wiedzy możesz wykonać w [oficjalnym, bezpłatnym JNCIA-Junos Practice Exam](https://learningportal.juniper.net/juniper/user_activity_info.aspx?id=EXAM-JNCIA-JUNOS). Jego szczegółowe pytania są dostępne wewnątrz interaktywnego testu; **nie traktuj naszych ćwiczeń jako kopii tego banku pytań**.
 
 ### 2.LAB.2. Rozrysuj adresy, zanim wpiszesz pierwszą komendę
 
