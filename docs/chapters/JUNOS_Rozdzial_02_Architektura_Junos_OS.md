@@ -112,6 +112,37 @@ Kiedy później na tym samym routerze zrobisz **show route**, sprawdzasz perspek
 
 I właśnie tu rodzi się pierwszy egzaminacyjny haczyk: **informacja o istnieniu trasy to nie to samo co dowód, że pakiet został poprawnie wysłany**.
 
+### Most z Cisco #1 — Routing Processor, QFP i ASIC: tę architekturę już znasz
+
+Na Cisco Catalyst 9300/9500 czy ASR nie wyobrażasz sobie przecież, że **każdy pakiet 10 Gb/s** przechodzi przez proces OSPF uruchomiony na głównym CPU. Wiesz, że routing tworzy wiedzę o drodze, a **CEF oraz odpowiedni sprzętowy forwarding** realizują ruch. W Junos nazwy są inne, lecz rozwiązujemy ten sam problem.
+
+**Znasz z Cisco:** control plane / Routing Processor (RP), routing protocols, RIB; szybki dataplane przez ASIC lub — na właściwych platformach — QFP. **Teraz przenieś to do Junos:** Routing Engine (RE), proces \`rpd\`, RIB \`inet.0\`, Packet Forwarding Engine (PFE).
+
+Uwaga na pułapkę analogii: **QFP nie jest uniwersalnym odpowiednikiem PFE na każdej platformie**. Nie każdy Cisco ma QFP i nie każdy Juniper ma sprzętowy ASIC. Rola jest podobna, implementacja zależy od urządzenia.
+
+~~~mermaid
+flowchart LR
+  subgraph C["Cisco IOS XE — znany model"]
+    direction TB
+    C1["OSPF / BGP, RP"] --> C2["RIB: show ip route"]
+    C2 --> C3["CEF FIB: show ip cef"]
+    C3 --> C4["ASIC / QFP — według platformy"]
+  end
+  subgraph J["Juniper Junos — model do opanowania"]
+    direction TB
+    J1["OSPF / BGP: rpd na RE"] --> J2["RIB: show route inet.0"]
+    J2 --> J3["Master FIB: show route forwarding-table"]
+    J3 --> J4["PFE — zainstalowany forwarding"]
+  end
+  C1 -. "ta sama funkcja" .-> J1
+  C3 -. "podobna rola" .-> J3
+  C4 -. "przetwarzanie danych" .-> J4
+~~~
+
+**Zapamiętaj jedną rzecz:** na Cisco intuicyjnie rozdzielasz \`show ip route\` od \`show ip cef\`; w Junos robisz dokładnie to samo z \`show route\` i \`show route forwarding-table\`. Dopiero potem pytasz, czy faktyczne przetwarzanie PFE działa.
+
+Źródła techniczne: [Cisco CEF](https://www.cisco.com/c/en/us/td/docs/ios/ipswitch/configuration/guide/convert/ips_cef/cef_basic_config.html) oraz [Juniper forwarding table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
+
 ### 2.1.3. Junos to nie jeden ogromny proces
 
 W Cisco spotkałeś różne procesy i podsystemy IOS XE. Junos również składa się z wyspecjalizowanych usług, często określanych jako **daemons**. Nie musisz znać wszystkich. Na początku poznaj cztery postacie naszej historii.
@@ -213,6 +244,34 @@ Wyobraź sobie trzy testy:
 Wszystkie trzy wykorzystują ICMP. **Sam protokół ICMP nie mówi, z którą płaszczyzną masz do czynienia.** Decyduje przede wszystkim rola urządzenia w ścieżce pakietu oraz jego lokalne przeznaczenie.
 
 Prawidłowa odpowiedź w troubleshootingu nie brzmi „ping przechodzi”, lecz np. „PC-A osiąga IP R1, ale nie osiąga PC-B; host-bound działa, transit nie został jeszcze potwierdzony”.
+
+### Most z Cisco #2 — CoPP i „ping do SVI działa, ale VLAN nie routuje”
+
+Wyobraź sobie znajomą awarię na **Catalyst 9500**. Pingujesz adres SVI i masz odpowiedź. Następnie host z VLAN-u A nie dociera do hosta w VLAN-ie B. Na Cisco rozdzieliłbyś test **ruchu do samego przełącznika** od **ruchu routowanego przez SVI**. Potem sprawdziłbyś ACL, CEF, interfejsy, tablicę MAC/ARP i drogę powrotną.
+
+W Junos ta sama dyscyplina jest jeszcze ważniejsza, ponieważ na **SRX** osobno kontrolujesz **host-inbound** i **security policy transit**. Później omówimy, dlaczego założenie „ping działa, więc router routuje” bywa kosztowne.
+
+Znasz też **Control Plane Policing (CoPP)** na Cisco, np. \`show policy-map control-plane\` na odpowiednich Catalyst/IOS XE. Juniper stosuje m.in. ochronę control plane, filtry \`lo0\` na wspieranych platformach i kontrolę usług host-inbound na SRX. **Cel podobny, ale mechanizmy nie są zamiennikami 1:1.**
+
+**Urządzenie: Cisco-C9500 — tryb privileged EXEC; przykład kontrolny**
+
+~~~cisco
+show ip route
+show ip cef
+show policy-map control-plane
+~~~
+
+**Urządzenie: R1-vSRX — tryb operational; porównywalne pytania**
+
+~~~junos
+show route table inet.0
+show route forwarding-table
+show configuration security zones | display set
+~~~
+
+Zadaj sobie pytanie: **które z powyższych komend dowodzą, że PC-A rozmawia z PC-B?** Żadna samodzielnie. Właśnie dlatego po nich następuje test end-to-end.
+
+Źródła: [Cisco CoPP na Catalyst](https://www.cisco.com/c/en/us/td/docs/switches/lan/c9000/qos/quality-of-service-configuration-guide/control-plane-policing.html), [Juniper Junos RE forwarding table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
 
 ### 2.2.3. Wspólna historia jednego pakietu
 
@@ -354,6 +413,32 @@ Pierwsza komenda znajduje pasującą trasę, druga pomaga przyjrzeć się prefik
 
 **Pułapka egzaminacyjna:** obecność wpisu w RIB nie dowodzi ani poprawnej instalacji forwarding, ani zgodności polityk bezpieczeństwa, ani sprawności odległego hosta.
 
+### Most z Cisco #3 — \`show ip route\` kontra \`show ip cef\`: teraz dodaj trzeci krok
+
+Załóżmy, że na Cisco ISR widzisz poprawny wpis w \`show ip route 198.51.100.0\`, ale użytkownik nadal nie ma połączenia. Co robisz? Sprawdzasz **CEF** oraz adjacency. Tego samego oczekuję, gdy spojrzysz na Junos.
+
+**Urządzenie: Cisco-ISR — tryb privileged EXEC**
+
+~~~cisco
+show ip route 198.51.100.0
+show ip cef 198.51.100.10 detail
+show adjacency detail
+show ip arp
+~~~
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show route 198.51.100.10
+show route forwarding-table destination 198.51.100.10
+show arp
+show interfaces terse
+~~~
+
+Gdy pakiet nadal nie dochodzi, na SRX dochodzą **strefy, reguły i sesje flow**. Nie próbuj mechanicznie zamienić \`show adjacency detail\` na identyczną komendę Junos. **CEF adjacency** i next-hop/ARP w Junos opisują spokrewniony problem (jak zbudować lokalne przekazanie L2), ale struktury i CLI nie są takie same.
+
+To porównanie potwierdza oficjalny [przewodnik Cisco CEF](https://www.cisco.com/c/en/us/td/docs/ios/ipswitch/configuration/guide/convert/ips_cef/cef_basic_config.html) i [opis Juniper show route forwarding-table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
+
 ### 2.3.4. Czy Routing Engine także zajmuje się konfiguracją?
 
 Tak. To drugi powód, dla którego RE jest ważny poza samym routingiem.
@@ -384,6 +469,18 @@ exit
 ~~~
 
 W razie błędu w konfiguracji — jeśli nie potwierdzisz — działa mechanizm wycofania; nie traktuj go jako zastępstwa testów. Na produkcji uwzględnij też równoległych operatorów i zasady change management. Mechanikę candidate/commit/rollback nauczymy się szerzej w rozdziale 3.
+
+### Most z Cisco #4 — Różnica w pracy z konfiguracją: „wpisuję” kontra „proponuję i zatwierdzam”
+
+Na klasycznym Cisco IOS XE w trybie \`configure terminal\` zmiana \`interface description\` zwykle wpływa na **running-config od razu**. Dlatego przy zdalnej zmianie IP lub ACL potrafisz stracić sesję w momencie zatwierdzenia samej komendy.
+
+W Junos podstawowy odruch wygląda inaczej: tworzysz **candidate configuration**, oglądasz różnicę poleceniem \`show | compare\`, robisz \`commit check\`, a dopiero potem \`commit confirmed 5\`. Jeśli odetniesz sobie SSH, system może automatycznie wrócić do poprzedniej konfiguracji po upływie czasu — oczywiście tylko wtedy, gdy zmiana została wykonana z użyciem tego mechanizmu.
+
+Cisco również ma mechanizmy **configuration replace/rollback confirmed** na obsługiwanych wersjach/platformach — nie wolno twierdzić, że rollback jest wyłącznie wynalazkiem Junos. Różnica polega na tym, że **candidate + commit to centralny, codzienny sposób pracy w Junos**, a nie osobny dodatek do typowego \`conf t\`.
+
+Przykład życiowy: w nocy zmieniasz port uplink zarządzanego zdalnie urządzenia. Na Junos **najpierw zadajesz pytanie o możliwość powrotu**, zanim wykonasz operację. To nawyk, który chcę, abyś przejął od pierwszej lekcji.
+
+Źródło: [Cisco configuration rollback confirmed](https://www.cisco.com/c/en/us/td/docs/routers/ios-xe/system-management/system-management/m_cm-config-rollback-confirmed-change.html).
 
 ### 2.3.5. Kiedy RE pracuje ciężko i co wtedy robisz?
 
@@ -486,6 +583,32 @@ Dopasowanie do **/25** jest najdokładniejsze. Mimo istnienia /24 i /0 router wy
 Teraz uważaj na typowy haczyk: jeśli masz **dwie trasy do tego samego 198.51.100.128/25**, nie „wygrywa dłuższy prefiks”, bo obie są równie długie. Musisz rozpatrzyć selekcję tras i stosowne preferencje. LPM służy do dopasowania docelowego adresu do prefiksu, a nie do wybierania między kandydatami do identycznej sieci.
 
 **Pytanie kontrolne:** pakiet do 198.51.100.50 — którą drogą? Przez R2, ponieważ 50 nie należy do 198.51.100.128/25, ale należy do /24.
+
+### Most z Cisco #5 — CEF adjacency to Twój znajomy ze świata MAC rewrite
+
+Pracowałeś z \`show adjacency detail\` i wiesz, że route lookup nie wystarcza do fizycznego wysłania ramki. Router potrzebuje informacji, **jak opakować pakiet IP w Ethernet do następnego hopu**.
+
+Na Cisco CEF rolę odgrywają FIB i adjacency: pierwsza pomaga wybrać drogę, druga dostarcza informacje do lokalnej enkapsulacji/rewritingu. W Junos też musisz rozdzielić **wybór next-hopu**, **ARP/ND** oraz **obsługę przekazania przez PFE**, lecz struktury oraz nazwy poleceń są inne.
+
+Posłuż się prostą próbą: masz aktywną trasę przez \`10.12.0.2\`, ale nie możesz rozwiązać adresu MAC tego next-hopu. Co stanie się z ruchem? Sam wpis w RIB nie dostarczy pakietu do R2.
+
+**Urządzenie: Cisco-ISR — tryb privileged EXEC**
+
+~~~cisco
+show ip cef 198.51.100.10 detail
+show adjacency detail
+show ip arp
+~~~
+
+**Urządzenie: R1-vSRX — tryb operational**
+
+~~~junos
+show route forwarding-table destination 198.51.100.10
+show arp
+show interfaces ge-0/0/0 extensive
+~~~
+
+Kiedy będziesz oglądał ARP, przypomnij sobie, że **MAC dotyczy lokalnego next-hopu**, nie docelowego serwera oddalonego o trzy routery. Szczegółowa [dokumentacja Cisco CEF adjacency](https://www.cisco.com/c/en/us/support/docs/ip/express-forwarding-cef/17812-cef-incomp.html) opisuje tę zależność.
 
 ### 2.4.4. Co naprawdę mówią „route”, „forwarding table” i „PFE”?
 
@@ -619,6 +742,22 @@ Na wyjściu z R1 do sieci PC-B:
 
 Jest istotny wyjątek: **NAT** może zmienić IP, dlatego mówimy „zwykle”, a nie „zawsze”.
 
+### Most z Cisco #6 — Pakiet zmienia MAC dokładnie tak samo na IOS XE i Junos
+
+To mechanika, którą znasz z Cisco doskonale, ale tutaj warto ją zobaczyć. PC-A wysyła pakiet IP do PC-B przez R1 i R4. Na **każdym routowanym hopie** zmienia się nagłówek Ethernet, natomiast końcowe adresy IP zwykle pozostają te same.
+
+~~~mermaid
+flowchart LR
+  A["PC-A\nIP 192.0.2.10"] -->|"L2: MAC PC-A → MAC R1\nIP: 192.0.2.10 → 198.51.100.10"| R1["R1-vSRX"]
+  R1 -->|"L2: MAC R1 → MAC R2\nIP: bez zmiany"| R2["R2-vSRX"]
+  R2 -->|"Nowy lokalny L2 rewrite"| R4["R4-vSRX"]
+  R4 -->|"L2: MAC R4 → MAC PC-B\nIP: bez zmiany"| B["PC-B\nIP 198.51.100.10"]
+~~~
+
+**W Cisco:** \`show ip cef\` + \`show adjacency\` pomagają wyjaśnić tę drogę. **W Junos:** \`show route\` + \`show route forwarding-table\` + \`show arp\` + test na portach i — dla SRX — \`show security flow session\`.
+
+Gdy ARP nie działa na **R1 ↔ R2**, powrót do \`show route\` i ponowne wczytanie teorii OSPF nie naprawi problemu. Trzeba znaleźć konkretny brak w lokalnym rozwiązywaniu next-hopu.
+
 ### 2.5.4. Transit na SRX: jeszcze jeden warunek
 
 Pamiętasz kontrolę na moście z sekcji 2.4? Właśnie tu ona działa.
@@ -646,6 +785,19 @@ show security flow statistics
 Co mówi wynik? **Zone** wskazuje logiczny kontekst wejścia i wyjścia. **Policy** decyduje, czy nowy ruch jest dopuszczony. **Session** mówi, czy dla obserwowanego ruchu powstał stan; liczniki mogą pomóc ustalić, czy pakiety rzeczywiście wędrują.
 
 Jeżeli sesji nie ma, nie wyciągaj od razu wniosku „policy deny”. Pakiet mógł jeszcze nie dotrzeć do SRX, trafić do złej sieci, mieć zły gateway lub zostać odrzucony wcześniej.
+
+### Most z Cisco #7 — „to przecież router”, ale SRX jest też firewallem
+
+Kiedy pracujesz z Catalyst 9300/9500, VLAN-y i SVI z włączonym \`ip routing\` nie wymagają **domyślnej stanowej polityki zezwalającej między strefami**. Oczywiście możesz mieć ACL lub inne mechanizmy blokady, ale samo routowanie na przełączniku i stateful firewall to dwie różne rzeczy.
+
+SRX zachowuje się inaczej. **Security zones i policies są centralnym elementem przetwarzania transit.** To porównuj raczej do **Cisco ASA/FTD lub IOS XE Zone-Based Firewall**, nie do zwykłego Catalyst SVI.
+
+Analogicznie:
+- ACL na SVI Cisco może blokować pakiety stateless, według konkretnych pól.
+- Stateful SRX podejmuje decyzje dla sesji w kontekście stref i policy.
+- Działające \`show route\` na obu platformach **nie dowodzi**, że polityka dopuściła ruch użytkownika.
+
+**Pytanie:** jeśli Twoje Cisco 9500 bez ACL routuje między VLAN 10 i 20, czy po przepisaniu tych VLAN-ów do dwóch stref SRX wystarczą same adresy i trasy? **Nie.** Trzeba przeanalizować security policies i ewentualnie NAT.
 
 ### 2.5.5. Dlaczego routing z R1 może działać, a PC-A → PC-B nie?
 
@@ -729,6 +881,14 @@ Szukasz dwustopniowej historii:
 2. Czy osobna policy pozwala na **transit** do innej sieci?
 
 Te dwie decyzje można zmienić niezależnie, co pokażemy w laboratorium.
+
+### Most z Cisco #8 — CoPP kontra host-inbound i filtr lo0
+
+Na Cisco widziałeś już przypadek, w którym przeciążony lub zbyt restrykcyjny CoPP powodował, że dostęp do CPU/control plane był ograniczany, choć zwykły forwarding przez ASIC działał. Takie rzeczy łatwiej zrozumieć, kiedy pytasz nie „czy ICMP jest zablokowany?”, lecz **„czy ten pakiet ma zostać obsłużony lokalnie przez urządzenie?”**.
+
+Na Junos nie stosujemy bezmyślnie konfiguracji \`control-plane service-policy\` znanej z Cisco. W urządzeniach routing/switching występuje m.in. ochrona przez odpowiednie filtry na \`lo0\` i platformowe mechanizmy policerów, a na SRX osobno kontrolujesz **host-inbound-traffic** dla stref/interfejsów.
+
+**Na pamięć:** transit policy SRX i host-inbound permissions SRX **nie są tym samym**. Zrozumienie tej jednej różnicy oszczędzi Ci mnóstwa fałszywych diagnoz.
 
 ### 2.6.4. BGP to też rozmowa z samym routerem
 
@@ -1085,6 +1245,19 @@ trace 192.0.2.10
 ~~~
 
 Jeśli oba pingi host-host działają, mamy dobry punkt wyjścia. Nie wyciągaj jeszcze wniosku, którędy przeszedł ruch. To sprawdzamy dalej.
+
+### Most z Cisco #9 — Lab jak na CCNP: najpierw przewidź CEF, potem spójrz na Junos
+
+Wyobraź sobie, że tę samą topologię skonfigurowałeś na Cisco ISR i dwóch hostach. Naturalna sekwencja troubleshootingu: \`show ip route\` → \`show ip cef\` → \`show adjacency\` → \`show ip arp\` → ping/traceroute end-to-end.
+
+W Junos zachowaj dokładnie tę **kolejność pytań**, ale zmień narzędzia:
+1. Czy R1 zna trasę do 198.51.100.0/24? \`show route\`.
+2. Czy RE ma forwarding entry przez R2? \`show route forwarding-table\`.
+3. Czy next-hop R2 jest widoczny na L2? \`show arp\` i interfejs.
+4. Czy SRX dopuścił i śledzi sesję? \`show security flow session\`.
+5. Czy PC-B odpowiedział i czy powrót jest symetryczny? Test na hostach i w R4.
+
+**Nie ucz się teraz dwóch obcych list.** Znasz już workflow Cisco. Twoim zadaniem jest przenieść workflow do Junos i dołożyć świadomość stateful SRX.
 
 ### 2.LAB.9. Przyglądamy się pakietom, zamiast wierzyć diagramowi
 
