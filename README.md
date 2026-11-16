@@ -4,11 +4,12 @@ Własny podręcznik i repozytorium laboratoriów do nauki **JNCIA-Junos (JN0-106
 
 ## Zacznij tutaj
 
-1. [Wspólny blueprint — spis treści wszystkich trzech poziomów](docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md)
-1a. [Rozdział 1 — Networking Fundamentals i praktyczne portfolio Juniper Enterprise (greenfield/BOM)](docs/chapters/JUNOS_Rozdzial_01_Networking_Fundamentals_i_Enterprise_Portfolio.md)
-2. [Rozdział 2 — Junos OS Fundamentals: pełny podręcznik, wersja korepetycyjna](docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md)
-3. [Lab rozdziału 2 — cztery vSRX i dwa hosty](labs/ch02-four-vsrx/README.md)
-4. [Instrukcje dla Codexa](AGENTS.md)
+1. [Wspólny blueprint — wszystkie trzy poziomy](docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md)
+2. [Rozdział 1 — Networking Fundamentals oraz Enterprise Portfolio, Greenfield i BOM](docs/chapters/JUNOS_Rozdzial_01_Networking_Fundamentals_i_Enterprise_Portfolio.md)
+3. [Rozdział 2 — Junos OS Fundamentals (rozbudowany wykład)](docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md)
+4. [Lab rozdziału 2 — 4×vSRX i 2×VPCS](labs/ch02-four-vsrx/README.md)
+5. [Instrukcje dla Codexa](AGENTS.md)
+6. [Źródła modeli, wersji Junos i ograniczeń BOM — research 2026-11-16](docs/research/CH01_ENTERPRISE_PORTFOLIO_ZRODLA_2026-11-16.md)
 
 ## Projekt — zasady
 
