@@ -1344,3 +1344,377 @@ sequenceDiagram
 
 **Najważniejsze zdanie całego rozdziału:** Junos daje Ci kontrolę nad momentem aktywowania konfiguracji, ale **odpowiedzialność za jakość projektu, kolejność operacji i weryfikację aplikacji pozostaje po stronie inżyniera**.
 
+
+
+---
+
+## 3.LAB. [LAB] Pracujemy na prawdziwej candidate: od błędu operatora do bezpiecznego przywrócenia
+
+### 3.LAB.1. Dlaczego ten lab potrzebuje dwóch administratorów, a nie czterech routerów?
+
+W rozdziale 2 ćwiczyliśmy topologię diamond 4×vSRX, bo chodziło o ruch i alternatywne ścieżki. Tutaj chodzi o **zarządzanie stanem jednego urządzenia i konflikty operatorów**. Zatem do większości eksperymentów wystarczy jeden vSRX, dwie osobne sesje SSH i niezależna konsola EVE-NG. To nie jest uproszczenie kosztem jakości. To świadome ograniczenie liczby zmiennych.
+
+~~~mermaid
+flowchart TB
+    A["Admin-A\nSSH session 1"] -->|shared lub private| R["R1-vSRX\nJunos config database"]
+    B["Admin-B\nSSH session 2"] -->|shared lub private| R
+    C["EVE-NG Console\nout-of-band recovery"] --> R
+    R --> M["Adres zarządzania\nsprawdzony przed testem"]
+    R --> D["Interfejs danych — opcjonalny,\nnie jest ścieżką SSH"]
+~~~
+
+**Stan laboratorium: PLANNED.** Nie uruchamiano go w EVE-NG; nie podajemy fikcyjnych wyników ani adresów serwera.
+
+#### Warunki wejścia
+
+- EVE-NG ma działający, legalny obraz vSRX i odpowiednie zasoby.
+- Masz dostęp do konsoli R1 niezależny od interfejsu, którym działa SSH.
+- Potwierdziłeś rzeczywisty adres management, port i drogę SSH. vSRX może wykorzystywać \`fxp0\`, ale nie zakładaj tego bez \`show interfaces terse\`.
+- Test przeprowadzasz w **izolowanej sieci laboratoryjnej**, bez połączenia do produkcji/biura.
+- Znasz uprawnienia obu kont; jeśli nie masz drugiego konta, utworzenie go należy do rozdziału 4 albo do zatwierdzonego lab startup.
+- Wspólna candidate nie ma niezatwierdzonych zmian innych osób; jeśli ma, nie zaczynaj ćwiczenia z shared candidate.
+- Zapisujesz precheck, aktualny hostname, opis testowego portu, konfigurację login message i historię commitów.
+
+#### Niezależność od wcześniejszych ćwiczeń
+
+Ten rozdział **nie kasuje adresacji z laboratorium CH02**. Eksperymenty opierają się na \`system login message\` oraz opisach testowego interfejsu **GE-DATA-TEST**. Przed wykonaniem wybierz faktyczny port, który **nie przenosi management**. W przykładach nazwa \`ge-0/0/2\` jest tylko założeniem do adaptacji; jeżeli na R1 jest to port PC-A, wybierz inną bezpieczną gałąź lub wykonaj wyłącznie testy login message.
+
+### 3.LAB.2. Test zerowy: zobacz stan przed zmianą
+
+**Urządzenie: R1-vSRX — Operational Mode (Admin-A lub konsola)**
+
+~~~junos
+show version
+show system uptime
+show system users
+show system commit
+show interfaces terse
+show configuration system login | display set
+show configuration interfaces ge-0/0/2 | display set
+~~~
+
+**Zadanie ucznia:** zapisz w notatniku, z którego portu zarządzania jesteś połączony. Sprawdź, czy \`ge-0/0/2\` nie jest elementem management. Zapisz istniejącą konfigurację (bez sekretów i danych produkcyjnych). Ustal, czy inne sesje już edytują shared candidate.
+
+**Urządzenie: R1-vSRX — Configuration Mode, tylko po potwierdzeniu, że jesteś jedynym autorem w shared candidate**
+
+~~~junos
+configure
+status
+show | compare
+exit
+~~~
+
+Jeżeli \`show | compare\` nie jest puste, **nie wykonuj \`rollback 0\`** na cudzej pracy, tylko ustal z zespołem, co znajduje się w candidate. Jeżeli prowadzisz własny lab bez innych operatorów, możesz dopiero wtedy bezpiecznie przywrócić baseline.
+
+### 3.LAB.3. Ćwiczenie A — candidate nie zmienia active
+
+Prowadzący mówi: „Dodaj banner i pokaż mi, że użytkownicy nadal widzą stary banner, bo niczego jeszcze nie commitowałeś”.
+
+**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
+
+~~~junos
+configure private
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A)**
+
+~~~junos
+set system login message "CH03 - CANDIDATE ONLY"
+show | compare
+run show configuration system login message
+~~~
+
+**Oczekiwany rezultat:** \`show | compare\` pokazuje przygotowaną zmianę; operacyjny odczyt active przez \`run show configuration ...\` nie pokazuje nowego banneru, dopóki nie ma commit. Jeżeli różnica jest inna, zatrzymaj ćwiczenie — możliwe, że system miał już taki sam tekst albo w międzyczasie zmienił się active.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A), cleanup testu A**
+
+~~~junos
+rollback 0
+show | compare
+exit
+~~~
+
+**Nauczony mechanizm:** \`rollback 0\` czyści prywatne niezacommitowane zmiany. W tym ćwiczeniu nie powinno powstać nowe entry historii commit.
+
+### 3.LAB.4. Ćwiczenie B — dwie sesje, jedna shared candidate
+
+To najważniejszy eksperyment związany z \`configure\`. Nie potrzebujesz setek poleceń — wystarczy jeden banner i jedna opisowa linia na bezpiecznym porcie, **jeżeli port jest zweryfikowany jako niezarządzający**.
+
+**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
+
+~~~junos
+configure
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-A)**
+
+~~~junos
+set system login message "CH03 - ADMIN A"
+show | compare
+~~~
+
+W drugiej sesji:
+
+**Urządzenie: R1-vSRX — Operational Mode (Admin-B)**
+
+~~~junos
+configure
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-B), wyłącznie potwierdzony port danych**
+
+~~~junos
+set interfaces ge-0/0/2 description "CH03-ADMIN-B"
+show | compare
+status
+~~~
+
+Teraz wróć do Admin-A i porównaj candidate:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-A), nie zatwierdzaj jeszcze**
+
+~~~junos
+show | compare
+status
+~~~
+
+**Przewidywanie:** w shared candidate Admin-A może zobaczyć **oba** niezacommitowane fragmenty. Jeśli teraz wykonałby commit, mógłby zatwierdzić również zmianę Admin-B. To jest sedno problemu. **Nie musisz wykonywać rzeczywistego commit, aby udowodnić mechanikę shared candidate.**
+
+Na końcu, po uzgodnieniu obu sesji:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-A), czyszczenie wspólnego LAB po zgodzie Admin-B**
+
+~~~junos
+rollback 0
+show | compare
+exit
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-B), zakończenie sesji**
+
+~~~junos
+exit
+~~~
+
+Upewnij się, że \`show | compare\` nie zawiera cudzych zmian. Jeśli lab był współdzielony z kimś spoza ćwiczenia, nie używaj tu automatycznie \`rollback 0\`.
+
+### 3.LAB.5. Ćwiczenie C — private candidate, a międzyczasie inny administrator commitował
+
+Tym razem Admin-A przygotowuje nowy banner w private, a Admin-B wprowadza zmianę **inną i niezależną** (np. opis portu). Konieczna jest niezależna konsola, choć same operacje mogą być bezpieczne.
+
+**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
+
+~~~junos
+configure private
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A)**
+
+~~~junos
+set system login message "CH03 - PRIVATE-A"
+show | compare
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode (Admin-B)**
+
+~~~junos
+configure private
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-B), port danych zweryfikowany**
+
+~~~junos
+set interfaces ge-0/0/2 description "CH03-PRIVATE-B"
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Admin-B wykonuje test i świadomie potwierdza:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-B), dopiero po weryfikacji**
+
+~~~junos
+commit
+exit
+~~~
+
+Teraz Admin-A ma private candidate utworzoną przed commit Admin-B. Jaką otrzyma odpowiedź przy próbie własnego commit? Zależy od wydania, konfliktów i aktualnego stanu. **Nie próbuj siłowo commitować**. Sprawdź zmianę globalną i wykonaj \`update\` w private.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A)**
+
+~~~junos
+show | compare
+update
+show | compare
+commit check
+~~~
+
+Oczekiwany koncept: prywatna candidate Admin-A powinna zostać uzgodniona z nowym active w takim zakresie, w jakim nie ma konfliktu. Gdy zobaczysz conflict, rozwiązujesz go, nie zakładasz, że \`update\` wszystko naprawia.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A), aktywacja po poprawnym update, tylko LAB**
+
+~~~junos
+commit confirmed 5
+~~~
+
+Po service verification:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A)**
+
+~~~junos
+commit
+exit
+~~~
+
+Na zakończenie przywróć dokładnie wyjściowy banner i opis na podstawie zapisanego **precheck**, nie przez zgadywanie, że przed testem nie było opisu. Najbezpieczniej przygotować oddzielny, zweryfikowany plan cofnięcia lub rozważyć kontrolowany rollback do zapisanego punktu.
+
+### 3.LAB.6. Ćwiczenie D — wczytaj konfigurację, ale nie zastępuj całego urządzenia
+
+W tym eksperymencie nie potrzebujemy nawet zewnętrznego SCP. Wykorzystaj \`load set terminal\` i \`load merge terminal\`, aby zobaczyć różnicę formatów.
+
+**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
+
+~~~junos
+configure private
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], rozpoczęcie importu set**
+
+~~~junos
+load set terminal
+~~~
+
+**Dane wprowadzane do R1-vSRX jako zawartość terminalowego \`load set\` (potem Ctrl+D)**
+
+~~~junos
+set system login message "CH03 - LOADED-SET"
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], po Ctrl+D**
+
+~~~junos
+show | compare
+rollback 0
+~~~
+
+Teraz drugi wariant:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], rozpoczęcie importu hierarchy**
+
+~~~junos
+load merge terminal
+~~~
+
+**Dane wprowadzane do R1-vSRX jako hierarchy, potem Ctrl+D**
+
+~~~junos
+system {
+    login {
+        message "CH03 - LOADED-MERGE";
+    }
+}
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], po Ctrl+D**
+
+~~~junos
+show | compare
+rollback 0
+exit
+~~~
+
+**Co się wydarzyło?** Dwa różne formaty importu prowadzą do podobnej zmiany w candidate, ale mechanika parsera i zakres zastąpienia są inne. **Nie uruchamialiśmy \`load override\`**, ponieważ nie jest to potrzebne do osiągnięcia celu szkoleniowego.
+
+### 3.LAB.7. Ćwiczenie E — kontrolowany \`commit confirmed\` z automatycznym rollbackiem
+
+To eksperyment, który naprawdę warto wykonać po drugiej stronie Cisco.
+
+**Cel:** aktywować nieszkodliwy login banner na krótki czas i sprawdzić, że Junos sam wróci do wcześniejszego active, jeśli operator nie potwierdzi zmiany.
+
+**Nie wycinamy SSH i nie usuwamy adresu IP management.** Dla zrozumienia mechanizmu wystarczy bezpieczna zmiana, po której obserwujemy timer.
+
+**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
+
+~~~junos
+show system commit
+configure private
+~~~
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], odseparowany LAB**
+
+~~~junos
+set system login message "CH03 - TEMPORARY CONFIRMED CHANGE"
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+Teraz bardzo uważnie: **nie wydawaj \`commit check\` ponownie**, bo może potwierdzić oczekujący commit.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], odczyt po aktywacji**
+
+~~~junos
+run show system commit
+run show configuration system login message
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode (Admin-B albo EVE console), obserwacja niezależna**
+
+~~~junos
+show system commit
+show configuration system login message
+~~~
+
+Przewidywanie: przez chwilę aktywna konfiguracja zawiera nowy login message, a \`show system commit\` informuje o oczekiwanym rollback. Po upływie okresu oczekiwania bez potwierdzenia Junos powinien załadować wcześniejszy active, a historia commitów odnotować zdarzenie. Zapisz wyniki przed i po.
+
+**Jeśli inne procesy lub administratorzy nadal wykonują commity na tym urządzeniu, przerwij ćwiczenie**. Użyj dedykowanego laba. Nie uznawaj, że odzyskanie starego banneru jest dowodem, że w produkcji wszystkie sesje BGP wróciłyby natychmiast.
+
+### 3.LAB.8. Ćwiczenie F — rollback 1, rescue i porównanie dwóch historii
+
+Jeżeli w eksperymencie D nie wykonałeś realnego commit, nie powinien on tworzyć wpisu historii. W eksperymencie E \`commit confirmed\` i auto-rollback już wpływają na historię. To dobra okazja do zrozumienia, **dlaczego numeracja rollback jest względna**.
+
+**Urządzenie: R1-vSRX — Operational Mode (read-only)**
+
+~~~junos
+show system commit
+show system rollback 0
+show system rollback 1
+show system rollback 0 compare 1
+~~~
+
+Przewidź, która z poprzednich wersji zawiera eksperymentalny banner. **Nie zakładaj, że rollback 1 to zawsze baseline sprzed całego rozdziału.** Jeśli zrobiłeś kilka commitów, indeks może wskazywać inną wersję.
+
+Jeśli jako właściciel laba masz już prawidłową, zweryfikowaną konfigurację bazową i uzgodniłeś zapis rescue:
+
+**Urządzenie: R1-vSRX — Operational Mode, po walidacji baseline, uwaga: nadpisuje istniejący rescue**
+
+~~~junos
+request system configuration rescue save
+~~~
+
+Na koniec laboratorium **nie zostawiaj w urządzeniu przypadkowych banerów, opisów portów, blokad exclusive ani niepotwierdzonych commitów**. Wykonaj końcowe pre/post porównanie z zapisanym baseline.
+
+### 3.LAB.9. Ćwiczenie G (opcjonalne) — rzeczywista utrata SSH i recovery
+
+To ćwiczenie jest **opcjonalne i bardziej ryzykowne**. Można je przeprowadzić tylko jeśli:
+- masz **niezależną konsolę** i fizycznie/logiczną mapę połączenia;
+- wiesz, którym interfejsem przechodzi SSH;
+- nie korzystasz z management firmy ani chmury klienta;
+- masz pełną kopię konfiguracji, rollback plan oraz możliwość odzyskania urządzenia po automatycznym rollback.
+
+Nie podaję gotowej komendy usuwającej adres management, ponieważ bez znajomości mapowania Twojego EVE-NG mogłaby dotyczyć **niewłaściwego interfejsu**. Codex, mając rzeczywisty precheck i odpowiednie uprawnienia, może przygotować wersję tego testu z odłączaną **sztuczną** ścieżką SSH w izolowanej sieci. Minimalny test E powyżej w zupełności wystarcza do zrozumienia \`commit confirmed\` na JNCIA.
+
+### 3.LAB.10. Kiedy lab jest naprawdę ukończony?
+
+Nie dlatego, że wpisałeś wszystkie komendy, tylko gdy potrafisz pokazać **dowody**:
+- Kiedy candidate różni się od active, a kiedy obie są takie same?
+- Czy w shared candidate Admin-A widzi zmianę Admin-B?
+- Czy w private candidate trzeba było użyć \`update\` i dlaczego?
+- Czy \`load set\` i \`load merge\` przyniosły oczekiwany diff bez przypadkowego usunięcia reszty konfiguracji?
+- Czy \`commit confirmed\` faktycznie zadziałał, gdy **nie** potwierdzono?
+- Jak wygląda \`show system commit\` przed i po rollbacku?
+- Czy odtworzyłeś początkowy stan interfejsów, login message i routingu?
+
+Prawdziwy wynik weryfikacji zapisz w \`VERIFY.md\` wraz z datą, wersją obrazu Junos, nazwą topologii oraz konkretnymi wynikami. **Nie wpisuj PASS, jeśli nie zrobiłeś testu na działającym urządzeniu.**
+
