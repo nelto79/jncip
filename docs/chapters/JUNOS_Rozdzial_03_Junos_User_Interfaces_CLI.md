@@ -1718,3 +1718,254 @@ Nie dlatego, że wpisałeś wszystkie komendy, tylko gdy potrafisz pokazać **do
 
 Prawdziwy wynik weryfikacji zapisz w \`VERIFY.md\` wraz z datą, wersją obrazu Junos, nazwą topologii oraz konkretnymi wynikami. **Nie wpisuj PASS, jeśli nie zrobiłeś testu na działającym urządzeniu.**
 
+
+
+---
+
+## 3.TS. Troubleshooting — gdy zmiana Junos nie zachowuje się tak, jak oczekujesz [EXT]
+
+### 3.TS.1. „Commit failed”. Czy router wrócił do poprzedniego stanu?
+
+Pamiętasz scenę z nocnego dyżuru: w IOS XE wklejone polecenia mogą już działać, choć jedna linijka była błędna. W standardowym workflow Junos **nieudany \`commit check\` lub nieudany commit oznacza, że proponowane zmiany nie zostały skutecznie aktywowane jako oczekiwana nowa konfiguracja**. Jednak nie buduj nieprawdziwej pewności, że nic innego w systemie w tym czasie się nie wydarzyło — inni operatorzy, działania operacyjne, stan protokołów i wcześniejsze commity wciąż istnieją.
+
+**Urządzenie: R1-vSRX — Configuration Mode, analiza nieudanej próby**
+
+~~~junos
+top
+show | compare
+commit check
+~~~
+
+Najpierw czytaj **pełny komunikat błędu**. Jeśli system mówi o brakującej referencji, poprawiasz referencję. Jeśli o konflikcie zmiany innego administratora, patrzysz na \`configure private\` i \`update\`. Jeśli o błędnym statement, użyj \`?\` dokładnie tam, gdzie parser go odrzucił.
+
+**Nie naprawiaj błędu losowym \`load override\`**. Wtedy zmienisz kategorię problemu z jednej brakującej referencji w potencjalną utratę całej konfiguracji.
+
+### 3.TS.2. „Nie widzę zmiany, którą właśnie wpisałem”
+
+Pomyśl, co tak naprawdę zostało zrobione. Jeśli wykonałeś tylko \`set\`, zmiana może być w candidate. Jeśli jesteś w \`[edit interfaces ...]\`, a patrzysz na inny interfejs, możesz wyciągnąć fałszywy wniosek. Jeśli wchodzi w grę \`apply-groups\`, lokalny widok może nie pokazywać wartości odziedziczonych.
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+top
+show | compare
+show | display set
+run show configuration system login message
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show configuration system login message
+show system commit
+~~~
+
+**Diagnoza:** odróżnij candidate, active i aktywny stan usługi. Przeczytanie wyłącznie jednego \`show\` bez znajomości trybu CLI jest częstą przyczyną fałszywego zgłoszenia „config nie zapisuje zmian”.
+
+### 3.TS.3. „Mój \`commit\` wgrał zmianę kolegi”
+
+To klasyczny błąd pracy ze shared candidate. Jeśli Admin-A wykonał \`configure\`, Admin-B także, ich zmiany mogą znaleźć się w **tej samej bazie candidate**. Jeden commit potrafi aktywować obie.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit]**
+
+~~~junos
+status
+show | compare
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show system users
+show system commit
+~~~
+
+Jeżeli błąd już się wydarzył, wróć do historii i change record. Nie cofaj całej konfiguracji w ciemno — możesz cofnąć również zmianę kolegi, która była potrzebna. Na produkcji najpierw uzgodnij zakres przywracania i ewentualnie przygotuj **korektę punktową**, zamiast zbiorczego rollbacku.
+
+### 3.TS.4. „Private config nie chce wejść po tym, jak inny administrator zrobił commit”
+
+Ten problem jest normalną konsekwencją równoczesnych zmian, nie magicznym błędem mgd. Private candidate powstał ze starszego active. Weryfikacja podczas commit może wykryć, że ktoś zmienił konfigurację od tego czasu.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private]**
+
+~~~junos
+show | compare
+update
+show | compare
+~~~
+
+Jeśli jest konflikt, zatrzymaj się. **Nie zakładaj, że \`update\` nadpisuje wszystko poprawnie.** Odpowiedz: jaki obiekt zmienili obaj administratorzy, jaki był zamierzony efekt, czy możemy rozdzielić zmianę na osobne commity?
+
+### 3.TS.5. „Trasa działa, ale diff po \`load set\` wygląda podejrzanie”
+
+Architekt przesłał plik z konfiguracją „z innej lokalizacji”. Po \`load set\` zobaczyłeś przypadkową zmianę management IP i nazw interfejsów.
+
+Nie ignoruj tego tylko dlatego, że \`commit check\` przeszedł. Wczytanie poprawnej składni nie dowodzi zgodności z Twoim HLD.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], bezpieczna diagnostyka przed commit**
+
+~~~junos
+show | compare
+show | display set
+~~~
+
+Jeżeli nie jesteś pewien, co się zmieniło, **nie commituj**. Jeśli wyłącznie Ty pracujesz w private candidate i nie masz innych potrzebnych niezacommitowanych zmian, możesz ją odrzucić:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], tylko własne niezacommitowane zmiany**
+
+~~~junos
+rollback 0
+show | compare
+~~~
+
+**Następny krok:** popraw plik w systemie wersjonowania lub z architektem. Nie edytuj produkcyjnego routera metodą prób i błędów.
+
+### 3.TS.6. „Po \`commit confirmed\` wszystko działało, a potem się cofnęło”
+
+To nie jest awaria Junos. Jeśli wykonałeś \`commit confirmed 5\`, ale przez pięć minut nie potwierdziłeś zmiany, system powinien automatycznie przywrócić poprzedni config.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show system commit
+show configuration system login message
+~~~
+
+**Pytanie egzaminacyjne:** czy koniecznie musisz wykonać \`commit\`, by potwierdzić? **Nie — \`commit check\` również może to zrobić.** Nie uruchamiaj więc go po confirmed commit jako „neutralnej próby”, jeśli chcesz zachować rollback timer.
+
+### 3.TS.7. „Po \`rollback 1\` zobaczyłem tylko starą konfigurację w candidate”
+
+To poprawne zachowanie. Załadowanie starej konfiguracji nie jest równoznaczne z jej aktywacją. Przed commit możesz jeszcze obejrzeć różnicę.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], przykład tylko po świadomym wyborze wersji**
+
+~~~junos
+rollback 1
+show | compare
+commit check
+~~~
+
+Zanim aktywujesz ją na produkcji, policz zakres strat: czy poprzednia wersja zawiera wszystkie potrzebne zmiany z ostatniego incydentu, w tym pracę innych administratorów? Mechaniczny rollback może być bardziej destrukcyjny od precyzyjnego usunięcia wadliwej linijki.
+
+### 3.TS.8. „J-Web nie działa; SSH i ping działają”
+
+To bardzo dobra okazja, żeby połączyć rozdział 2 z rozdziałem 3. Ping do lokalnego adresu SRX to inny rodzaj ruchu i inna usługa niż HTTPS do J-Web. Jeśli SSH działa, potwierdziłeś jedną usługę, nie cały management.
+
+Sprawdź kolejno: czy platforma obsługuje J-Web; czy serwer HTTPS jest poprawnie skonfigurowany; na jakim interfejsie; czy certyfikat istnieje; czy SRX host-inbound oraz filtr dopuszcza TCP/443; czy routing zwrotny działa; czy to właściwa wersja GUI.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show version
+show configuration system services web-management | display set
+show configuration security zones | display set
+show interfaces terse
+show system alarms
+~~~
+
+Na różnych wydaniach J-Web są inne modele pakietów i wsparcia. Nie otwieraj portu management na każdym interfejsie ani nie włączaj nieszyfrowanego HTTP jako „szybkiego obejścia”.
+
+### 3.TS.9. „Przez \`show configuration\` widzę coś innego niż po \`show | display inheritance\`”
+
+Znasz potencjalną przyczynę: **configuration groups** i inne mechanizmy dziedziczenia. Lokalny tekst może być krótszy niż wynikowe ustawienia przekazane do procesu. W kontekście CLI to nie błąd — to inny **widok tej samej logicznej konfiguracji**.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode (jeżeli urządzenie korzysta z groups)**
+
+~~~junos
+show configuration interfaces | display inheritance
+show configuration interfaces | display set
+~~~
+
+Dokładną politykę dziedziczenia i konfigurację groups omówimy w rozdziale 4.
+
+### 3.TS.10. „Nie mogę nic zrobić, bo inny administrator trzyma exclusive”
+
+Nie rozwiązuj tej sytuacji od razu przez zabicie sesji operatora. \`configure exclusive\` jest mechanizmem blokady. Jeśli blokada jest uzasadniona change window, poczekaj na jej zwolnienie zgodnie z procedurą. W rzeczywistym incydencie P1 skontaktuj się z właścicielem lock i zastosuj formalny tryb awaryjny.
+
+Dokumentacja Junipera opisuje administracyjne wylogowanie operatora, ale to może **przerwać cudzą pracę i spowodować utratę niezacommitowanych zmian**. Nie przedstawiamy tego jako rutynowego sposobu rozwiązania konfliktu.
+
+---
+
+## 3.TEST. Sprawdzian rozumowania — 16 sytuacji, nie 16 definicji [EXT]
+
+*Pytania są autorskie, oparte na jawnych mechanizmach producenta. Nie są kopiami pytań z oficjalnego assessmentu JNCIA ani z exam dumpów.*
+
+Spróbuj odpowiedzieć **przed** przeczytaniem wyjaśnienia. Nie chcę, żebyś wybierał literę A/B/C/D na pamięć. Chcę, żebyś przewidział skutek.
+
+**1.** Zalogowałeś się do Junos i widzisz \`user@R1>\`. Czy jesteś pełnym administratorem? Czy możesz wykonać komendę wpływającą na działanie routera?
+
+**2.** Jesteś w \`[edit interfaces ge-0/0/1]\`. Co zrobi \`up\`, co zrobi \`top\`, a co może zrobić \`exit\`?
+
+**3.** Będąc w \`[edit]\`, wykonujesz \`set system host-name R1\`, lecz nie robisz commit. Co zobaczysz w \`show | compare\`, a co w operational \`show configuration system host-name\`?
+
+**4.** Kolega w shared \`configure\` zmienia BGP; Ty w tym samym shared candidate zmieniasz opis portu. Ktoś wykonuje commit. Co może zostać aktywowane?
+
+**5.** Dlaczego \`configure private\` nie gwarantuje, że commit nigdy nie zakończy się konfliktem?
+
+**6.** Co robi \`update\` w private candidate i czym różni się od \`load update\`?
+
+**7.** Dlaczego \`show route | count\` nie daje poprawnej liczby tras w RIB?
+
+**8.** Zamiast \`load set\` dla trzech linijek ktoś wybiera \`load override\`. Co jest największym ryzykiem po commit?
+
+**9.** Jakiego znacznika w hierarchicznym pliku szuka \`load replace\`?
+
+**10.** Co oznacza \`rollback 0\` przy niezacommitowanych zmianach? A co zrobi \`rollback 1\` po wcześniejszym commit?
+
+**11.** Czy \`save /var/tmp/backup.conf\` jest tym samym co \`commit\`?
+
+**12.** Wykonałeś \`commit confirmed 5\`, po czym \`commit check\`. Czy pięciominutowy automatyczny rollback nadal na pewno czeka?
+
+**13.** \`commit check\` zakończył się poprawnie. Czy na pewno Twoja nowa ACL pozwoli utrzymać SSH do urządzenia?
+
+**14.** Dlaczego ping do IP SRX i SSH do tego SRX nie dowodzą, że J-Web działa?
+
+**15.** Gdy \`rollback 1\` zostanie załadowany do candidate, czy połączenie klienta natychmiast zacznie używać poprzednich tras?
+
+**16.** Dlaczego ekran \`show configuration interfaces\` może nie pokazywać wszystkich ustawień działających na interfejsie?
+
+### Rozwiązania — z wyjaśnieniem mechanizmu
+
+**1.** Prompt oznacza operational mode, nie superuser. Uprawnienia wynikają z login class/AAA. W tym trybie można wykonywać również potencjalnie destrukcyjne działania operacyjne, zależnie od uprawnień.
+
+**2.** \`up\` przechodzi poziom wyżej; \`top\` wraca do \`[edit]\`; \`exit\` w zagnieżdżonej hierarchii zwykle przechodzi wyżej, a przy \`[edit]\` wychodzi z configuration mode.
+
+**3.** Candidate będzie inny, więc diff pokaże dodanie/zmianę; operational \`show configuration\` nadal pokazuje active sprzed commit.
+
+**4.** Obie zmiany, ponieważ shared candidate jest wspólny. To ryzyko audytowe i operatorskie.
+
+**5.** Inny administrator może w międzyczasie zmienić active; prywatna candidate bazuje na starszej konfiguracji i może wymagać \`update\` albo ręcznej korekty konfliktu.
+
+**6.** \`update\` w private synchronizuje prywatny stan z aktualnym active. \`load update\` to tryb wczytania **pełnej konfiguracji z pliku** przy selektywnym oznaczaniu zmian.
+
+**7.** \`| count\` liczy linie tekstu wyjścia, a nie rekordy route. Wielowierszowe wpisy i nagłówki zniekształcają wynik.
+
+**8.** \`override\` zastępuje całą candidate. Brak w pliku kompletnych kont, interfejsów i routing mógłby po commit usunąć je z active.
+
+**9.** Znacznika **\`replace:\`** przy konkretnej gałęzi konfiguracji.
+
+**10.** \`rollback 0\` przywraca current active do candidate (odrzuca niezacommitowane zmiany). \`rollback 1\` ładuje poprzednią zatwierdzoną konfigurację do candidate i wymaga dalszego commit, by stała się aktywna.
+
+**11.** Nie. \`save\` zapisuje tekst konfiguracyjny do pliku; \`commit\` zapisuje i aktywuje nowy stan konfiguracji.
+
+**12.** Nie. \`commit check\` potrafi potwierdzić oczekujący \`commit confirmed\`. To bardzo ważny, nieintuicyjny haczyk.
+
+**13.** Nie. Poprawność składni i zależności konfiguracyjnych nie jest testem funkcjonalnym z punktu widzenia zdalnego klienta.
+
+**14.** To różne usługi i porty. HTTPS może nie być włączony, certyfikat może być nieprawidłowy, J-Web niewspierany albo TCP/443 zablokowany.
+
+**15.** Nie. Zmieniła się na razie candidate, nie active. Trzeba porównać i zatwierdzić odpowiednią konfigurację.
+
+**16.** Ponieważ konfiguracja może być dziedziczona z \`apply-groups\`. \`display inheritance\` pomaga zobaczyć wynikowy obraz.
+
+### Kryterium gotowości do kolejnego rozdziału
+
+Uznaj rozdział za opanowany, jeśli potrafisz **bez notatek**:
+- pokazać candidate i active oraz ich różnicę;
+- odczytać historię rollback i świadomie zdecydować, który snapshot przywrócić;
+- wybrać poprawny tryb \`load\` dla fragmentu \`set\` i pełnego config;
+- wyjaśnić, co zobaczą Admin-A i Admin-B w shared/private;
+- wykonać \`commit confirmed\`, sprawdzić pending timer bez nieświadomego potwierdzania i bezpiecznie wrócić do baseline.
+
+Jeśli nie potrafisz, nie ucz się na pamięć kolejnej tabeli. Wróć do eksperymentów A, B, D i E, zadaj sobie pytanie „**co zostało zatwierdzone, a co jeszcze nie?**”, i sprawdź hipotezę.
+
