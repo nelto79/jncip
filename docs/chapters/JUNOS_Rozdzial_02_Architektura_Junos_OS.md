@@ -213,6 +213,16 @@ Wyjaśnij własnymi słowami: dlaczego zwykły pakiet tranzytowy nie powinien py
 
 ## 2.2. Control plane i forwarding plane — dwa różne światy [A]
 
+### Obraz: wiele możliwych dróg, jedna wybrana ścieżka
+
+Zanim przejdziemy dalej, spójrz na poniższy schemat sieci. **Niebieskie strzałki** pokazują jedną wybraną drogę pakietu spośród kilku możliwych. Sam fakt, że topologia ma więcej niż jeden kabel, nie oznacza, że forwarding automatycznie używa wszystkich.
+
+![Sieć z wieloma routerami i wybraną trasą pakietu — ilustracja idei routingu](https://upload.wikimedia.org/wikipedia/commons/1/1f/Network_Routing_Illustration_Diagram.jpg)
+
+*Grafika ogólna, nie topologia naszego labu ani architektura Junos. Autor: Jan Bellon, [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Network_Routing_Illustration_Diagram.jpg), licencja [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/), bez zmian.*
+
+**Powiąż z Cisco:** na C9500 możesz znać wiele tras w RIB, ale Cisco CEF wybiera odpowiednią ścieżkę forwarding. **Powiąż z Junos:** \`show route\` daje wiedzę routingu, a \`show route forwarding-table\` pokazuje master forwarding. **Zadanie po obejrzeniu:** wskaż, które urządzenia na obrazku faktycznie przetworzą pakiet wybraną drogą, a które tylko stanowią możliwe alternatywy.
+
 ### 2.2.1. Dlaczego router może być jednocześnie „żywy” i „martwy”?
 
 Wracamy do nocnego incydentu. Router odpowiada na ping, ale aplikacja nie działa. To brzmi jak sprzeczność tylko wtedy, gdy w głowie mamy model „router to jedno pudełko, które albo działa, albo nie działa”.
@@ -721,6 +731,16 @@ GW 192.0.2.1     192.0.2.1  198.51.100.1 GW 198.51.100.1
 
 Nawet prosty ping PC-A → PC-B jest więc małym łańcuchem zależności. **Powód i skutek** są ważniejsze niż mechaniczne wpisywanie komend.
 
+### Obraz: host musi rozstrzygnąć „lokalnie czy przez bramę?”
+
+Masz już w głowie kolejność: **decyzja o lokalnej/zdalnej sieci → wybór next-hopu → znalezienie jego MAC**. Tę zależność pokazuje starszy, ale wartościowy schemat ARP i routingu. Jest po niemiecku; terminy są proste: *Routingtabelle* to tabela routingu, *ARP-Tabelle* to ARP table, *Schnittstelle* to interfejs.
+
+![Schemat decyzji routing i ARP przy wysyłaniu pakietu IP — diagram oryginalny po niemiecku](https://upload.wikimedia.org/wikipedia/commons/f/fd/ARP_und_Routing.png)
+
+*Źródło: Hubi, [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:ARP_und_Routing.png), licencja [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), grafika bez zmian; ogólna mechanika host/ARP, nie specyficzna implementacja Junos.*
+
+**Co tu trzeba zauważyć?** Host najpierw decyduje, czy destination IP jest lokalny czy zdalny. Dopiero potem rozwiązuje **MAC adresu lokalnego odbiorcy L2**, który dla zdalnego IP będzie MAC bramy. Na Cisco sprawdzisz to przez \`show ip arp\` i \`show adjacency\`. W Junos punktem wyjścia jest \`show arp\`, a dalej route/FIB i interfejs.
+
 ### 2.5.3. Dlaczego Ethernet się zmienia, a IP często nie?
 
 Wyobraź sobie przesyłkę wysyłaną przez kilka sortowni. Na paczce nadal widnieje ostateczny adres odbiorcy. Zmienia się jednak etykieta lokalnego transportu: z którego magazynu do której następnej sortowni ma trafić.
@@ -845,6 +865,24 @@ W sieci podobnie:
 **Exception traffic** to szersze określenie ruchu wymagającego specjalnej obsługi, często w związku z control plane. Może obejmować ruch host-bound, wybrane pakiety protokołów i sytuacje nietypowe dla normalnego forwarding, np. wyczerpanie TTL. Nie każdy wyjątek musi być realizowany identycznie na każdym PFE, a część reakcji może być obsługiwana specjalizowanymi mechanizmami platformy.
 
 **Nie zapamiętuj błędnej reguły „ICMP = exception”.** ICMP Echo Request z PC-A do PC-B, przechodzący przez R1, to normalny ruch tranzytowy. ICMP Echo Request do adresu R1 jest natomiast ruchem do lokalnego urządzenia.
+
+### Rysunek: dwie drogi od tego samego portu wejściowego
+
+Zwróć uwagę: jeden fizyczny port może przyjmować zarówno ruch **do samego routera**, jak i **przez router**. Dla operatora pakiety mogą wyglądać podobnie, ale urządzenie musi je sklasyfikować inaczej.
+
+~~~mermaid
+flowchart TD
+    IN["Pakiet na interfejsie R1"] --> Q{"Czy destination IP to lokalny adres R1 albo przypadek wymagający specjalnej obsługi?"}
+    Q -->|"Tak, lokalna usługa"| RE["Local / control path\nSSH, BGP, ICMP do R1"]
+    Q -->|"Nie, zwykły transit"| FWD["Forwarding path\nroute lookup, next-hop"]
+    FWD --> SRX["Na SRX dodatkowo:\nsecurity flow / policy"]
+    SRX --> OUT["Pakiet do następnego hopu"]
+    RE --> RESULT["Obsługa lokalna lub odpowiedź"]
+~~~
+
+*Uproszczenie dydaktyczne: szczegółowa obsługa wyjątków i generowania odpowiedzi zależy od platformy oraz typu pakietu. Nie oznacza to, że każdy wyjątek jest zawsze puntowany bezpośrednio do CPU RE.*
+
+**Cisco-punkt odniesienia:** myślisz o normalnym CEF forwarding oraz osobnej ścieżce **punt do CPU** i ochronie CoPP. **Junos:** rozdzielasz PFE, RE, wyjątki i właściwe mechanizmy platformy.
 
 ### 2.6.2. Skąd się bierze packet punt?
 
@@ -984,6 +1022,22 @@ Alternatywna:     PC-A → R1 → R3 → R4 → PC-B
 **Ważne:** cztery vSRX po 4 GiB RAM to orientacyjnie **16 GiB przydzielonej pamięci**, bez EVE-NG i systemu hosta. Nie uruchamiaj ich jednocześnie, jeśli Twój host nie ma wystarczających zasobów. Jeżeli jeszcze nie masz legalnie pobranego obrazu QCOW2, specyfikację można przygotować bez uruchamiania urządzeń. Rozdział nie udaje, że topologia została już przetestowana.
 
 **Konfiguracja jest przykładem do LAB, nie gotowym szablonem produkcyjnym**. Używamy czytelnych adresów i szerokiej polityki allow w izolowanym środowisku wyłącznie po to, by badać działanie datapath. Nie kopiuj tego do firmowego SRX.
+
+### Obraz topologii: cztery vSRX jako prawdziwe ćwiczenie ścieżek
+
+W przeciwieństwie do powyższej ilustracji Wikimedia tutaj rysujemy już **nasz konkretny lab**. Zielona intuicyjnie „górna” trasa przez R2 jest podstawowa, a „dolna” przez R3 — zapasowa. Zastanów się, **jak zmieni się trasa w R1 i R4, gdy fizycznie zniknie R1–R2**.
+
+~~~mermaid
+flowchart LR
+    PA["PC-A\n192.0.2.10"] --- R1["R1-vSRX"]
+    R1 ---|"10.12.0.0/30 — primary"| R2["R2-vSRX"]
+    R1 ---|"10.13.0.0/30 — backup"| R3["R3-vSRX"]
+    R2 ---|"10.24.0.0/30"| R4["R4-vSRX"]
+    R3 ---|"10.34.0.0/30"| R4
+    R4 --- PB["PC-B\n198.51.100.10"]
+~~~
+
+**Cisco-punkt odniesienia:** myślisz o dwóch statycznych trasach, z których jedna ma wyższy administrative distance (*floating static route*). W Junos do podobnego celu użyjemy podstawowego next-hopu i **qualified-next-hop z inną route preference**. Pamiętaj, że **preferencja Cisco i preferencja Junos nie mają tych samych domyślnych wartości**, a statyczny routing sam nie wykrywa każdej awarii odległego łącza.
 
 ### 2.LAB.2. Rozrysuj adresy, zanim wpiszesz pierwszą komendę
 
