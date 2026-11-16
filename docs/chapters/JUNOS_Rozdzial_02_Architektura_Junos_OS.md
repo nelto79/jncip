@@ -396,6 +396,31 @@ RE wykonuje tę inteligentną pracę: uruchamia i nadzoruje odpowiednie procesy,
 
 W modelu egzaminacyjnym potraktuj RE jako **control + znaczną część management plane**, a PFE jako głównego wykonawcę forwarding.
 
+### Haczyk Cisco → Junos: ten sam prefiks, OSPF kontra eBGP. Kto wygra?
+
+Wyobraź sobie, że do R1 przychodzą **dwie trasy do dokładnie tej samej sieci 203.0.113.0/24**: jedna z OSPF, druga z eBGP. Nie zmieniaj prefiksu i nie stosuj LPM — obie drogi są równie szczegółowe. Zatrzymaj się i przewidź wynik.
+
+Jeżeli od lat konfigurujesz Cisco, Twoja pierwsza intuicja może brzmieć: „eBGP wygra, bo administrative distance 20 jest lepsze niż 110 dla OSPF”. I na typowym Cisco IOS/IOS XE miałbyś rację. **W Junos domyślne wartości są inne: wewnętrzny OSPF ma preference 10, zewnętrzny OSPF 150, a BGP 170. Przy porównaniu różnych protokołów do tego samego prefiksu Junos domyślnie wybierze OSPF, nie eBGP.**
+
+Właśnie tego rodzaju nieoczywistość jest groźna podczas migracji sieci: ten sam routing, podobna topologia, ale **inna aktywna ścieżka**. Nie dlatego, że Junos „gorzej obsługuje BGP”, tylko dlatego, że producent przyjął inne wartości preferencji.
+
+**Urządzenie: Cisco-R1 — privileged EXEC**
+
+~~~cisco
+show ip route 203.0.113.0
+~~~
+
+**Urządzenie: R1-vSRX — operational mode**
+
+~~~junos
+show route 203.0.113.0/24 exact
+show route 203.0.113.0/24 detail
+~~~
+
+**Co trzeba znać na pamięć?** Kierunek porównania: **mniejsza route preference wygrywa**. Dla tego konkretnego haczyka zapamiętaj **OSPF internal 10, OSPF external 150, BGP 170** i odpowiednik Cisco **eBGP 20, OSPF 110**. Nie myl Junos *route preference* z atrybutem BGP *LOCAL_PREF*: to różne etapy wyboru.
+
+Juniper sam opisuje tę różnicę między dostawcami w [oficjalnym przykładzie wyboru OSPF kontra eBGP](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/local-preference.html). **To rzeczywista różnica implementacyjna, nie domysł o pytaniu egzaminacyjnym.**
+
 ### 2.3.2. RIB, active route, FIB — wytłumaczę to na trzech nawigacjach
 
 Załóżmy, że masz trzy aplikacje do planowania trasy z Łodzi do Gdańska. Pierwsza proponuje autostradę, druga drogę krajową, trzecia przejazd przez Toruń. Lista dostępnych kandydatów nie oznacza, że wszystkie są jednocześnie realizowane.
@@ -407,6 +432,28 @@ Załóżmy, że masz trzy aplikacje do planowania trasy z Łodzi do Gdańska. Pi
 Nie myl dwóch różnych pytań: „którą z kandydackich tras wybrano do danego **prefiksu**?” i „który **prefiks** pasuje najlepiej do adresu docelowego?”. Pierwsze dotyczy selekcji trasy; drugie to **longest prefix match** w lookup forwarding.
 
 Spróbujmy przykładu. R1 zna 198.51.100.0/24 przez R2, ale ma także default route 0.0.0.0/0 przez ISP. Pakiet do 198.51.100.10 pasuje do obu; wygra /24, bo jest bardziej szczegółowy. Jeśli istnieją dwie alternatywne trasy **do tego samego /24**, wtedy porównywane są odpowiednie preferencje/protokół i atrybuty.
+
+### Haczyk: inactive i hidden nie są synonimami
+
+Jeden z bardziej podchwytliwych przypadków na dyżurze: BGP dostarcza trasę, ale nie widzisz jej w normalnym \`show route\`. Czy peer niczego nie ogłosił? Nie tak szybko.
+
+**Inactive** oznacza w praktyce, że kandydat do prefiksu nie wygrał selekcji — na przykład lepszy okazał się OSPF albo inna trasa BGP. **Hidden** oznacza trasę, której Junos **nie może użyć**, m.in. z powodu błędnego next-hopu albo działania polityki routingu. A niektóre całkowicie nieprawidłowe informacje mogą w ogóle nie zostać umieszczone w RIB, nawet jako hidden.
+
+Wyobraź sobie konkurs kierowców. Kierowca A ma sprawną ciężarówkę, ale przegrał ofertę cenową — jest kandydatem, lecz nieaktywnym. Kierowca B ma samochód bez kół — nie chodzi o to, że jest drugi w rankingu. **Nie może w ogóle wykonać kursu.** Tak właśnie chcesz rozumieć różnicę inactive kontra hidden.
+
+**Urządzenie: R1-vSRX — operational mode**
+
+~~~junos
+show route 203.0.113.0/24 detail
+show route hidden detail
+show route resolution unresolved detail
+~~~
+
+Nie patrz wyłącznie na liczbę tras w nagłówku. Szukaj **Inactive reason**, **Hidden** i przyczyn niemożliwości rozwiązania next-hopu. Komendy do szczegółowej analizy zależą od protokołu i wydania, ale ten tok rozumowania jest trwały.
+
+**Porównanie Cisco:** \`show bgp ipv4 unicast\` potrafi ujawnić ścieżki, których nie ma w aktywnym \`show ip route\`. W Junos również patrzymy głębiej niż jedynie aktywny wpis.
+
+Źródło: [Juniper: Troubleshooting BGP Sessions — Understanding Hidden Routes](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/troubleshooting-bgp-sessions.html) oraz [show route hidden](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-hidden.html).
 
 ### 2.3.3. Czytamy prawdziwy typ wyniku, a nie uczymy się kolumn
 
@@ -650,6 +697,27 @@ show interfaces ge-0/0/0 extensive
 
 Kiedy będziesz oglądał ARP, przypomnij sobie, że **MAC dotyczy lokalnego next-hopu**, nie docelowego serwera oddalonego o trzy routery. Szczegółowa [dokumentacja Cisco CEF adjacency](https://www.cisco.com/c/en/us/support/docs/ip/express-forwarding-cef/17812-cef-incomp.html) opisuje tę zależność.
 
+### Haczyk: „sent to PFE” to nie to samo co „pakiet dotarł”
+
+Załóżmy, że pokazujesz koledze \`show route forwarding-table extensive\`. W polu flag widzisz **sent to PFE**. Kolega ogłasza: „Gotowe! PFE forwarduje”. A Ty zadajesz jedno pytanie: **jakim poleceniem sprawdziłeś, że docelowy host naprawdę otrzymał pakiet?**
+
+Flaga mówi o stanie przekazania informacji w mechanizmie programowania tablicy, a nie o sukcesie konkretnej transmisji od PC-A do PC-B. **Master FIB po stronie RE i zainstalowana tablica PFE to nie zawsze ta sama perspektywa**, a nawet poprawny PFE route lookup nie gwarantuje poprawnego ARP/ND, VLAN-u, MTU czy policy.
+
+**Urządzenie: R1-vSRX — operational mode**
+
+~~~junos
+show route forwarding-table extensive
+show arp
+show interfaces ge-0/0/0 extensive
+show security flow session summary
+~~~
+
+Na wspieranych platformach można sięgnąć również do \`show pfe route\`, lecz jego dostępność trzeba potwierdzić dla wydania i modelu. Na vSRX nie zakładaj, że diagnostyka sprzętowego ASIC z QFX ma dokładny odpowiednik.
+
+**Cisco-moment:** \`show ip cef\` i \`show adjacency\` mogą być całkowicie sensowne, a interfejs nadal mieć dropy. **Oprogramowanie zaprogramowało drogę** nie znaczy **aplikacja działa**.
+
+Weryfikacja: [Juniper CLI Reference — show route forwarding-table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
+
 ### 2.4.4. Co naprawdę mówią „route”, „forwarding table” i „PFE”?
 
 To temat, przy którym nietrudno nauczyć się złej diagnozy. Dlatego zamiast tabeli wyobraź sobie trzy kartki trzymane przez trzy osoby:
@@ -697,6 +765,25 @@ show interfaces ge-0/0/0 extensive
 ~~~
 
 Szukasz nie „magicznej” komendy, lecz odpowiedzi: który **next-hop** nie został rozwiązany, na jakim VLAN-ie/porcie i co przeszkadza w zdobyciu prawidłowego MAC? Oficjalna [referencja forwarding table Junos](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html) opisuje te typy.
+
+### Haczyk: default route w forwarding table nie musi być Twoim \`0.0.0.0/0\` do Internetu
+
+Otwierasz \`show route forwarding-table\` i widzisz wpis **default**. Czy to dowodzi, że router ma skonfigurowaną trasę domyślną do ISP? **Nie.**
+
+Junos może prezentować **permanentny wpis default** o działaniu typu *reject* nawet wtedy, gdy w RIB nie masz użytkowej trasy \`0.0.0.0/0\` prowadzącej do next-hopu. To mechanizm, który pomaga prawidłowo reagować na brak użytecznej drogi, a nie gwarancja dostępu do Internetu.
+
+Przykład z oficjalnej książki [*Day One: Beginner's Guide to Learning Junos*](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf) pokazuje obok siebie **default user** z next-hopem oraz **default perm** z typem \`reject\`. Jeśli spojrzysz tylko na słowo „default”, możesz błędnie uznać, że skonfigurowano wyjście poza sieć.
+
+**Urządzenie: R1-vSRX — operational mode**
+
+~~~junos
+show route 0.0.0.0/0 exact
+show route forwarding-table
+~~~
+
+**Przewidywanie:** jeśli nie ma trasy użytkowej do zewnętrznego celu, sam permanentny wpis w forwarding table nie zapewni reachability. Ostatnie rozstrzygnięcie to rzeczywisty test forwarding i znalezienie poprawnego next-hopu.
+
+**Cisco-analogia:** wpis *drop* lub *glean* w strukturach CEF to nie to samo co gotowa droga do zdalnego hosta.
 
 ### 2.4.5. Gdy dataplane ma problem, nie musi umrzeć cały router
 
