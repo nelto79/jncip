@@ -1,0 +1,36 @@
+# Rozdział 4 — badanie gotchas, źródła i walidacja techniczna
+
+**Data:** 2026-11-17. **Rozdział ucznia:** [Initial Configuration and System Services](../chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md). **Blueprint:** 4.1–4.14 [A], 4.15 [LAB].
+
+Ten rejestr jest **notatką dla autora/Codexa**, a nie bankiem pytań. Poniższe przypadki zostały **wplecione do właściwych lekcji**, gdzie mają uzasadnienie przyczynowe, scenariusze Cisco i weryfikację CLI. Nie sugerują, że to literalne pytania z egzaminu. Przykłady testowe nie były uruchamiane na vSRX.
+
+## Zweryfikowane mechanizmy i nieoczywiste pułapki
+
+| Nr | Sekcja | Haczyk / znaczenie operatorskie | Źródło |
+|---|---|---|---|
+| 1 | 4.1 | Domyślna konfiguracja SRX300 z trust/untrust, IRB i DHCP nie oznacza takiej samej konfiguracji EX4400 ani vSRX; factory defaults zależą od modelu i obrazu | [SRX300 Configuring Junos](https://www.juniper.net/documentation/us/en/hardware/srx300/topics/topic-map/srx300-configuring-junos.html), [EX4400 Initial Config](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html) |
+| 2 | 4.1 | Od Junos 25.2R1 nie każdy SRX300 ma `system services netconf ssh` domyślnie; zarządzanie automatyzacją trzeba sprawdzić | [SRX300 Configuring Junos](https://www.juniper.net/documentation/us/en/hardware/srx300/topics/topic-map/srx300-configuring-junos.html) |
+| 3 | 4.2/4.6 | `me0` na EX4400 vs `fxp0` na niektórych SRX; port management ≠ automatycznie odrębna VRF `mgmt_junos` | [EX4400](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html), [management-instance](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/topic-map/management-interface-in-non-default-instance.html) |
+| 4 | 4.2/4.3 | Root console i root SSH nie są tą samą polityką; `encrypted-password` oczekuje poprawnego hasha, `plain-text-password` uruchamia prompt, a wyłączenie root SSH przed testem innego konta grozi lockout | [Root Authentication](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/root-authentication-edit-system.html) |
+| 5 | 4.4 | Login class `operator` nie jest tym samym co read-only. `view` i `view-configuration` różnią się; uprawnienie do logowania nie dowodzi autoryzacji komend | [Access Privileges](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html) |
+| 6 | 4.5 | TACACS+/RADIUS timeout i jawny REJECT mają **różne konsekwencje dla local fallback**, zwłaszcza przy `authentication-order tacplus` vs `[ tacplus password ]` | [Authentication Order](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-authentication-order.html) |
+| 7 | 4.5 | RADIUS/TACACS+ `source-address` i management VRF mogą przeszkodzić w AAA, choć shared secret jest poprawny | [TACACS+](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-tacacs-authentication.html), [RADIUS](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-radius-authentication.html) |
+| 8 | 4.7 | `groups` bez `apply-groups` nie wystarczy; lokalny statement ma pierwszeństwo nad dziedziczonym, kolejność grup jest istotna; `junos-defaults` to nie zwykła custom group | [Configuration Groups Usage](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html) |
+| 9 | 4.8 | `time-zone` nie synchronizuje zegara. Ping do NTP server nie dowodzi synchronizacji UDP/123, a `prefer` nie gwarantuje wyboru błędnego serwera | [NTP Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/ntp-edit-system.html) |
+| 10 | 4.9 | SNMPv3 authPriv to **USM + VACM + engine ID**; stabilny engine ID przed kluczami USM. SNMPv3 nie odziedziczy automatycznie `clients` z v2c | [Configure SNMPv3](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html) |
+| 11 | 4.9 | SNMPv3 polling UDP/161 ≠ traps/informs UDP/162, odmienny kierunek i konfiguracja | [Configure SNMP in Junos](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmp-in-junos-os.html) |
+| 12 | 4.10 | `syslog user * any info` może wywołać log storm w terminalach. System syslog ≠ SRX security flow log | [Remote System Log](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/directing-system-log-messages-to-a-remote-destination.html), [Juniper Community](https://community.juniper.net/discussion/set-system-syslog-user-any-info-creating-log-storms) |
+| 13 | 4.11 | `transfer-on-commit` nie gwarantuje, że backup dotarł na remote server; SCP wymaga działającego routingu, host-key trust, autoryzacji i praw do katalogu; `transfer-on-commit` i `transfer-interval` to alternatywne strategie | [Archival](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/cli/topics/task/junos-software-system-management-router-configuration-archiving.html) |
+| 14 | 4.12 | Traceoptions mogą nadmiernie obciążyć RE/storage i należy je świadomie wyłączać po incydencie. `monitor traffic` na RE ≠ pełny packet capture PFE | [OSPF/ISIS Traceoptions](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-is-is-ospf.html) |
+| 15 | 4.13/4.15 | Rescue wymaga **ręcznego zapisu**, nie musi istnieć lub być poprawna; `rollback rescue` ładuje candidate, nie naprawia usług bez commit. Po `commit confirmed` nie powtarzaj nieświadomie `commit check`, bo może potwierdzić oczekującą zmianę | [Rescue](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html), [Commit](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html) |
+
+## Granice i dalsza kontrola
+
+- **Dokumentacja producenta** jest nadrzędna dla zachowania per platform/release; posty na forum służą tylko jako inspiracja do pytania dydaktycznego.
+- Nie twierdzimy, że którakolwiek pułapka została zaczerpnięta z rzeczywistego egzaminu Juniper ani że mamy dostęp do poufnej bazy zadań.
+- **Brak runtime:** w EVE-NG nie skonfigurowano ani nie uruchomiono automatycznie AAA, NTP, syslog, SCP i SNMPv3. Te usługi wymagają osobnego serwera/klienta i testu po obu stronach.
+- Datowane wnioski mogą zmieniać się wraz z wydaniem. Szczególnie sprawdzaj: factory-default, model mgmt interface i management-instance, wsparcie SSH ED25519, SNMPv3 algorytmy i konfigurację J-Web/NETCONF.
+- Nie publikuj rzeczywistych sekretów, credentiali, kluczy prywatnych, danych klientów ani produkcyjnych zrzutów konfiguracji.
+- Prawdziwą kwalifikację systemu do wdrożenia opieraj na bieżących Release Notes, Feature Explorer i lokalnym test runbooka.
+
+**Zasada dla kolejnych rozdziałów:** najpierw znajdź dokumentację i problemy; następnie wpleć problem w narrację Cisco → Junos, pokaż skutek operacyjny, rozważ alternatywy, daj CLI i weryfikację. Rejestr źródeł służy autorowi; sam podręcznik zawiera pełną lekcję.
