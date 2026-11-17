@@ -17,6 +17,10 @@ Grafika jest elementem lekcji, a nie ozdobą. Każda ilustracja w podręczniku m
 
 - **Juniper Networks QFX5100 ethernet switch.jpg** — autor: **Juniper Networks**; źródło i atrybucja: https://commons.wikimedia.org/wiki/File:Juniper_Networks_QFX5100_ethernet_switch.jpg ; licencja **CC BY-SA 3.0**: https://creativecommons.org/licenses/by-sa/3.0/ ; bez modyfikacji. Bezpośredni URL osadzenia: https://upload.wikimedia.org/wikipedia/commons/9/99/Juniper_Networks_QFX5100_ethernet_switch.jpg . Zdjęcie historycznego przełącznika pokazuje fizyczne porty i uplinki w punkcie 4.6.2. **Nie przedstawia sprzętu używanego w labie ani współczesnej rekomendacji zakupowej**. Hotlink Wikimedia, bez kopiowania pliku do repo.
 
+## Fotografia źródłowa rozdziału 5 — Tx/Rx modułu SFP
+
+- **SFP-front-RX-TX.jpg** — fotografia bazowa **Adamantios**, oznaczenia Tx/Rx dodane przez **MichaelFrey** (w oryginalnym pliku źródłowym), [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:SFP-front-RX-TX.jpg), licencja **CC BY-SA 3.0 Unported**: https://creativecommons.org/licenses/by-sa/3.0/ ; obraz hotlinkowany bez dalszych modyfikacji: https://upload.wikimedia.org/wikipedia/commons/a/a3/SFP-front-RX-TX.jpg . Wykorzystanie w sekcji 5.3.5a: związanie pomiaru DOM Rx/Tx z fizycznym kierunkiem światłowodu. **Nie jest to model Juniper ani fotografia wkładki z konkretnego labu.** Pliku JPEG nie pobierano do repo.
+
 ## Diagramy stworzone w repozytorium
 
 W rozdziale 2 znajdują się diagramy **Mermaid**, renderowane jako grafika na GitHubie:
@@ -38,4 +42,4 @@ Ich źródło jest bezpośrednio w pliku `docs/chapters/JUNOS_Rozdzial_02_Archit
 6. Jeśli zmienią się węzły, porty lub adresy w .unl, zaktualizuj też diagram laboratorium.
 7. Nie buduj całego wykładu z obrazów: tekst musi tłumaczyć powód, mechanizm i konsekwencje.
 
-Stan: 2026-11-17 (uzupełniono o rozdział 4).
+Stan: 2026-11-17 (uzupełniono o rozdział 5).
