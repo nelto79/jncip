@@ -1270,3 +1270,395 @@ Na poziomie Associate musisz rozpoznać funkcje Junos i skonfigurować podstawy.
 
 To są świadome **praktyczne rozszerzenia głębi**, a nie twierdzenie, że każdy szczegół jest literalnym pytaniem z oficjalnego JNCIA.
 
+
+
+---
+
+## 4.15. [LAB] Nowy router Junos: konta, SSH, NTP, syslog, monitoring i rescue
+
+### 4.15.1. Czy da się wykonać pełny onboarding w EVE-NG?
+
+Tak — choć nie wszystkie elementy wymagają trzech routerów i OSPF. W tym rozdziale chcemy wiedzieć, **jak działa pojedyncze urządzenie jako zarządzalny element infrastruktury**. Wystarczy:
+
+- **1 × vSRX** z niezależną konsolą QEMU/EVE-NG;
+- **LAB-ADMIN** — Linux VM, z której wykonasz nowe połączenia SSH i ewentualnie polecenia SNMPv3;
+- **LAB-SERVICES** — Linux VM pełniąca w miarę dostępnych pakietów NTP/syslog/SCP i opcjonalnie TACACS+/RADIUS;
+- **1 × odizolowany wirtualny switch** management, bez mostowania do korporacyjnego LAN.
+
+Poniższe adresy z puli **TEST-NET \`192.0.2.0/24\`** służą wyłącznie dokumentacji i odizolowanemu labowi. **Nie routuj ich do Internetu.**
+
+~~~mermaid
+flowchart LR
+  ADMIN["LAB-ADMIN\nLinux 192.0.2.20/24"] --- OOB["EVE NET-CH04-MGMT\nizolowany switch"]
+  OOB --- SRX["LAB-SRX01\nfxp0.0 192.0.2.10/24"]
+  OOB --- SERVICES["LAB-SERVICES\nLinux 192.0.2.30/24\nNTP + Syslog + SCP + NMS"]
+  CON["EVE console\nniezależny kanał"] -. "OOB recovery" .-> SRX
+~~~
+
+**Zanim utworzysz topologię:** sprawdź rzeczywistą wersję vSRX, mapowanie NIC na \`fxp0\`, obecność portu console, ilość RAM i obrazów. Jeśli w konkretnej wersji vSRX \`fxp0\` jest niedostępny albo mapuje się inaczej, **nie zgaduj i nie usuwaj adresów z istniejących interfejsów**. Dopasuj laboratorium do sprzętu i zapisz zmianę mapowania w \`VERIFY.md\`.
+
+Na tym etapie **status = PLANNED**. Samo stworzenie topologii i wygenerowanie komend nie oznacza PASS.
+
+### 4.15.2. Rozdzielmy usługi podstawowe od opcjonalnych
+
+W praktycznym labie bez dodatkowych instalacji możesz przećwiczyć **CLI, konto lokalne, login class, dziedziczenie grupy, SSH i rescue**. Do realnego testu NTP potrzebujesz działającego serwera NTP; do sysloga — odbiornika; do archiwizacji — serwera SCP z kluczem; do SNMPv3 — narzędzia NMS i sekretów. TACACS+/RADIUS wymaga serwera AAA i zgodnej konfiguracji obu stron.
+
+Dla każdego punktu wpisujemy jeden z trzech statusów:
+
+- **PASS** — pokazano rzeczywisty, zapisany dowód działania.
+- **FAIL** — wykonywany test nie przeszedł; jest konkretna obserwacja i hipoteza.
+- **NOT TESTED** — usługi lub narzędzia nie były przygotowane; nie udajemy sukcesu.
+
+Nie „zaliczaj” NTP tylko dlatego, że commit config jest poprawny, a \`show ntp associations\` ma pustą listę.
+
+### 4.15.3. Etap 0 — precheck urządzenia, bez ani jednej zmiany
+
+Zanim wykonasz \`set system host-name\`, zapisz dowód, co już jest skonfigurowane i gdzie działa dostęp.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, read-only precheck z konsoli**
+
+~~~junos
+show version
+show chassis hardware
+show system uptime
+show system alarms
+show interfaces terse
+show route table inet.0
+show configuration | display set
+show system users
+show system commit
+~~~
+
+Oczekiwane wnioski, nie fikcyjny output: model i obraz; czy urządzenie już ma adres; czy root password istnieje; jakie usługi są włączone; czy ktoś pracuje w shared candidate. Jeśli istnieją **cudze zmiany**, nie uruchamiaj \`rollback 0\` w shared mode.
+
+### 4.15.4. Etap 1 — tożsamość, hasło root i interfejs management
+
+Zakładamy, że \`fxp0\` jest rzeczywiście wydzielonym interfejsem zarządzania i odpowiada wirtualnemu podłączeniu do izolowanego segmentu management.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, konsola**
+
+~~~junos
+configure private
+~~~
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit private], baza**
+
+~~~junos
+set system host-name LAB-SRX01
+set system domain-name lab.example
+set system time-zone Europe/Warsaw
+set interfaces fxp0 unit 0 family inet address 192.0.2.10/24
+set system services ssh
+set system root-authentication plain-text-password
+show | compare
+~~~
+
+Przy \`plain-text-password\` Junos poprosi o podanie sekretu. **Nie wklejaj hasła do historii poleceń ani do repo**. Gdy \`fxp0\` miał już adres lub DHCP, najpierw rozwiąż konflikt zgodnie ze stanem wyjściowym. Nie stosuj automatycznie całego bloku do używanego już urządzenia.
+
+**Uwaga:** na świeżym vSRX może być wymagane wcześniejsze ustalenie struktury management/zone oraz sposobu logowania. Jeśli platforma nie pozwala \`configure private\` w danym stanie, rozpocznij konfigurację przez konsolę zgodnie z dokumentacją obrazu i następnie wróć do zwykłego candidate workflow.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit private], przygotowanie zmiany**
+
+~~~junos
+commit check
+commit confirmed 5
+~~~
+
+**Po aktywacji nie wykonuj ponownie \`commit check\` jako neutralnego testu.** Sprawdź stan przez operational \`show\` i konsolę. Potwierdzenie commit nastąpi dopiero po sprawdzeniu management reachability. Jeśli nie działa, nie potwierdzaj bez analizy lub przywróć właściwą konfigurację przez konsolę.
+
+**Urządzenie: LAB-SRX01 — Operational Mode z konsoli, weryfikacja po aktywacji**
+
+~~~junos
+show interfaces terse | match fxp0
+show system commit
+show configuration system host-name
+~~~
+
+Jeśli obserwujesz poprawny adres, ale SSH nie odpowiada, sprawdź \`system services ssh\`, ACL/host-inbound jeśli dotyczy, warstwę L2 i logi.
+
+### 4.15.5. Etap 2 — dodaj dwa konta, sprawdź ich uprawnienia
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], konta administratora i NOC**
+
+~~~junos
+set system login user labadmin class super-user
+set system login user labadmin authentication plain-text-password
+set system login class LAB-NOC permissions view
+set system login class LAB-NOC idle-timeout 15
+set system login user nocview class LAB-NOC
+set system login user nocview authentication plain-text-password
+show | compare
+~~~
+
+Po wpisaniu każdego hasła Junos poprosi o interaktywną wartość. Następnie wykonaj \`commit check\`, odpowiednio bezpieczny commit i potwierdzenie. **Nie wyłączaj logowania root przez SSH, zanim nowe konto nie zaloguje się z niezależnej sesji.**
+
+**Urządzenie: LAB-ADMIN — Linux shell, NOWA sesja przez SSH do LAB-SRX01**
+
+~~~bash
+ssh labadmin@192.0.2.10
+~~~
+
+**Urządzenie: LAB-SRX01 — Operational Mode, sesja labadmin**
+
+~~~junos
+show cli authorization
+show system users
+~~~
+
+**Urządzenie: LAB-ADMIN — Linux shell, NOWA sesja z ograniczonym kontem**
+
+~~~bash
+ssh nocview@192.0.2.10
+~~~
+
+**Urządzenie: LAB-SRX01 — Operational Mode, sesja nocview**
+
+~~~junos
+show cli authorization
+show interfaces terse
+~~~
+
+Poprawny eksperyment to nie tylko to, że login działa. **Porównaj prawa**, spróbuj odczytać konfig w dopuszczonym zakresie i potwierdź, że konto NOC nie może wykonywać nieautoryzowanych zmian. Dopiero potem wykonuj hardening \`root-login deny\`.
+
+### 4.15.6. Etap 3 — configuration groups i ich pierwszeństwo
+
+Nie musimy tworzyć 100 portów EX. Wystarczy jeden banner, aby udowodnić, co robi inheritance.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], własna grupa**
+
+~~~junos
+set groups CH04-STD system login message "CH04 - Standardowy komunikat LAB"
+set apply-groups CH04-STD
+show system login | display inheritance
+show | compare
+~~~
+
+Teraz sprawdź, czy działa **lokalny override**. Jeśli istnieje już bezpośredni \`system login message\`, dziedziczony banner może nie być skuteczny. Uczymy się przez kontrast:
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], świadomy lokalny override wyłącznie LAB**
+
+~~~junos
+set system login message "CH04 - Local override"
+show system login | display inheritance
+show | compare
+~~~
+
+**Pytanie:** która wartość jest faktycznie używana po commit? Dla tego samego statementu lokalna zwykle ma pierwszeństwo nad odziedziczoną. Zmianę porównaj i zatwierdź zgodnie z trybem labowym. Po eksperymencie usuń tylko własną grupę i lokalny banner lub odtwórz baseline.
+
+### 4.15.7. Etap 4 — uruchom NTP na LAB-SERVICES i sprawdź nie tylko ping
+
+Najpierw **sprawdź z poziomu Linuxa**, czy serwis NTP jest uruchomiony w izolowanej sieci i nasłuchuje na właściwym interfejsie. Nie zakładaj, że każda VM z Linuxem ma chrony/ntpd.
+
+**Urządzenie: LAB-SERVICES — Linux shell, read-only check**
+
+~~~bash
+ip -4 address show
+ss -lunp
+timedatectl status
+~~~
+
+Jeśli brak usługi NTP, doinstalowanie/skonfigurowanie jej musi być osobnym jawnie zatwierdzonym krokiem, zależnym od dystrybucji i wersji. Nie używaj skryptu z Internetu jako „szybkiej poprawki” do management VM. W odciętym od Internetu labie potrzebujesz własnego wiarygodnego źródła czasu i poprawnego poziomu synchronizacji.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], NTP**
+
+~~~junos
+set system ntp server 192.0.2.30
+set system ntp source-address 192.0.2.10
+show | compare
+commit check
+~~~
+
+**Urządzenie: LAB-SRX01 — Operational Mode, weryfikacja po commit**
+
+~~~junos
+ping 192.0.2.30
+show ntp associations
+show ntp status
+~~~
+
+**Dowód PASS:** wybrany serwer synchronizuje czas (zgodnie z \`ntp status\` i rzeczywistym systemem serwera). **Nie wystarczy** obecność adresu \`192.0.2.30\` w konfiguracji.
+
+**Fault injection:** wyłącz NTP *na serwerze labowym* i sprawdź, czy Junos straci synchronizację po odpowiednim czasie. **Nie zmieniaj czasu systemowego na Junos podczas oczekującego \`commit confirmed\`** — timer rollback zależy od zegara systemowego.
+
+### 4.15.8. Etap 5 — syslog i wiarygodny timestamp
+
+Najpierw uruchom/zweryfikuj odbiornik syslog na \`LAB-SERVICES\` (np. rsyslog/syslog-ng, zależnie od Linuxa), a następnie ustaw wysyłkę z Junos.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit]**
+
+~~~junos
+set system syslog file messages any notice
+set system syslog file messages authorization info
+set system syslog host 192.0.2.30 any notice
+set system syslog host 192.0.2.30 authorization info
+set system syslog source-address 192.0.2.10
+show | compare
+commit check
+~~~
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show log messages | last 20
+show configuration system syslog | display set
+~~~
+
+**Test:** otwórz nową sesję SSH użytkownika \`labadmin\`, a następnie znajdź zdarzenie zarówno w lokalnym logu, jak i na odbiorniku. Dopasuj **czas, hostname i source IP**. Jeśli dociera z innego IP lub ma inny timestamp, masz niepełną konfigurację.
+
+**Fault injection:** zablokuj tylko UDP syslog między \`LAB-SRX01\` a serwerem LAB i sprawdź, że lokalne logi nadal powstają, ale centralna kolekcja przestaje je widzieć. Po eksperymencie usuń blokadę na **LAB-SERVICES**, nie na produkcyjnej infrastrukturze.
+
+### 4.15.9. Etap 6 — SNMPv3 authPriv i test ze strony NMS
+
+Przygotuj **NMS/klienta SNMPv3** po stronie \`LAB-SERVICES\` lub \`LAB-ADMIN\` oraz dwa silne, niezależne sekrety przekazane w bezpieczny sposób. Konfigurację z rozdziału 4.9 zastosuj dopiero po odpowiednim uzupełnieniu USM i VACM.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, przed rozpoczęciem polling testu**
+
+~~~junos
+show snmp statistics
+show snmp v3
+show configuration snmp | display set
+~~~
+
+**Urządzenie: LAB-ADMIN — Linux shell z zainstalowanym klientem Net-SNMP, komenda SZABLONOWA — nie uruchamiaj z dosłownymi placeholderami**
+
+~~~text
+snmpget -v3 -l authPriv -u NMS-RO -a SHA -A <AUTH_SECRET_Z_VAULT> -x AES -X <PRIV_SECRET_Z_VAULT> 192.0.2.10 1.3.6.1.2.1.1.3.0
+~~~
+
+W produkcji nie umieszczaj sekretów jawnie w historii powłoki/argumentach procesu. Użyj bezpiecznej metody dostarczenia credentiali zgodnej z narzędziem i polityką organizacji.
+
+**Dowód PASS:** NMS otrzymał poprawną wartość standardowego OID \`sysUpTime.0\`, a Junos pokazuje oczekiwane statystyki; poprawne engine ID i VACM. **Dowód FAIL:** brak odpowiedzi, błąd auth/privacy, niewłaściwe MIB view albo brak pakietów — każdy ma inną przyczynę.
+
+### 4.15.10. Etap 7 — archiwizacja SCP i sprawdzenie pliku
+
+To najbardziej praktyczny test disaster recovery w całym rozdziale. Na \`LAB-SERVICES\` przygotuj dedykowane konto z ograniczonymi uprawnieniami, katalog o poprawnych ACL, serwer SSH i bezpieczny mechanizm uwierzytelniania klienta Junos. Dopiero wtedy konfigurujesz \`archive-sites\` po stronie routera.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], szablon archiwizacji**
+
+~~~junos
+set system archival configuration archive-sites "scp://junos-archive@192.0.2.30/backup/junos/"
+set system archival configuration transfer-on-commit
+show | compare
+commit check
+~~~
+
+Po świadomym commit uruchomiony mechanizm powinien podjąć próbę transferu. **Nie zaliczaj testu na podstawie \`commit complete\`.**
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show configuration system archival | display set
+show log messages | match "transfer|scp|archive"
+~~~
+
+**Urządzenie: LAB-SERVICES — Linux shell, przy założeniu przygotowanego katalogu i praw dostępu**
+
+~~~bash
+ls -l /backup/junos/
+~~~
+
+**Dowód PASS:** plik istnieje, ma prawidłową datę i nazwę urządzenia, został zapisany do bezpiecznego katalogu, a jego **przywrócenie** zweryfikowano na oddzielnej testowej instancji. Bez testu restore status powinien brzmieć **ARCHIVE RECEIVED / RESTORE NOT TESTED**, nie „backup proven”.
+
+### 4.15.11. Etap 8 — rescue configuration jako kontrolowany punkt odbioru
+
+Dopiero teraz, kiedy management, konta i logowanie zostały rzeczywiście sprawdzone, zapisujemy rescue. **Nie zapisuj jej na podstawie samego commit check**.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, po pozytywnym commissioning test**
+
+~~~junos
+request system configuration rescue save
+show system configuration rescue
+show system alarms
+~~~
+
+Następnie wykonujemy **bezpieczny test odtwarzania na bannerze**, bez zmiany IP management.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], kontrolowana zmiana testowa**
+
+~~~junos
+set system login message "CH04 - TEST ROLLBACK RESCUE"
+show | compare
+commit check
+commit confirmed 3
+~~~
+
+Po potwierdzeniu, że \`show configuration system login message\` pokazuje testowy banner, możesz zastosować procedurę restore.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], kontrolowane odtworzenie rescue**
+
+~~~junos
+rollback rescue
+show | compare
+~~~
+
+Przed następnym commit zdecyduj, czy chcesz **jawnie przywrócić rescue**, czy pozwolić na automatyczny rollback wcześniejszego \`commit confirmed\`. Jeśli oczekujący timer nadal działa, nie wykonuj przypadkowego \`commit check\`, bo może go potwierdzić. **Do pierwszego doświadczenia najlepiej wykonać osobne eksperymenty:** najpierw niepotwierdzony commit confirmed bez kolejnych zmian, następnie odtworzenie rescue po pełnym zakończeniu timera i sprawdzeniu historii.
+
+Jeżeli wykonujesz jawne przywrócenie rescue w kontrolowanym etapie bez pending confirmed commit:
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wyłącznie gdy nie ma aktywnego pending timer**
+
+~~~junos
+rollback rescue
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Po pełnej weryfikacji usług **świadomie potwierdź commit**. Konfiguracja rescue ma pozostać znanym punktem recovery, a nie zbiorem zmian testowych.
+
+### 4.15.12. Etap 9 — AAA, a kiedy serwer odpowiada reject zamiast milczeć [LAB opcjonalny]
+
+Do ćwiczenia potrzebujesz rzeczywistego serwera TACACS+ lub RADIUS w \`LAB-SERVICES\`, przetestowanego użytkownika i bezpiecznie wdrożonych shared secrets. Jeżeli nie masz serwera, oznacz to jako **NOT TESTED**, nie udawaj reakcji urządzenia.
+
+Wykonaj trzy przypadki:
+
+1. **AAA ACCEPT** — serwer rozpoznaje konto i nadaje właściwą rolę.
+2. **AAA TIMEOUT** — pakiet do serwera nie dociera, bądź serwer nie odpowiada; sprawdź zachowanie fallback local.
+3. **AAA REJECT** — serwer aktywnie odmawia; porównaj zachowanie przy \`authentication-order tacplus\` i \`[ tacplus password ]\`.
+
+**Pamiętaj o osobnym kanale konsoli i lokalnym break-glass**, zanim zaczniesz zmieniać AAA. To ćwiczenie jest przeznaczone dla świadomego testu w izolowanym labie, nie jako skrypt produkcyjnej zmiany.
+
+### 4.15.13. Handover — checklista oddania urządzenia
+
+Oznacz każdy etap rzeczywistym statusem:
+
+| Krok | PASS wymaga | Status przed labem |
+|---|---|---|
+| Port management / SSH | Nowa sesja z LAB-ADMIN, zidentyfikowany interfejs i source | NOT TESTED |
+| Local user + class | \`show cli authorization\` dla dwóch kont | NOT TESTED |
+| AAA | Accept, timeout, reject + log serwera (jeśli przygotowany) | NOT TESTED |
+| Groups | \`display inheritance\` i dowód precedence | NOT TESTED |
+| NTP | Wybrana association, zsynchronizowany czas | NOT TESTED |
+| Syslog | Event w lokalnym pliku i na LAB-SERVICES | NOT TESTED |
+| SNMPv3 | Udany authPriv GET na standardowym OID | NOT TESTED |
+| SCP archival | Plik dotarł i ma poprawną datę | NOT TESTED |
+| Rescue | Zapis, odczyt, kontrolowany restore | NOT TESTED |
+| Final baseline | Brak testowych bannerów, uprawnienia i monitoring zgodne z HLD | NOT TESTED |
+
+**Wynik ostateczny:** urządzenie może zostać przekazane do eksploatacji, kiedy **te elementy, które są faktycznie wymagane w HLD**, mają udokumentowany PASS. Element niedostępny w laboratorium nie powinien być oznaczony jako PASS ani przedstawiony jako warunek istniejący w produkcji.
+
+### 4.15.14. Cleanup — nie zostawiaj śladów dydaktycznego eksperymentu w normalnej sieci
+
+Po testach:
+- usuń tylko własne **tymczasowe** banery, grupy CH04 oraz laboratoryjne pliki trace;
+- zamknij dodatkowe sesje kont testowych i sprawdź access;
+- nie zmieniaj \`root-authentication\` i kont bez zachowanej bezpiecznej metody wejścia;
+- porównaj active z udokumentowanym baseline i potwierdź właściwy stan NTP/syslog;
+- upewnij się, że nie ma oczekującego \`commit confirmed\`;
+- sprawdź, czy archive nie zawiera poufnych testowych informacji;
+- nie publikuj sekretów, całej konfiguracji i adresów produkcyjnych w repo.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, końcowy read-only check**
+
+~~~junos
+show system commit
+show system configuration rescue
+show system alarms
+show interfaces terse
+show ntp status
+show snmp statistics
+show system users
+~~~
+
+**Status całego laboratorium pozostaje PLANNED**, dopóki ktoś faktycznie nie uruchomi go i nie zapisze dowodów w \`labs/ch04-initial-config/VERIFY.md\`.
+
