@@ -1706,3 +1706,241 @@ Dla każdego LAB A–D zapisz w `VERIFY.md`:
 
 W realnym worknotes usuń placeholdery i podaj **rzeczywiście uzyskane wyniki**, nie kopiuj tekstu jako potwierdzenie wykonanych działań.
 
+
+
+---
+
+## 5.TS. [EXT] Dziesięć case studies z prawdziwej praktyki Tier 3 — rozumuj, nie zgaduj
+
+Czas na ćwiczenie, które bardzo lubią dobrzy instruktorzy: dostajesz objaw, nie nazwę polecenia. Zanim przeczytasz rozwiązanie, postaw własną hipotezę. Poniższe case studies są **autorskimi scenariuszami dydaktycznymi** opartymi na dokumentacji i praktyce eksploatacyjnej; nie są cudzymi exam dumpami ani raportami z prawdziwych klientów.
+
+### 5.TS.1. EX uplink jest up, ale co 10 minut narasta CRC
+
+**Objaw.** Monitoring zgłasza wzrost input errors na EX-DIST-01 `xe-0/0/0`. Up/Up bez flapów. Klient doświadcza strat w aplikacjach.
+
+**Najbardziej kuszący błąd:** od razu zwiększyć MTU albo zrestartować port.
+
+**Urządzenie: EX-DIST-01 — Operational Mode, najpierw zbierz dowód**
+
+~~~junos
+show interfaces xe-0/0/0 extensive
+show interfaces diagnostics optics xe-0/0/0
+show lldp neighbors detail
+show log messages | match "xe-0/0/0"
+~~~
+
+**Hipoteza:** problem L1, ale nie masz jeszcze dowodu, czy to TX peer, RX lokalnego modułu, włókno czy patch panel. Zbierz **dwa pomiary**, DOM i peer counters. Jeśli CRC rosną w czasie przy braku output queue drops, analizuj fiber path. Wymiana wkładki powinna być wykonana z dowodem przed/po.
+
+**Czego nie wolno twierdzić:** samo `up` nie wyklucza L1 problemu; samo `-18 dBm` bez specyfikacji transceivera nie jest dowodem awarii.
+
+### 5.TS.2. EX switch działa, a po „małej zmianie” zniknęły trasy
+
+**Objaw.** `show route` nie pokazuje statycznej trasy do oddziału, ale konfiguracja zawiera `routing-options static route`.
+
+**Urządzenie: R1-vSRX — Operational Mode, odczyt**
+
+~~~junos
+show configuration routing-options | display set
+show route table inet.0
+show route hidden
+show route forwarding-table
+show interfaces terse
+~~~
+
+**Hipotezy:** trasa jest inactive/hidden, ma nierozwiązany next-hop, wskazuje do nieistniejącej sieci, weryfikujesz niewłaściwą routing instance albo nie została zacommitowana. **Route configured ≠ route active**. Jeżeli route jest poprawna, sprawdź także ARP/neighbor i drogę zwrotną.
+
+**Most z Cisco:** `show run | section ip route` i `show ip route` też nie są tym samym dowodem. Junos dodatkowo pokazuje `hidden` routes i jawnie rozróżnia `inet.0` oraz `mgmt_junos.inet.0`.
+
+### 5.TS.3. Po zmianie policy SRX użytkownik nadal pinguje
+
+**Objaw.** Operator zmienił security policy z permit na deny. `commit complete`, a dotychczasowy ICMP wygląda na działający.
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show security policies
+show security flow session
+show log messages | match "security|RT_FLOW"
+~~~
+
+**Hipoteza:** wcześniejsza **stateful session** nadal istnieje. Zmiana policy nie musi zawsze retroaktywnie zakończyć istniejące sesje. Sprawdź **nowe połączenie**, politykę, strefy i sesje. Nie wykonuj automatycznie globalnego `clear security flow session all`.
+
+**Pytanie instruktor:** czy to dowód, że firewall ignoruje zmianę? **Nie**, dopóki nie odróżnisz nowego flow od starego.
+
+### 5.TS.4. `monitor traffic` nic nie pokazuje, ale klient mówi, że aplikacja działa
+
+**Objaw.** Pusty capture RE, ale licznik interfejsu i monitoring serwera pokazują przesłane pakiety.
+
+**Urządzenie: R1-vSRX — Operational Mode, limited capture**
+
+~~~junos
+monitor traffic interface ge-0/0/1 no-resolve count 20
+~~~
+
+**Hipoteza:** obserwujesz niewłaściwy punkt w dataplane. `monitor traffic` nie jest równoznaczny z kopią całego ruchu PFE; brak pakietów nie oznacza braku forwardingu. Dobierz narzędzie do RE/control, SRX flow, PFE telemetry albo analyzer/SPAN zależnie od platformy.
+
+### 5.TS.5. Po upgrade `show version` się zgadza, lecz SNMP milczy
+
+**Objaw.** Nowy obraz Junos uruchomiony, porty up, ruch użytkowników działa, a NMS nie może wykonać SNMPv3 authPriv GET.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode**
+
+~~~junos
+show version
+show configuration snmp | display set
+show snmp statistics
+show snmp v3
+show route table inet.0
+show log messages | match "snmp"
+~~~
+
+**Hipotezy:** migracja ustawień, niedopasowane algorytmy, source/ACL/VRF, VACM, engine ID, niedziałający agent. To nie jest automatycznie dowód błędnego obrazu — zbierz logi i potwierdź lokalny/remote SNMPv3.
+
+**Most z Cisco:** identyczne rozumowanie po IOS XE upgrade — pakiet poprawny i switch routuje, ale platformowa usługa monitoringu mogła zmienić zachowanie.
+
+### 5.TS.6. Wysokie RE CPU, a forwarding użytkowników działa
+
+**Objaw.** CPU RE przez chwilę >90% po restarcie BGP, ale sesje aplikacyjne przechodzą.
+
+**Urządzenie: MX-CORE-01 — Operational Mode**
+
+~~~junos
+show chassis routing-engine
+show system processes extensive
+show route summary
+show log messages | last 50
+~~~
+
+**Hipoteza:** control plane pracuje nad routingiem lub logowaniem; PFE może nadal forwardować zaprogramowane wpisy. Nie twierdź „core nie działa”, bo CPU jest wysokie. Ale **długotrwałe** przeciążenie RE może powodować problemy z protokołami i zarządzaniem — porównaj trend, alarmy oraz zachowanie routing neighbors.
+
+### 5.TS.7. Po reboot urządzenie wróciło, ale jeden członek VC nie
+
+**Objaw.** Site działa częściowo, część portów nie jest dostępna; master odpowiada na SSH.
+
+**Urządzenie: EX-VC-01 — Operational Mode, tylko rzeczywisty EX Virtual Chassis**
+
+~~~junos
+show virtual-chassis status
+show chassis hardware
+show version
+show chassis alarms
+show interfaces terse
+~~~
+
+**Hipotezy:** błąd członka VC, image mismatch, VCP link, zasilanie/boot. Nie traktuj `show version` master jako dowodu, że wszystkie membery uruchomiły ten sam release. **Zaplanuj reaktywację konkretnego membera zgodnie z dokumentacją VC, nie rebootuj całego stacka bez potrzeby.**
+
+### 5.TS.8. Automatyczny backup konfiguracji nie powiódł się po patchu
+
+**Objaw.** `commit` przeszedł, ale SCP archival serwer nie otrzymał pliku.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode**
+
+~~~junos
+show configuration system archival | display set
+show log messages | match "archive|scp|transfer"
+show route table inet.0
+show system storage
+~~~
+
+**Hipotezy:** zły source/VRF, host key, skrypt lub ACL, brak miejsca/katalogu, zmiana algorytmów SSH. **Off-device backup wymaga osobnego dowodu dostarczenia**, a nie tylko obecności `transfer-on-commit`. To łączy rozdział 4.11 z 5.5.
+
+### 5.TS.9. Root password zaginął, ale konsola jest zablokowana
+
+**Objaw.** Urządzenie EX nie ma dostępnego konta admin, a procedura single-user recovery żąda root password.
+
+**Hipoteza:** console może być zabezpieczona trybem uniemożliwiającym standardowy password recovery, albo urządzenie działa na innym wydaniu/OS Evolved.
+
+**Bezpieczna reakcja:** potwierdź authorization do działań, zidentyfikuj model/wersję i sięgnij po **platformową procedurę Juniper JTAC**, właściwą dla konfiguracji bezpieczeństwa. Nie szukaj nieautoryzowanego obejścia zabezpieczeń.
+
+### 5.TS.10. Zespół chce wykonać `no-validate` „bo standardowy upgrade nie przechodzi”
+
+**Objaw.** Przy `request system software add` pojawia się problem walidacji konfiguracji albo wydania.
+
+**Zła reakcja:** zawsze dodaj `no-validate`.
+
+**Prawidłowe rozumowanie:** porównaj dokładną kombinację model + current + target release z dokumentacją. Niektóre ścieżki **wymagają** `no-validate`, np. wskazane przez producenta przejścia bazowego FreeBSD, a inne zgłaszają realny konflikt konfiguracji, który powinien zostać naprawiony **przed** aktywacją image. [Junos software install CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add.html).
+
+**Wniosek:** łatwe polecenie nie jest dobrym runbookiem, jeżeli jego opcje nie pasują do rzeczywistego systemu.
+
+---
+
+## 5.TEST. [EXT] Egzamin wewnętrzny — 20 krótkich sytuacji i uzasadnione odpowiedzi
+
+*To autorskie pytania kontrolne stworzone na podstawie oficjalnej dokumentacji i wyjaśnień z tej lekcji; nie są przedstawiane jako prawdziwe pytania z egzaminu JNCIA.*
+
+Zanim spojrzysz na odpowiedź, **wybierz test diagnostyczny**, a nie tylko nazwij komendę.
+
+**1.** `show interfaces terse` daje `up/up`. Czy link na pewno nie gubi pakietów?  
+**Nie.** Musisz obejrzeć error counters/drops i trend przyrostu.
+
+**2.** CRC wynosi 1200, ale nie rośnie przez godzinę. Czy to dowód bieżącej awarii?  
+**Nie.** To licznik kumulowany; potrzebujesz delty i korelacji z objawami.
+
+**3.** Słaby Rx na Switch-A. Którą stronę toru sprawdzisz?  
+**Tx urządzenia B, włókno B→A oraz Rx A.** Nie tylko Tx urządzenia A.
+
+**4.** Ping do bramy SRX przechodzi, ale PC-A → PC-B nie. Jaki mechanizm różni te testy?  
+**Host-inbound do SRX vs tranzytowa security policy/session**, plus routing i return path.
+
+**5.** `show route` zna route, ale w FIB brak użytecznej ścieżki. Czy należy ignorować next-hop?  
+**Nie.** Aktywność trasy, ARP/ND, rozwiązanie next-hopa i routing instance są krytyczne.
+
+**6.** `show route | count` zwraca 152. Czy masz 152 prefiksy?  
+**Nie.** Liczy linie tekstu, nie destinations.
+
+**7.** `monitor traffic` nie widzi ruchu klient–serwer. Co wiesz?  
+**Że capture w tym punkcie nic nie pokazał**, nie że PFE go nie forwardował.
+
+**8.** W traceroute hop 2 to `*`, hop 3 odpowiada. Czy hop 2 zrywa forwarding?  
+**Nie musi.** ICMP TTL exceeded może być filtrowany/rate-limited.
+
+**9.** `ping` bez `source` przeszedł. Czy ruch z podsieci WLAN musi przejść tak samo?  
+**Nie.** Źródło, trasa, VRF, security i return path mogą się różnić.
+
+**10.** Telnet na TCP/443 połączył się. Czy HTTPS jest zdrowy?  
+**Nie.** TCP connect nie potwierdza TLS ani aplikacji.
+
+**11.** `show version` po upgrade pokazuje właściwy release. Czy można zamknąć change?  
+**Nie bez postcheck usług.** AAA, monitoring, routing, HA i aplikacja nadal muszą zostać zweryfikowane.
+
+**12.** Dlaczego `no-validate` jest ryzykowne?  
+**Pomija test kompatybilności config z nowym image.** Stosuj tylko gdy wymaga tego właściwa procedura producenta.
+
+**13.** Czy `rollback 1` przywróci starszy Junos image?  
+**Nie.** Dotyczy konfiguracji; software rollback jest inną procedurą.
+
+**14.** Po upgrade wykonałeś snapshot na alternate i nadpisałeś starą kopię. Co straciłeś?  
+**Możliwość prostego boot do starej wersji** na mechanizmach, gdzie snapshot kopiuje nowy obraz na backup media.
+
+**15.** Czy 2×RE albo 2×SRX oznacza zawsze non-impacting upgrade?  
+**Nie.** Potrzebujesz faktycznego stanu HA, procedury ISSU/failover i testu.
+
+**16.** Czym różni się `request system reboot` od `request system halt`?  
+**Reboot zatrzymuje i ponownie uruchamia, halt zatrzymuje OS.** Fizyczne odcięcie zasilania może wymagać osobnego kroku.
+
+**17.** Czy reboot całego EX Virtual Chassis jest dobrym pierwszym testem przy jednym niedziałającym członku?  
+**Nie.** Najpierw ustal rolę i stan członków/VC ports, obraz i zasilanie.
+
+**18.** Dlaczego `restart routing` nie jest niewinnym „odświeżeniem jednego BGP”?  
+**Restartuje istotny proces control plane**, potencjalnie wpływając na wiele protokołów i ruch.
+
+**19.** Czy każdy Junos pozwala resetować root przez zwykłe `boot -s` i `recovery`?  
+**Nie.** Platforma, wersja FreeBSD/Evolved, FIPS i zabezpieczenia konsoli mogą zmieniać procedurę.
+
+**20.** Jak udowodnisz zakończenie P1?  
+**Porównywalny pre/post state, pomiar klienta i potwierdzenie aplikacji**, plus monitoring/log oraz udokumentowany zakres naprawy — nie tylko zielony interfejs.
+
+### Kryterium gotowości
+
+Jeżeli umiesz samodzielnie:
+- zebrać precheck w ciągu kilku minut;
+- wyjaśnić, co mierzy każdy licznik i co oznacza przyrost;
+- odróżnić RE capture i PFE transit;
+- poprowadzić source-aware ping/traceroute;
+- przygotować upgrade plan dla **konkretnego modelu i wydania**, nie „całej firmy”;
+- odróżnić rollback konfiguracji, software i snapshot;
+- świadomie użyć reboot/halt/recovery;
+- wykonać trzy laby faults i zebrać dowód z klienta,
+
+to rozdział spełnił cel. Nie musisz zapamiętywać każdego ekranu `show`; masz wiedzieć, **co próbujesz na nim udowodnić**.
+
