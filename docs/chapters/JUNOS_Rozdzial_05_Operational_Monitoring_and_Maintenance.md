@@ -804,3 +804,261 @@ flowchart TD
 
 **Źródła rozdziału:** [Software Installation and Upgrade Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/software-install-and-upgrade-overview.html), [Prepare for Software Installation](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/prepare-sotware-install-and-upgrade.html), [request system software add](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add.html), [Evolved installation](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add-evo.html).
 
+
+
+---
+
+## 5.6. Uruchamianie, reboot i bezpieczne wyłączenie urządzenia [A]
+
+### 5.6.1. „Zrestartuję switch, może pomoże” — dlaczego reboot nie jest diagnozą
+
+Wyobraź sobie P1 w zakładzie produkcyjnym. Po godzinie użytkownicy nie mają dostępu do aplikacji, inżynier widzi pojedynczy alarm i ktoś proponuje reboot core switcha. To kuszące, bo może „wyczyścić stan”. Ale w ten sposób można:
+- utracić dowody bieżącej usterki i liczniki;
+- wywołać outage większy niż pierwotny;
+- utrudnić root-cause analysis;
+- wywołać niekontrolowany failover HA;
+- doprowadzić do problemu boot, jeśli obraz lub storage są uszkodzone.
+
+**Most z Cisco:** `reload` na Catalyst/ISR robi dokładnie tego typu zmianę w dostępności. Junos `request system reboot` nie jest magicznie bezpieczniejszy; wymaga change window i właściwego wpływu na zależne site'y.
+
+### 5.6.2. Rozróżnij `reboot`, `halt` i fizyczne odcięcie prądu
+
+**Reboot** uruchamia kontrolowane zatrzymanie usług i ponowne uruchomienie oprogramowania/urządzenia zgodnie z platformą.
+
+**Halt** zatrzymuje system operacyjny. Nie oznacza to, że każda platforma sama odłączy zasilanie w identyczny sposób. Przy wyłączeniu hardware trzeba stosować odpowiedni Hardware Guide i procedury zasilania.
+
+**Power cycle** to fizyczne odcięcie i przywrócenie zasilania. Nie jest domyślnym sposobem utrzymania, bo niesie większe ryzyko uszkodzenia filesystem niż graceful shutdown.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, odczyt przed każdym planowanym reboot**
+
+~~~junos
+show system uptime
+show system users
+show system commit
+show system alarms
+show chassis alarms
+show system storage
+show log messages | last 40
+~~~
+
+Sprawdź także aktywne sesje klientów, stan chassis cluster, Virtual Chassis, routing peers i dependency. W prologu działający SSH nie dowodzi, że możesz bezpiecznie wyłączyć WAN gateway dla całej lokalizacji.
+
+### 5.6.3. Komenda, którą trzeba znać, lecz nie wolno wykonać bez planu
+
+**Urządzenie: LAB-SRX01 — Operational Mode, SYNTAX ONLY — restart całego systemu, potencjalnie destrukcyjny**
+
+~~~junos
+request system reboot
+~~~
+
+Na wielu urządzeniach CLI prosi o potwierdzenie. **Nie traktuj tego jako gwarancji**, że operator przypadkowo niczego nie przerwie — polecenie może mieć warianty z natychmiastowym restartem. Na EX/QFX w pewnych wersjach `request system reboot` uruchamia domyślnie niewielkie opóźnienie, a `at now` restartuje od razu. [request system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-reboot.html).
+
+**Urządzenie: LAB-SRX01 — Operational Mode, SYNTAX ONLY — zaplanowany restart w środowisku laboratoryjnym**
+
+~~~junos
+request system reboot in 15
+~~~
+
+Nie wykonuj tego w produkcji bez akceptacji change. Jeżeli zaplanowano reboot, dowiedz się **jak go zobaczyć i odwołać**, nie polegaj na pamięci.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, read-only sprawdzenie zaplanowanego reboot**
+
+~~~junos
+show system reboot
+~~~
+
+**Urządzenie: LAB-SRX01 — Operational Mode, SYNTAX ONLY — odwołanie zaplanowanego reboot na wspieranym Junos**
+
+~~~junos
+clear system reboot
+~~~
+
+Polecenie `clear system reboot` **nie jest kasowaniem konfiguracji**; dotyczy oczekującego restartu. Jeśli nie masz zaplanowanego reboot, wynik może być odpowiednią informacją „no scheduled reboot”. Sprawdź obsługę na danym release. [show system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-reboot.html).
+
+### 5.6.4. Gotcha: reboot na routerze z redundantnymi Routing Engines
+
+Masz MX z dwoma RE, jedno Master i jedno Backup. Na Cisco przypomina to redundancy supervisor/SSO. Czy `request system reboot` musi oznaczać „cała platforma restartuje się bez możliwości failover”? **To zależy od hardware, opcji polecenia, topologii i aktualnego stanu**. Dokumentacja wymienia warianty `other-routing-engine`, `both-routing-engines`, a na Virtual Chassis `member` i `all-members`.
+
+**Urządzenie: MX-CORE-01 — Operational Mode, read-only ustalenie ról przed jakąkolwiek akcją**
+
+~~~junos
+show chassis routing-engine
+show system switchover
+show system uptime
+show version
+~~~
+
+Nie próbuj zgadywać, który RE restartuje się po wydaniu komendy z aktualnej sesji. W produkcji przyjmij procedurę vendor dla **tego modelu i konfiguracji GRES/NSR/ISSU**. W przypadku SRX cluster restart węzła może oznaczać failover i utratę sesji zależnie od aktualnego stanu RG.
+
+**Urządzenie: SRX-CLUSTER-01 — Operational Mode, tylko urządzenie rzeczywiście będące SRX chassis cluster**
+
+~~~junos
+show chassis cluster status
+show chassis cluster interfaces
+~~~
+
+Dwie redundantne jednostki nie tworzą automatycznie bezprzerwowego rebootu. **Przed restartem sprawdź, czy backup jest healthy**, a nie tylko czy istnieje.
+
+### 5.6.5. Bezpieczne wyłączanie, gdy remote hands demontuje sprzęt
+
+W rzeczywistym offboardingu użytkownik pyta: „Możemy wyjąć kabel zasilający?”. Inżynier powinien znać nie tylko `request system halt`, ale też stan ruchu, redundancy, plan migracji, storage oraz procedurę fizyczną.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, WYŁĄCZNIE po odłączeniu użytkowników i zatwierdzonym offboardingu**
+
+~~~junos
+request system halt
+~~~
+
+Po uruchomieniu `halt` system bezpiecznie zatrzymuje procesy/OS na wspieranej platformie. **Zanim remote hands fizycznie odłączy zasilanie, musi zobaczyć odpowiedni komunikat na konsoli i zastosować wskazany przez producenta okres oczekiwania**. Niektóre QFX wymagają np. odczekania po „The operating system has halted.”.
+
+**Gotcha:** jeśli wykonasz halt z sesji SSH, stracisz możliwość obserwacji końca procedury po przerwaniu sieci. Dlatego producent rekomenduje **bezpośrednią konsolę** przy czynnościach zatrzymywania oprogramowania. Nie myl `halt` z odpowiednim `power-off` na platformach, które mają osobny mechanizm wyłączenia zasilania. [request system halt](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-halt.html), [Operational Commands](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-operational-mode-commands-monitoring.html).
+
+### 5.6.6. Dlaczego nie warto od razu restartować daemonów?
+
+Ktoś w zespole proponuje „zrestartuj rpd, bo jest problem z BGP”. Ale `rpd` obsługuje dużo więcej niż jednego sąsiada. Restart procesu może zerwać sesje routingowe, wpłynąć na RIB, protokoły i forwarding w sposób zależny od platformy. Nie jest równoważny pojedynczemu `clear bgp neighbor`.
+
+**Urządzenie: R1-vSRX — Operational Mode, read-only obserwacja procesu**
+
+~~~junos
+show system processes extensive
+show route summary
+show log messages | match "rpd|mgd"
+~~~
+
+Oficjalna dokumentacja ostrzega przed restartowaniem software daemons bez konkretnej rekomendacji wsparcia Juniper. W tym rozdziale **nie uczymy `restart routing` jako domyślnego rozwiązania problemu**.
+
+### 5.6.7. Powrót po restarcie — sprawdź więcej niż uptime
+
+Po reboot:
+- Czy nowa sesja SSH działa z właściwego bastiona?
+- Czy interfejsy wróciły admin/link up?
+- Czy wszystkie membery/RE są online i w oczekiwanych rolach?
+- Czy routing neighbors oraz sesje firewall wróciły?
+- Czy monitoring, NTP, syslog i archiwizacja działają?
+- Czy logi zawierają nieoczekiwane kernel panic/alarms?
+- Czy aplikacja klienta przeszła test **ze strony użytkownika**?
+
+**Urządzenie: LAB-SRX01 — Operational Mode, read-only postcheck**
+
+~~~junos
+show system uptime
+show version
+show system alarms
+show chassis alarms
+show interfaces terse
+show route summary
+show system commit
+show log messages | last 100
+~~~
+
+**Na pamięć:** `request system reboot` vs `request system halt`, `show system reboot`, `clear system reboot`.  
+**Do zrozumienia:** RE redundancy/VC/cluster zmieniają skutki restartu.  
+**Do przećwiczenia:** w EVE-NG tylko na oddzielnej kopii labu wykonaj kontrolowany reboot i porównaj stan przed i po — bez ingerencji w poprzednie laboratoria.
+
+---
+
+## 5.7. Odzyskiwanie hasła root — mechanizm ratunkowy i odpowiedzialność administratora [A]
+
+### 5.7.1. Jeśli zapomniałeś hasła root, co jeszcze musisz mieć?
+
+Nowy inżynier przejmuje starszy EX. Lokalny administrator odszedł, centralne AAA nie działa, hasło break-glass nie zostało poprawnie przekazane. Czy wystarczy wejść przez SSH i poprosić urządzenie o „reset root password”? Nie — taka operacja byłaby niebezpieczna z punktu widzenia bezpieczeństwa.
+
+**Recovery root password** jest specjalną procedurą serwisową, zwykle wymagającą dostępu do **konsoli/bootloadera** i możliwości zrestartowania urządzenia. W odróżnieniu od normalnej zmiany hasła przez uprawnionego użytkownika może oznaczać **przerwę w działaniu** oraz zależeć od ustawień ochrony konsoli i boot.
+
+Zadaj trzy pytania:
+1. Czy masz formalne uprawnienie do odzyskania dostępu do tego urządzenia?
+2. Czy masz **fizyczną lub równoważną konsolę hypervisora/EVE**, a nie tylko sesję SSH?
+3. Czy możesz bezpiecznie wykonać reboot urządzenia i masz okno serwisowe?
+
+### 5.7.2. Trzy sytuacje, których nie wolno mieszać
+
+**Sytuacja A: masz już legalny dostęp super-user i chcesz zmienić root password.** To normalna operacja na konfiguracji, bez bootloader recovery.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], uprawniony administrator, hasło podawane interaktywnie**
+
+~~~junos
+set system root-authentication plain-text-password
+show | compare
+commit check
+~~~
+
+Po tym wykonasz świadomy commit i nowy test dostępu zgodnie z runbookiem. **Nie wpisuj hasła w plaintext do publicznego `.set`**; `plain-text-password` uruchamia interaktywny prompt.
+
+**Sytuacja B: nie znasz root password, lecz masz uprawniony dostęp do konsoli/bootloadera klasycznego Junos.** Możesz użyć **procedury password recovery**, zależnej od FreeBSD generation i platformy.
+
+**Sytuacja C: system ma hardened console, FIPS albo Junos OS Evolved.** Procedura może wyglądać inaczej albo być zablokowana. Nie zakładaj, że bootloader bezwarunkowo umożliwia zmianę root password.
+
+### 5.7.3. Recovery na klasycznym Junos z upgraded FreeBSD — skąd biorą się `boot -s` i `recovery`?
+
+Oficjalny przewodnik Juniper opisuje scenariusz:
+- fizyczna konsola i kontrolowany reboot;
+- w odpowiednim momencie zatrzymanie sekwencji boot, wejście do loadera;
+- **`boot -s`** w celu uruchomienia trybu single-user;
+- wybór **`recovery`** w odpowiednim prompt;
+- przejście do Junos CLI, wejście w configuration mode;
+- ustawienie nowego root password i commit;
+- zakończenie recovery/reboot oraz weryfikacja dostępu.
+
+To **procedura dla odpowiedniej gałęzi klasycznego Junos**, nie ślepy skrypt dla EX4400, każdej generacji MX ani platformy Evolved.
+
+**Urządzenie: LAB-EX-LEGACY — BOOT LOADER, wyłącznie autoryzowany, odizolowany lab i odpowiadająca mu generacja FreeBSD**
+
+~~~text
+loader> boot -s
+~~~
+
+**Urządzenie: LAB-EX-LEGACY — prompt recovery w single-user mode, tylko jeśli oficjalna procedura danej platformy wyświetli taki prompt**
+
+~~~text
+Enter full pathname of shell or 'recovery' ...: recovery
+~~~
+
+**Urządzenie: LAB-EX-LEGACY — Junos Configuration Mode po udanym recovery**
+
+~~~junos
+set system root-authentication plain-text-password
+commit
+~~~
+
+**Ostrzeżenie:** to materiały szkoleniowe do własnego urządzenia. Nie wykonuj na produkcyjnym switchu bez zatwierdzonego change i konsoli. W niektórych wariantach recovery CLI wymaga określonej sekwencji `cli`/`configure`; użyj dokładnej instrukcji producenta dla wykrytego bootloadera.
+
+### 5.7.4. Najważniejszy gotcha: recovery może być celowo zablokowane
+
+Juniper dokumentuje szczególny przypadek: jeśli console port jest skonfigurowany jako **insecure** (odpowiedni hardening), próba przejścia przez single-user mode może **żądać hasła root**, zamiast umożliwiać reset. Mechanizmy FIPS i Evolved także mogą zmieniać przebieg.
+
+To jest ochrona przed nieuprawnioną osobą mającą fizyczny dostęp do szafy. Nie nazywaj tego „błędem recovery”, jeśli **urządzenie wykonuje zaprojektowaną politykę bezpieczeństwa**.
+
+**Most z Cisco:** podobnie jak password recovery disable/ROMMON security oraz fizyczne zabezpieczenia urządzeń Cisco. Uprawniony recovery i możliwość bootowania alternatywnych obrazów zależą od konfiguracji sprzętu i security policy.
+
+Źródła: [Recover a Root Password (Junos)](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/recovering-root-password.html), [Recover a Root Password (Junos OS Evolved)](https://www.juniper.net/documentation/us/en/software/junos/user-access-evo/user-access/topics/topic-map/recovering-root-password.html).
+
+### 5.7.5. Gdy `encrypted-password` zaszkodzi bardziej niż brak hasła
+
+Wyobraź sobie, że administrator wpisuje:
+- `set system root-authentication encrypted-password "MojeHaslo123"`
+
+I robi commit, zakładając, że Junos je zaszyfruje. To błąd. **`encrypted-password` oczekuje już prawidłowej zaszyfrowanej reprezentacji**, a nie zwykłego hasła. Producent ostrzega, że użycie plaintext w tym miejscu może uniemożliwić późniejsze zalogowanie się jako root i wymusić recovery.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode, bezpieczna forma interaktywna (nie wpisujemy hasła w dokumencie)**
+
+~~~junos
+set system root-authentication plain-text-password
+~~~
+
+**To jedna z najważniejszych różnic semantycznych podczas migracji Cisco → Junos.** `plain-text-password` odnosi się do **sposobu wejścia sekretu**, a nie koniecznie do przechowywania go jawnie w active configuration.
+
+### 5.7.6. Po recovery trzeba naprawić przyczynę organizacyjną
+
+Jeżeli do odzyskania dostępu potrzebowałeś single-user mode, sama nowa wartość hasła nie kończy problemu. Trzeba także:
+- odtworzyć inwentaryzację kont i role;
+- przywrócić i przetestować TACACS+/RADIUS;
+- poprawnie zapisać/rotować break-glass credentials w vault;
+- sprawdzić kto ma dostęp do OOB/console i jak jest audytowany;
+- potwierdzić NTP, syslog, SSH i logging działań;
+- zaktualizować rescue i off-device backup dopiero po poprawnej walidacji;
+- udokumentować wpływ reboot i zachować event timeline.
+
+**Na pamięć:** uprawniony recovery klasycznego Junos może wymagać console + single-user + `recovery`; nowe hasło przez `plain-text-password`.  
+**Do zrozumienia:** secure/insecure console, FIPS i Evolved mogą blokować/zmieniać procedurę.  
+**Do przećwiczenia:** na osobnej instancji vSRX, której odzyskanie jest dozwolone, prześledź wyłącznie ścieżkę potwierdzoną dla tej wersji, bez naruszania aktywnych labów.
+
