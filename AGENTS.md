@@ -11,9 +11,11 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 1. docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md — obowiązujący, zunifikowany spis treści; zachowaj zakres i numerację.
 2. docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md — pełny rozdział 2 (nie skracaj, nie nadpisuj streszczeniem).
 2a. docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md — pełny rozdział 3 (3.1–3.11), warstwa CLI/candidate/commit/load/rollback/J-Web. Nie zastępuj streszczeniem i nie przenoś wszystkich gotchas na koniec.
+2b. docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md — pełny rozdział 4 (4.1–4.14 oraz 4.15 LAB), Cisco ↔ Junos, AAA, NTP, SNMPv3, syslog, archival, traceoptions, rescue.
 3. labs/ch02-four-vsrx/README.md — specyfikacja pierwszego większego labu.
 4. labs/ch02-four-vsrx/CODEX_TASK.md — kryteria implementacji i walidacji.
 5. labs/ch03-cli-change-management/README.md — lab z dwiema sesjami administratorów, konsolą i kontrolowanym commit confirmed; status PLANNED, dopóki nie ma rzeczywistych testów.
+6. labs/ch04-initial-config/README.md — nowy izolowany lab z vSRX, Linux bastion i services (NTP, syslog, SNMPv3, SCP, AAA opcjonalnie), status PLANNED.
 
 ## Zasady dokumentacyjne
 
@@ -118,3 +120,15 @@ Dla rozdziału 2 odpowiedni rejestr źródeł: \`docs/research/CH02_GOTCHAS_ZROD
 - Rozdział 3 trenuj najpierw na bezpiecznym login banner, potem na shared/private, bez kasowania management. Nie stosuj fault injection bez rzeczywistego OOB/console.
 - Na EX4400 zarządzanie OOB zwykle jest przez `me0`, podczas gdy vSRX może mieć `fxp0`; nie zgaduj mapowania.
 - Dokumentacja: docs/research/CH03_JUNOS_CLI_GOTCHAS_I_ZRODLA_2026-11-16.md. Status labu dokumentuj jawnie jako PLANNED / STATIC VALIDATED / RUNTIME VALIDATED.
+
+## Specjalne zasady CH04 — bezpieczny onboarding i system services
+
+- Chapter 4 canonical: `docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md`, punkty 4.1–4.14 oraz 4.15 [LAB], **nie redukuj do listy poleceń**.
+- Dobór factory defaults **per platform i wydanie**; EX4400 `me0`, SRX/vSRX może mieć `fxp0`, a `mgmt_junos` nie jest automatycznie obecny po użyciu portu OOB.
+- Najpierw lokalne konto, test oddzielnej sesji SSH, potem ograniczanie root SSH i centralne AAA; porównaj **AAA timeout vs remote reject** dla różnych `authentication-order`. Zachowaj niezależny console/OOB, aby nie spowodować lockoutu.
+- Nigdy nie commituj haseł, shared secrets, SNMPv3 auth/privacy keys, prywatnych SSH keys, faktycznych adresów management ani pełnego configu klienta. Używaj interaktywnego prompt/vault, a w dokumentacji jawnie oznacz szablon jako **niekompletny**.
+- Dla config groups sprawdzaj `display inheritance`, lokalne precedence i kolejność `apply-groups`.
+- Udowadniaj **NTP synchronization** przez status/association, **SNMPv3** przez authPriv GET, **syslog** przez odbiornik, **archival** przez zdalny plik i test restore. Sam `commit complete` niczego z tych rzeczy nie potwierdza.
+- W rescue lab **oddziel auto-rollback po `commit confirmed` od ręcznego `rollback rescue`**; nie uruchamiaj `commit check` podczas oczekującego confirmed commit.
+- Wzorzec labu: `labs/ch04-initial-config/README.md`; dowody i wynik per usługa jako PASS / FAIL / NOT TESTED, status całego labu **PLANNED**, dopóki nie uruchomiono go w EVE.
+- Rejestr źródeł i 15 haczyków: `docs/research/CH04_GOTCHAS_ZRODLA_I_WERYFIKACJA.md`; wyjaśnienia mają być w tekście wykładu, nie w suchym banku pytań.
