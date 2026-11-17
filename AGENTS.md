@@ -12,10 +12,12 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 2. docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md — pełny rozdział 2 (nie skracaj, nie nadpisuj streszczeniem).
 2a. docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md — pełny rozdział 3 (3.1–3.11), warstwa CLI/candidate/commit/load/rollback/J-Web. Nie zastępuj streszczeniem i nie przenoś wszystkich gotchas na koniec.
 2b. docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md — pełny rozdział 4 (4.1–4.14 oraz 4.15 LAB), Cisco ↔ Junos, AAA, NTP, SNMPv3, syslog, archival, traceoptions, rescue.
+2c. docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md — pełny rozdział 5 (5.1–5.8 oraz 5.9 LAB), workflow diagnostyki i maintenance, interface counters/DOM, show/monitor, ping/source/VRF, upgrade, reboot/halt i root recovery.
 3. labs/ch02-four-vsrx/README.md — specyfikacja pierwszego większego labu.
 4. labs/ch02-four-vsrx/CODEX_TASK.md — kryteria implementacji i walidacji.
 5. labs/ch03-cli-change-management/README.md — lab z dwiema sesjami administratorów, konsolą i kontrolowanym commit confirmed; status PLANNED, dopóki nie ma rzeczywistych testów.
 6. labs/ch04-initial-config/README.md — nowy izolowany lab z vSRX, Linux bastion i services (NTP, syslog, SNMPv3, SCP, AAA opcjonalnie), status PLANNED.
+7. labs/ch05-operational-monitoring/README.md — nowy izolowany 2×vSRX+2×VPCS lab fault injection, status PLANNED.
 
 ## Zasady dokumentacyjne
 
@@ -132,3 +134,15 @@ Dla rozdziału 2 odpowiedni rejestr źródeł: \`docs/research/CH02_GOTCHAS_ZROD
 - W rescue lab **oddziel auto-rollback po `commit confirmed` od ręcznego `rollback rescue`**; nie uruchamiaj `commit check` podczas oczekującego confirmed commit.
 - Wzorzec labu: `labs/ch04-initial-config/README.md`; dowody i wynik per usługa jako PASS / FAIL / NOT TESTED, status całego labu **PLANNED**, dopóki nie uruchomiono go w EVE.
 - Rejestr źródeł i 15 haczyków: `docs/research/CH04_GOTCHAS_ZRODLA_I_WERYFIKACJA.md`; wyjaśnienia mają być w tekście wykładu, nie w suchym banku pytań.
+
+## Specjalne zasady CH05 — monitoring i maintenance
+
+- Kanoniczny rozdział: `docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md`; zachowaj 5.1–5.9 i pełny wykład narracyjny.
+- Rób **dwa pomiary counters z interwałem**, nie oceniaj awarii tylko po wartościach skumulowanych; `show interfaces terse up/up` nie dowodzi braku CRC, drops i problemów optyki.
+- DOM `show interfaces diagnostics optics` wymaga wspieranej **fizycznej wkładki**, nie jest sensownym testem „laser Rx power” na vSRX. Rx local to sygnał pochodzący z TX peer; interpretuj wartości względem specyfikacji modułu.
+- `monitor traffic` zwykle obserwuje z perspektywy RE i **nie jest PFE-SPAN**. Ruch host-bound i transit są różne; na SRX używaj flow sessions/policies.
+- `ping`/traceroute testuj z właściwym `source`, `routing-instance`, z klienta, w obu kierunkach. Ping do gateway nie wystarcza do potwierdzenia aplikacji klienta.
+- Software maintenance wymaga exact model/Junos release/image, Suggested Releases JTAC, upgrade matrix, backup, OOB console i pre/post. `no-validate` tylko na udokumentowanych wyjątkach; `rollback 1` config ≠ software rollback; snapshot może nadpisać poprzedni image.
+- `request system reboot/halt`, `restart routing`, `clear interfaces statistics` i root recovery mogą być destrukcyjne. Nie uruchamiaj ich na produkcji bez zatwierdzonej procedury, impact analysis i konsoli. Root recovery zależy od FreeBSD/Junos Evolved/security hardening.
+- Laboratorium: `labs/ch05-operational-monitoring/README.md`, oddzielny 2×vSRX/2×VPCS; test admin disable, missing static route, policy deny; `commit confirmed` i automatyczny rollback, bez dodatkowego `commit check` podczas pending.
+- Źródła i 18 gotchas: `docs/research/CH05_MONITORING_MAINTENANCE_GOTCHAS_I_ZRODLA_2026-11-17.md`. Nie przedstawiaj własnych case studies jako pytań certyfikacyjnych ani runtime PASS bez dowodów.
