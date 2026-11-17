@@ -346,6 +346,18 @@ Jeśli **A Rx** widzi bardzo słaby sygnał, to nie jest bezpośrednia informacj
 
 Właśnie dlatego technik onsite powinien przekazać **model SFP, typ medium, długość linku i DOM z obu stron**, a nie tylko stwierdzenie „sygnał jest niski”.
 
+### 5.3.5a. Zobacz fizycznie, gdzie jest Tx, a gdzie Rx
+
+To zdjęcie starszego modułu SFP z naniesionymi strzałkami pomaga zapamiętać **kierunek fizycznego toru**. Włókno podłączone do **TX** biegnie do **RX** na urządzeniu po drugiej stronie. To nie jest diagram Junos, ale jest dokładnie tym, o czym myślisz, interpretując wartości `Laser output power` i `Receiver signal average optical power`.
+
+![Widok frontu optycznego modułu SFP z oznaczeniem TX na czerwono i RX na niebiesko, ułatwiający powiązanie wyników DOM z kierunkiem włókien](https://upload.wikimedia.org/wikipedia/commons/a/a3/SFP-front-RX-TX.jpg)
+
+*Fotografia ilustracyjna **SFP-front-RX-TX.jpg** — zdjęcie bazowe **Adamantios**, oznaczenia Tx/Rx dodane przez **MichaelFrey**; [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:SFP-front-RX-TX.jpg); [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/); bez dalszych zmian w podręczniku, link bezpośredni do Wikimedia (nie pobrano binarnego pliku do repo).*
+
+Pytanie: gdy lokalny switch raportuje słaby **RX**, czy masz wymieniać jego lokalny nadajnik TX? **Nie automatycznie.** Rozważ nadawczą stronę peer, drogę optyczną i odbiornik lokalny. W module BiDi przebieg jest inny niż w klasycznym duplex LC, więc zawsze sprawdź faktyczny typ transceivera.
+
+---
+
 ### 5.3.6. `clear interfaces statistics` — test, który może zniszczyć dowód incydentu
 
 Kiedy licznik jest stary, możesz chcieć go wyzerować, żeby zobaczyć przyrost od zera. To wygodne, ale w środowisku produkcyjnym **zmieniasz bazę odniesienia także dla innych operatorów, telemetry lub raportu**. Nie wykonuj `clear` w P1 bez wcześniejszego snapshotu i uzgodnienia.
