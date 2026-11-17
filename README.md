@@ -9,11 +9,13 @@ Własny podręcznik i repozytorium laboratoriów do nauki **JNCIA-Junos (JN0-106
 3. [Rozdział 2 — Junos OS Fundamentals (rozbudowany wykład)](docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md)
 4. [Rozdział 3 — Junos User Interfaces: CLI, candidate/active, commit, rollback, J-Web](docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md)
 5. [Rozdział 4 — Initial Configuration and System Services: management, AAA, NTP, SNMPv3, syslog, backup i rescue](docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md)
-6. [Lab rozdziału 2 — 4×vSRX i 2×VPCS](labs/ch02-four-vsrx/README.md)
-7. [Lab rozdziału 3 — Shared/Private Candidate, Load, Commit Confirmed](labs/ch03-cli-change-management/README.md)
-8. [Lab rozdziału 4 — pełny onboarding Junos z bezpiecznym recovery](labs/ch04-initial-config/README.md)
-9. [Instrukcje dla Codexa](AGENTS.md)
-10. [Źródła modeli, wersji Junos i ograniczeń BOM — research 2026-11-16](docs/research/CH01_ENTERPRISE_PORTFOLIO_ZRODLA_2026-11-16.md)
+6. [Rozdział 5 — Operational Monitoring and Maintenance: show/monitor, interfejsy, narzędzia sieciowe, upgrade, reboot, recovery i diagnostyka](docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md)
+7. [Lab rozdziału 2 — 4×vSRX i 2×VPCS](labs/ch02-four-vsrx/README.md)
+8. [Lab rozdziału 3 — Shared/Private Candidate, Load, Commit Confirmed](labs/ch03-cli-change-management/README.md)
+9. [Lab rozdziału 4 — pełny onboarding Junos z bezpiecznym recovery](labs/ch04-initial-config/README.md)
+10. [Lab rozdziału 5 — 2×vSRX: interface fault, missing route i policy deny](labs/ch05-operational-monitoring/README.md)
+11. [Instrukcje dla Codexa](AGENTS.md)
+12. [Źródła modeli, wersji Junos i ograniczeń BOM — research 2026-11-16](docs/research/CH01_ENTERPRISE_PORTFOLIO_ZRODLA_2026-11-16.md)
 
 ## Projekt — zasady
 
@@ -26,6 +28,7 @@ Własny podręcznik i repozytorium laboratoriów do nauki **JNCIA-Junos (JN0-106
 - [Haczyki i gotchas rozdziału 2 — zweryfikowane źródła Juniper/HPE](docs/research/CH02_GOTCHAS_ZRODLA_I_WERYFIKACJA.md) — 9 nieoczywistych zachowań, objaśnionych w tekście podręcznika.
 - [Rozdział 3 — techniczne gotchas i źródła dokumentacji](docs/research/CH03_JUNOS_CLI_GOTCHAS_I_ZRODLA_2026-11-16.md) — 14 pułapek z objaśnieniami w lekcji, m.in. confirm po commit check.
 - [Rozdział 4 — badanie 15 gotchas i źródła Juniper/HPE](docs/research/CH04_GOTCHAS_ZRODLA_I_WERYFIKACJA.md) — factory defaults, AAA, management, groups, NTP, SNMP, syslog, archival i rescue.
+- [Rozdział 5 — 18 gotchas i zweryfikowane źródła](docs/research/CH05_MONITORING_MAINTENANCE_GOTCHAS_I_ZRODLA_2026-11-17.md) — RE capture, counters/DOM, source-aware ping, software upgrades, reboot i root recovery.
 - [Archiwum oryginalnego rozdziału 2 v1](docs/archive/JUNOS_Rozdzial_02_Architektura_Junos_OS_v1_2026-11-15.md) pozostaje dostępne do porównania.
 - Pierwsza topologia: **4 × vSRX + 2 × VPCS**, cztery połączenia tworzące romb (dwie trasy do sieci zdalnej).
 - Najpierw statyczny routing i analiza ścieżki; protokoły dynamiczne w kolejnych lekcjach.
