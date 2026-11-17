@@ -517,3 +517,290 @@ flowchart TD
 **Do zrozumienia:** działający ICMP z RE nie potwierdza aplikacji ani drogi klienta.  
 **Do przećwiczenia:** uruchom dwa ping z różnymi source i porównaj z pomiarem klient–serwer w izolowanym labie.
 
+
+
+---
+
+## 5.5. Instalacja i aktualizacja Junos OS — change, który może skończyć się utratą całego site'u [A]
+
+### 5.5.1. „Mamy CVE. Aktualizujcie wszystkie Junipery do najnowszego” — dlaczego nie zaczynamy od `software add`
+
+Piątek, 16:30. Zespół Security publikuje pilne advisory. Kilkadziesiąt EX, SRX i MX wymaga oceny. W środowisku Cisco znasz matrix IOS XE, model, ROMMON, boot mode, stack/HA i okna serwisowe. W Juniperze postępujesz **dokładnie tak samo świadomie**, ale masz dodatkowe różnice między klasycznym Junos, Junos OS Evolved, poszczególnymi family image i mechanizmami dual-root, snapshot i switchover.
+
+Nie ma **jednego pakietu Junos do wszystkiego**. Nie ma też jednej magicznej komendy, której użyjesz identycznie na EX4400, MX204, QFX5k, SRX300 i nowym urządzeniu Evolved. To jest najważniejsze zdanie o patchowaniu, którego często brakuje w podręcznikach Associate.
+
+### 5.5.2. Co jest właściwym celem patchowania?
+
+Celem nie jest „mieć najwyższy numer wersji”, lecz:
+- usunąć rzeczywistą podatność lub błąd;
+- zachować kompatybilność hardware i feature;
+- przeprowadzić **wspieraną ścieżkę upgrade**;
+- utrzymać możliwość przywrócenia poprzedniego stanu;
+- zminimalizować wpływ na użytkownika i dostarczyć powtarzalne dowody.
+
+**Most z Cisco:** przy Catalyst 9300 weryfikujesz wersję IOS XE, boot variables, INSTALL mode, stack members i TAC advisories. W Junos sprawdzasz model, obecny/planowany release, obraz właściwej rodziny, boot media, storage, RE redundancy, HA cluster/Virtual Chassis i software installation guide.
+
+Zawsze szukaj **JTAC Suggested Releases (KB21476)**, bieżących Security Advisories (JSA), Release Notes, Feature Explorer, End-of-Engineering/End-of-Support, exact supported path. **Nie zapisujemy jednego release 2026 jako dobrego dla wszystkich urządzeń**, bo byłaby to fałszywa informacja projektowa.
+
+### 5.5.3. Rozdziel trzy rzeczy: konfigurację, system operacyjny i obraz zapasowy
+
+W rozdziale 3 `rollback 1` cofał **konfigurację** w candidate. Teraz musisz znać co najmniej trzy odmienne rodzaje przywracania:
+
+1. **Configuration rollback:** `rollback 1`, `rollback rescue` → candidate → commit.
+2. **Software rollback:** procedura przywracająca **poprzedni Junos image**, zależna od platformy i dostępnego backupu.
+3. **Root/boot snapshot:** kopia systemu na wspieranym alternatywnym nośniku/partycji; jej dokładna forma jest platform-dependent.
+
+~~~mermaid
+flowchart TD
+  REQ["Need to revert after incident"] --> Q{"Co zostało zmienione?"}
+  Q -->|config/ACL/hostname| CFG["rollback n / rescue\npotem compare + commit"]
+  Q -->|Junos release| SW["Software rollback\nplatform + version matrix"]
+  Q -->|boot media corruption| BOOT["Recovery snapshot / alternate partition\nconsole + recovery procedure"]
+  CFG --> TEST["Service verification"]
+  SW --> TEST
+  BOOT --> TEST
+~~~
+
+**Podchwytliwe pytanie:** czy `commit confirmed 5` ochroni Cię przed nieudaną instalacją Junos? **Nie.** Confirmed commit zarządza **konfiguracją**, a upgrade wymienia **system software**. Możesz wykonać poprawny commit i nadal mieć niebootujący obraz po upgrade. Recovery wymaga właściwego snapshotu, obrazu i dostępu console.
+
+### 5.5.4. Zidentyfikuj wszystko, co determinuje procedurę
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, precheck przed ustaleniem upgrade path**
+
+~~~junos
+show version
+show chassis hardware
+show chassis alarms
+show system alarms
+show system uptime
+show system storage
+show system processes extensive
+show system users
+show system commit
+show configuration | display set
+~~~
+
+Dopiero teraz pytasz o:
+- aktualne pełne wydanie, np. R/S i rodzinę obrazu;
+- Model/PID, RE/FPC/members;
+- czy VC/cluster ma kilka członków i jak wygląda redundancja;
+- czy boot i root partitions mają miejsce;
+- czy obecny software obsługuje `request system software add` i jaki plik;
+- czy istnieje aktywna niezatwierdzona zmiana;
+- czy zespół utrzymaniowy ma **OOB console**, gdy management przez SSH przestanie działać.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, dodatkowa weryfikacja sprzętowego VC, jeśli taka topologia istnieje**
+
+~~~junos
+show virtual-chassis
+show virtual-chassis status
+~~~
+
+**Nie każde EX pracuje jako Virtual Chassis.** Jeśli CLI zwraca brak funkcji, nie jest to automatycznie błąd urządzenia. Dla SRX chassis cluster potrzebna będzie odrębna procedura `show chassis cluster status` i często inny mechanizm upgrade; nie używaj na ślepo komend VC.
+
+### 5.5.5. Precheck powinien zawierać plan biznesowy, a nie tylko RAM
+
+Nie rozpoczniesz upgrade bez uzgodnionego maintenance window, klasyfikacji ryzyka i rollback planu. Zanim przejdziesz dalej, zadaj pytania:
+
+**Co stracimy, jeśli urządzenie przestanie działać?** Jeden edge switch, piętro biurowca, core kampusu czy centralną bramę Internetu? Czy są redundantne łącza i czy aplikacja przeżyje konwergencję?
+
+**Jak wrócimy?** Czy stara wersja jest dostępna jako obraz, na alternatywnej partycji, przez snapshot albo na zatwierdzonym repozytorium? Czy downgrade jest wspierany? Czy potrzebna będzie reinstalacja zamiast rollback?
+
+**Jak zweryfikujemy sukces?** Nie wystarczy nowy `show version`. Sprawdzasz wszystkie znaczące funkcje: VLAN/IRB, routing, HA, monitoring, AAA, NTP, syslog, policery/firewall, optykę i aplikację klienta.
+
+**Co z firmware i bootloaderem?** Niektóre ścieżki software install mogą również wpływać na firmware/bootrom lub wymagać określonego upgrade path. Nie zakładaj, że jest to tylko podmiana pakietu `.tgz`.
+
+### 5.5.6. Przygotuj miejsce na dysku — nie wymazuj potrzebnych plików
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, kontrola wolnego miejsca i symulacja cleanup**
+
+~~~junos
+show system storage
+file list /var/tmp/ detail
+request system storage cleanup dry-run
+~~~
+
+`dry-run` pokazuje propozycję plików do wyczyszczenia, **nie wykonuje cleanup**. To właściwy nawyk: najpierw obejrzyj listę, oceń, czy potrzebujesz logów do incydentu lub poprzedniego package, dopiero potem rozważ działanie administracyjne.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, działanie zmieniające storage; NIE wykonuj bez oceny dry-run i zgody**
+
+~~~junos
+request system storage cleanup
+~~~
+
+**Haczyk:** `request system storage cleanup` to nie banalny odpowiednik `delete temporary files`; może usunąć użyteczne logi/ślad diagnostyczny. Na Junos Evolved zarządzanie obrazami z poziomu `show system software list` i poleceń software różni się od klasycznego Junos. Zawsze przeczytaj [storage cleanup documentation](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-storage-cleanup.html).
+
+### 5.5.7. Plik image — skąd go masz i skąd wiesz, że jest właściwy?
+
+Pakiet pobierasz z oficjalnego Support Portal na podstawie modelu i zalecanego release. **Sprawdź sumę kontrolną** podaną przez producenta i cyfrowy podpis/mechanizm weryfikacji, jeśli dany format i platforma go wspierają. Nie pobieraj nieznanej binarki z forum, GitHuba czy przypadkowego mirroru.
+
+Na EX/QFX producent zaleca umieszczenie image w **`/var/tmp`**, a w części rodzin jest to jedyna obsługiwana lokalizacja przy `software add`.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, tylko lokalny read-only check uprzednio dostarczonego pliku**
+
+~~~junos
+file list /var/tmp/ detail
+show system storage
+~~~
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, koncept pobierania z zaufanego serwera SCP (wymaga istniejącego serwera i poprawnej ścieżki)**
+
+~~~text
+file copy scp://upgrade-user@192.0.2.50/approved-image.tgz /var/tmp/
+~~~
+
+Wiersz jest **szablonem transportu**. Nie zawiera rzeczywistego pakietu, nie zakłada istnienia serwera `192.0.2.50` i nie jest do wklejenia bez przygotowania infrastruktury.
+
+**Gotcha z dokumentacji:** w części procedur nie należy podawać URL SCP **bezpośrednio** do `request system software add`; najpierw używa się `file copy` na `/var/tmp`, dopiero potem lokalnego install. Dokumentacja producenta wyraźnie to rozróżnia. [request system software add](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add.html).
+
+### 5.5.8. Sam proces `request system software add`: dlaczego jest *wzorem*, a nie gotowym skryptem dla wszystkich?
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, WYŁĄCZNIE SZABLON polecenia do zatwierdzonego change**
+
+~~~text
+request system software add /var/tmp/APPROVED-PACKAGE-FOR-THIS-MODEL.tgz
+~~~
+
+Zamiast wklejać losowy pakiet, sprawdzasz:
+1. czy działa właściwe command family dla modelu;
+2. czy plik faktycznie istnieje i ma zgodną sumę;
+3. czy release notes potwierdzają **direct upgrade path**;
+4. czy wymagane jest oddzielne `reboot`, ISSU, obraz host OS albo VMHost;
+5. czy konfiguracja została zweryfikowana względem nowego release;
+6. czy masz plan powrotu do starej wersji.
+
+**Uwaga:** `request system software add` zwykle może uruchamiać walidację zgodności konfiguracji. **`no-validate`** pomija ten krok — nie powinno być domyślnym nawykiem „bo szybciej”. Ale istnieją **uzasadnione wyjątki platformowe i międzywydaniowe**, np. przy zmianie bazowego FreeBSD, w których dokumentacja wymaga `no-validate` albo innej ścieżki walidacji.
+
+**Konkretny haczyk producenta:** dla SRX300/SRX320/SRX340/SRX345/SRX380 przy upgrade **z 23.4R2-S3 lub 24.2R2 do 24.4R1** dokumentacja wymienia specjalny wariant instalacji `no-copy no-validate reboot`. To **nie jest** ogólna recepta dla każdego SRX i każdego release. [Oficjalna składnia i wyjątki](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add.html).
+
+### 5.5.9. Snapshot — ubezpieczenie, które może również skasować Twoją szansę cofnięcia
+
+W wielu modelach klasycznego Junos można tworzyć snapshoty boot media/alternate partitions. Zależnie od platformy i wieku systemu możesz spotkać m.in. `request system snapshot`, `request system snapshot slice alternate`, `request system snapshot recovery`. Nie są zamienne.
+
+Dobra intuicja: **przed upgrade** zachowaj znaną dobrą wersję w sposób obsługiwany przez platformę. **Po upgrade** nie nadpisuj starej kopii, dopóki nie zaakceptujesz nowego obrazu jako stabilnego. Dlaczego? Bo na niektórych mechanizmach snapshotu zapis nowego obrazu do zapasowej partycji **nadpisuje właśnie tę starą wersję, do której chciałeś wrócić**.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, read-only kontrola warunków snapshotu**
+
+~~~junos
+show version
+show system storage
+show system alarms
+~~~
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, ilustracja składni historycznie obsługiwanej na wybranych EX/SRX; NIE uruchamiaj bez potwierdzenia modelu/release**
+
+~~~text
+request system snapshot slice alternate
+~~~
+
+Nie obiecuję, że to zadziała na EX4400 ani konkretnym vSRX — na nowszych systemach i wydaniach występują inne warianty, a na Evolved odmienna architektura. [Snapshots on Junos](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/backing-up-install-using-snapshot.html), [Junos OS Evolved snapshots](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade-evo/topics/topic-map/evo-backup-snapshot.html).
+
+**Most z Cisco:** przypomina relację boot partition/rollback package na Catalyst, ale nie zakładaj identycznego dual-root i install packages. Zaprojektuj i przetestuj software rollback **oddzielnie** od configuration rollback.
+
+### 5.5.10. HA/VC: „chcę zrobić upgrade bez outage” — najdroższe niedopowiedzenie
+
+Zespół architektury mówi: „Mamy dwie sztuki w HA, więc patch będzie non-impacting”. Zanim potwierdzisz, zapytaj, o jaki mechanizm chodzi:
+- SRX **chassis cluster** ze stateful failover;
+- EX **Virtual Chassis**;
+- MX z redundantnymi **Routing Engines**;
+- EVPN multihoming;
+- Junos Evolved i dedykowane procedury package upgrade.
+
+Każdy ma inne wymagania i ryzyka. **Dwie fizyczne skrzynki ≠ zero-impact upgrade.**
+
+Dokumentacja `request system software add` zwraca uwagę, że gdy na określonych urządzeniach włączono **GRES**, zwykłe `software add` może być niedostępne, a wspierana procedura wymaga **ISSU** lub przygotowania zgodnie z instrukcją. Nie wyłączaj GRES na produkcji tylko dlatego, że instalator odmówił pracy. Wybrana ścieżka musi pochodzić z dokumentacji **konkretnej platformy/release/topologii HA**.
+
+**Urządzenie: SRX-CLUSTER-01 — Operational Mode, tylko jeśli rzeczywiście jest SRX chassis cluster**
+
+~~~junos
+show chassis cluster status
+show chassis cluster interfaces
+show version
+~~~
+
+**Urządzenie: MX-CORE-01 — Operational Mode, tylko system z odpowiednią redundancją RE**
+
+~~~junos
+show chassis routing-engine
+show system switchover
+show version
+~~~
+
+**Urządzenie: EX-VC-01 — Operational Mode, tylko Virtual Chassis**
+
+~~~junos
+show virtual-chassis status
+show version
+~~~
+
+Weryfikuj rzeczywistą redundancję i **stan obu stron**, nie wyłącznie ogólny `show version`.
+
+### 5.5.11. Software rollback ≠ `rollback 1` (drugi ważny haczyk)
+
+Załóżmy, że upgrade do nowego Junos zakończył się, ale routing feature przestał działać. Czy wpisanie `rollback 1` przywróci stary obraz? **Nie.** Przywróci poprzednią **konfigurację**, a nadal będziesz uruchamiać nowy OS.
+
+Dla klasycznego Junos możesz potrzebować `request system software rollback` albo zgodnej procedury reinstalacji poprzedniego pakietu. **Nie każdy downgrade jest wspierany w obie strony**; niektóre przejścia powodują nieodwracalne migracje plików lub wymagają recovery image. Na Junos OS Evolved istnieje osobny wariant software rollback i komendy `show system software list` określające obrazy dostępne do powrotu.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, read-only sprawdzenie po zmianie**
+
+~~~junos
+show version
+show system commit
+show system storage
+show system alarms
+~~~
+
+Nie podaję ślepego `request system software rollback` jako polecenia do wykonania na wszystkich modelach. Najpierw potwierdź support matrix i dostępność rollback image. [Software rollback on Junos](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-rollback.html), [Software rollback on Junos Evolved](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-rollback-evo.html).
+
+### 5.5.12. Postcheck: co znaczy „upgrade zakończył się sukcesem”?
+
+Urządzenie odpowiada przez SSH i pokazuje nową wersję. To **warunek konieczny, ale niewystarczający**. Dla Enterprise campus sprawdź minimum:
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, po aktualizacji i przywróceniu dostępu**
+
+~~~junos
+show version
+show system uptime
+show chassis hardware
+show chassis alarms
+show system alarms
+show interfaces terse
+show interfaces descriptions
+show route summary
+show lldp neighbors
+show system commit
+show log messages | last 100
+~~~
+
+Potem w zależności od roli:
+- na EX: VC, VLAN/IRB, porty access, PoE i LLDP, STP/LACP, uplinki, wireless AP;
+- na SRX: routing, security zones, session table, IPsec/VPN/HA;
+- na MX: peerings i forwarding, RE/PFE, dynamic routing, interfejsy, MPLS (jeśli używasz);
+- na wszystkich: SSH/AAA, NTP, syslog, SNMPv3, archiwizacja oraz **test aplikacji z klienta**.
+
+**Precheck i postcheck powinny używać porównywalnych poleceń, czasu i interfejsów**, inaczej nie będziesz wiedzieć, co właściwie zmieniło się po patchu.
+
+### 5.5.13. Etapowy runbook patchowania — od advisory do closure
+
+~~~mermaid
+flowchart TD
+  ADV["CVE / bug / compliance"] --> INVENTORY["Model, Junos, features, topology HA"]
+  INVENTORY --> MATRIX["Support matrix / JTAC release / release notes"]
+  MATRIX --> APPROVE["Change approval + impact + rollback plan"]
+  APPROVE --> PRE["Precheck + off-device backup + OOB"]
+  PRE --> PKG["Image: exact family + checksum + storage"]
+  PKG --> METHOD{"Upgrade mode?"}
+  METHOD -->|single RE| ONE["Platform-specific software add"]
+  METHOD -->|VC/cluster/redundant RE| HA["Vendor documented HA/ISSU procedure"]
+  ONE --> VERIFY["Reboot/activation + postcheck"]
+  HA --> VERIFY
+  VERIFY --> PASS{"Services PASS?"}
+  PASS -->|TAK| CLOSE["Handover + monitoring + closure"]
+  PASS -->|NIE| RECOVER["Supported software recovery / rollback"]
+  RECOVER --> VERIFY
+~~~
+
+**Czytelnik ma wiedzieć przed egzaminem:** `request system software add` służy instalacji oprogramowania, ale w prawdziwej pracy **najważniejsza jest decyzja, czy można użyć tej ścieżki na danym modelu**. Nie oceniaj wydania tylko po największej liczbie.
+
+**Źródła rozdziału:** [Software Installation and Upgrade Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/software-install-and-upgrade-overview.html), [Prepare for Software Installation](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/prepare-sotware-install-and-upgrade.html), [request system software add](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add.html), [Evolved installation](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add-evo.html).
+
