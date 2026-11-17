@@ -944,3 +944,329 @@ Konfiguracja SRX security logging/stream i polityk należy do osobnego obszaru s
 
 Źródło: [Direct System Log Messages to a Remote Destination](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/directing-system-log-messages-to-a-remote-destination.html), [Logging, SNMP, and Telemetry](https://www.juniper.net/documentation/us/en/software/junos/srx400-series-configuration-essentials/config-essentials-user-guide-srx4xx/topics/concept/logging-snmp.html).
 
+
+
+---
+
+## 4.11. Configuration archival — co zrobisz, gdy router nie ma już własnych backupów? [A]
+
+### 4.11.1. Historia, którą zna każdy administrator zewnętrznego klienta
+
+Wyobraź sobie pięcioletnie urządzenie, które ma za sobą 150 zmian. Dzisiaj jeden z modułów RE przestaje działać, a w magazynie czeka zamiennik. Pracownik onsite pyta: „Skąd wziąć ostatnią działającą konfigurację?”. Odpowiadasz: „Z lokalnego rollbacku 1”. Ale przecież **lokalny rollback znajduje się na uszkodzonym urządzeniu**.
+
+Właśnie tutaj kończy się wygodny mechanizm \`rollback 0..49\` z rozdziału 3, a zaczyna niezależna **configuration archival**. Junos potrafi po zatwierdzeniu konfiguracji wysłać kopię do zewnętrznego miejsca. To nie musi zastępować NCM/HPNA/Ansible/NetBox/Git — ale powinno sprawić, że awaria dysku nie kasuje jedynego egzemplarza danych.
+
+**Most z Cisco:** \`archive\`, \`copy running-config scp:\`, Cisco Catalyst Center/NCM backup i Git. Na Junos **\`system archival configuration\`** pozwala opisać automatyczne przesyłanie aktualnej konfiguracji po commit, zgodnie z obsługiwanym transportem.
+
+### 4.11.2. Trzy rodzaje kopii — i dlaczego żaden nie zastępuje wszystkich
+
+**Pierwsza: local rollback history.** Umożliwia szybki powrót do wcześniejszego zatwierdzonego stanu, jeśli urządzenie i storage działają.
+
+**Druga: rescue configuration.** Ręcznie zapisany punkt powrotu, o którym opowiemy w 4.13. Jest wygodny, ale też pozostaje lokalny.
+
+**Trzecia: off-device archival.** Kopia trafia do serwera backupowego poza routerem. Jest bardzo cenna przy RMA/DR, ale wymaga drogi IP, poprawnej autentykacji i sprawdzenia, że transfer **rzeczywiście doszedł**.
+
+~~~mermaid
+flowchart LR
+  RE["LAB-SRX01\nActive Config"] -->|"commit"| HIST["Local history 0..49"]
+  RE -->|"manual rescue save"| RESCUE["Local rescue.conf.gz"]
+  RE -->|"transfer-on-commit"| CACHE["Local transfer queue / cache"]
+  CACHE -->|"SCP/SSH"| BAK["Remote archive\naccess-controlled + offsite"]
+~~~
+
+**Pytanie:** czy pojawienie się komunikatu \`commit complete\` dowodzi, że plik dotarł na backup server? **Nie.** Commit, lokalna kolejka transferu i udany zapis w remote archive to oddzielne etapy.
+
+### 4.11.3. Minimalny szablon archiwizacji bez ujawniania hasła
+
+Załóżmy, że serwer \`LAB-SERVICES\` pod \`192.0.2.30\` ma konto \`junos-archive\`, przygotowany katalog i wcześniej zaufany host key. Na urządzeniu istnieje dopuszczona metoda bezhasłowego SCP, zgodna z wydaniem Junos i polityką security.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant LAB do zweryfikowania z faktycznym serwerem SCP**
+
+~~~junos
+set system archival configuration transfer-on-commit
+set system archival configuration archive-sites "scp://junos-archive@192.0.2.30/backup/junos/"
+show | compare
+~~~
+
+**Nie jest to kompletny działający deployment**, dopóki nie skonfigurujesz poprawnego uwierzytelniania SCP, dostępu do katalogu, host key trust i sieci management. Nie wstawiaj \`username:password@\` do publicznych skryptów i repo.
+
+W przypadku konfigurowania SCP Junos może rozpocząć pobieranie fingerprintu host key. **Nie akceptuj na ślepo nieznanego klucza** tylko dlatego, że adres IP wygląda znajomo — porównaj fingerprint z zaufanym kanałem, tak jak robisz przy SSH do serwerów zarządzających.
+
+Źródło: [Back Up Configurations to an Archive Site](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/cli/topics/task/junos-software-system-management-router-configuration-archiving.html).
+
+### 4.11.4. Haczyk: transfer-on-commit kontra transfer-interval
+
+Junos oferuje także archiwizowanie **periodyczne** (według interwału). Dokumentacja szkoleniowa *Day One* wskazuje, że \`transfer-interval\` i \`transfer-on-commit\` **nie powinny być konfigurowane jednocześnie w tym samym profilu**.
+
+Na dużym site pytanie nie brzmi wyłącznie „co 15 minut czy po każdym commit?”. Zastanów się również:
+- czy 1000 urządzeń nie wyśle kopii w tym samym momencie;
+- jak rozwiążesz retencję i wersjonowanie plików;
+- czy system archiwizacji odnotuje błąd transferu;
+- czy backup server jest dostępny, gdy WAN albo OOB nie działa;
+- kto potrafi odtworzyć plik **na innej obudowie**, a nie tylko na starym urządzeniu?
+
+**Na pamięć:** \`archive-sites\` mówi *dokąd*, a \`transfer-on-commit\` — *kiedy*. **Do zrozumienia:** archiwizacja poza urządzeniem to proces z własnym monitoringiem i ACL, nie uboczny efekt zapisu konfiguracji.
+
+### 4.11.5. Weryfikuj transfer, nie tylko konfigurację
+
+**Urządzenie: LAB-SRX01 — Operational Mode, read-only check konfiguracji i kolejki**
+
+~~~junos
+show configuration system archival | display set
+show log messages | match "transfer|archive|scp"
+file list /var/transfer/config/
+~~~
+
+Folder cache może różnić się lub nie występować identycznie na danej platformie i wydaniu. Jeżeli CLI zwraca „directory not found”, nie oznacza to automatycznie awarii backupu — sprawdź dokumentację systemu i logi.
+
+**Na serwerze LAB-SERVICES** niezależnie potwierdź, czy otrzymał plik z aktualnym czasem i hostname. Zrób test przywrócenia na **zapasowej instancji labowej**, nie na produkcyjnym routerze. Bez testu restore kopia jest tylko nadzieją.
+
+**Ważny gotcha:** jeśli konfiguracja zawiera hashe haseł, dane AAA lub inne wrażliwe statementy, **backup również wymaga ochrony dostępu i retencji**. Nie udostępniaj plików z archive przez zwykły publiczny HTTP.
+
+### 4.11.6. Utrata dostępu do archive server przy mgmt_junos
+
+Jeśli archiwizacja ma używać dedykowanej instancji \`mgmt_junos\`, sama konfiguracja adresu serwera nie gwarantuje poprawnej trasy. W społeczności Junipera opisywano problemy archiwizacji przy oddzielnej routing instance i różnych wydaniach.
+
+**Pytanie operatorskie:** czy na urządzeniu masz trasę **w tej tabeli routingu, której rzeczywiście używa proces archiwizacji**? Jeśli nie, zmiany sysloga, NTP i backupów mogą wszystkie zepsuć się jednocześnie po „małej” reorganizacji management. Dokumentuj te zależności w HLD.
+
+---
+
+## 4.12. Logging and tracing — debugujesz proces, nie zalewasz całego CPU [A]
+
+### 4.12.1. Dlaczego zwykły syslog czasem nie wystarcza?
+
+Załóżmy, że OSPF adjacency przechodzi między \`FULL\` i \`DOWN\`, ale w \`show log messages\` nie ma dosyć informacji, by stwierdzić, czy problemem jest hello/dead interval, MTU czy błędny adres. Czy w takiej chwili sensownie jest uruchamiać bezgraniczne „debug all” na routerze core?
+
+Na Cisco dobrze znasz, jak niewłaściwy \`debug ip packet\` może obciążyć CPU i zalać konsolę. Na Junos do szczegółowej diagnostyki protokołów wykorzystujesz m.in. **\`traceoptions\`**. To **świadoma zmiana konfiguracji diagnostycznej**; nie należy jej mylić z biernym odczytem sysloga.
+
+### 4.12.2. Trzy kanały obserwacji, trzy różne pytania
+
+**System syslog:** co system zgłosił o błędzie, logowaniu, interfejsie i daemonach?
+
+**Protocol traceoptions:** co określony proces/protokół robił na poziomie szczegółowości ustawionej przez operatora?
+
+**Packet capture/mirroring:** co faktycznie widziano na interfejsie lub dataplane, jeśli platforma pozwala taki ruch obserwować?
+
+**Haczyk:** zwykłe \`monitor traffic\` na RE **nie jest automatycznym mirrorem wszystkich pakietów transit na PFE**, o czym uczyliśmy się w rozdziale 2. Traceoptions OSPF też nie jest dowodem na każdy pakiet użytkownika.
+
+### 4.12.3. Włączamy minimalny trace tylko na czas diagnozy
+
+Przykład odnosi się do **urządzenia laboratoryjnego, na którym OSPF faktycznie jest uruchomiony**. W labie initial configuration bez OSPF nie ma sensu włączać jego tracingu tylko po to, by zapełniać pliki; potraktuj tę część jako demonstrację do późniejszego rozdziału 9.
+
+**Urządzenie: LAB-R2-vSRX — Configuration Mode [edit], wyłącznie osobny lab z działającym OSPF**
+
+~~~junos
+set protocols ospf traceoptions file CH04-OSPF size 1m files 3 no-world-readable
+set protocols ospf traceoptions flag error
+show | compare
+commit check
+~~~
+
+Nie przypisujemy tych komend do **LAB-SRX01**, bo nasze podstawowe ćwiczenie zarządzania nie wymaga OSPF. Dopiero świadomie uruchomiony protokół wygeneruje sensowne zdarzenia.
+
+**Urządzenie: LAB-R2-vSRX — Operational Mode, jeśli traceoptions zostały zatwierdzone w izolowanym labie**
+
+~~~junos
+show log CH04-OSPF | last 40
+show configuration protocols ospf traceoptions | display set
+~~~
+
+**Wyjaśnienie:**
+- \`file\` — gdzie zapiszesz ślad;
+- \`size\` — limit wielkości pojedynczego pliku;
+- \`files\` — liczba plików rotacyjnych;
+- \`no-world-readable\` — ograniczenie odczytu;
+- \`flag error\` — ograniczenie kategorii zdarzeń w porównaniu do szerokiego tracingu.
+
+W innym protokole nazwy flag mogą być inne. Nie kopiuj „flag all detail” bez sprawdzenia, czy system i storage to wytrzymają.
+
+### 4.12.4. Gotcha: traceoptions nie wyłączają się magicznie po incydencie
+
+Najgorszy scenariusz: podczas incydentu włączasz bogate logowanie, zapominasz je usunąć, a po tygodniu urządzenie ma wysokie CPU albo storage wypełnione logami.
+
+**Urządzenie: LAB-R2-vSRX — Configuration Mode [edit], cleanup po diagnostyce**
+
+~~~junos
+delete protocols ospf traceoptions
+show | compare
+commit check
+~~~
+
+Następnie wykonaj uzgodniony commit i potwierdź, że tracing został wyłączony. Nie usuwaj cudzych, potrzebnych ustawień globalnych „dla porządku”. Jeśli OSPF ma inne wcześniej skonfigurowane traceoptions, usuń **tylko** własne laboratoryjne elementy.
+
+### 4.12.5. Zbieranie dowodów do ticketu nie oznacza publikowania sekretów
+
+Kiedy wysyłasz snapshot do ServiceNow, wybierz wyłącznie istotny fragment logów, nie całą konfigurację z hasłami. Logowanie może zawierać user names, adresy IP, wrażliwe zdarzenia lub identyfikatory sesji.
+
+Dobry fragment worknotes opisuje **czas obserwacji, model/release, interfejs, polecenie, wynik, hipotezę, next action**. Nie trzeba wklejać 3000 linii tylko po to, by pokazać, że wykonałeś \`show log messages\`.
+
+**Gotcha:** dopiero po skonfigurowaniu NTP i sprawdzeniu strefy czasowej uzyskujesz sensowną korelację danych między Juniper i Cisco.
+
+Źródła: [Traceoptions for OSPF/IS-IS](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-is-is-ospf.html), [Tracing Global Routing Protocol Operations](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/tracing-global-routing-protocol-operations.html).
+
+---
+
+## 4.13. Rescue configuration — „ostatnia dobra wersja” to decyzja człowieka [A]
+
+### 4.13.1. Dlaczego ostatni commit nie jest automatycznie ostatnią dobrą wersją?
+
+Wyobraź sobie, że przez pięć kolejnych zmian wgrywałeś poprawki, które z perspektywy HLD były błędne. Masz lokalne rollbacki, ale **która wersja rzeczywiście działała poprawnie?** Nie wystarczy wskazać najwyższą liczbę albo najnowszą datę.
+
+Do tego służy **rescue configuration**: administrator świadomie zapisuje konfigurację, którą uważa za bezpieczny punkt powrotu. To coś jak złota konfiguracja dla urządzenia, ale nazywa się tak dopiero po przeprowadzeniu prawdziwych testów.
+
+**Most z Cisco:** możesz myśleć o zatwierdzonym golden configuration, lokalnym \`startup-config\`, zewnętrznym backupie i strategii \`configure replace\`. Ale pamiętaj: w Junos rescue **nie zastępuje** ostatniej candidate i nie jest tym samym co rollback nr 1.
+
+### 4.13.2. Zapis rescue — nie myl z uruchomieniem rollback
+
+**Urządzenie: LAB-SRX01 — Operational Mode, po pełnych testach baseline i uzgodnieniu nadpisania istniejącego rescue**
+
+~~~junos
+request system configuration rescue save
+show system configuration rescue
+show system alarms
+~~~
+
+Pierwsza komenda zapisuje **ostatnią zatwierdzoną active configuration** jako rescue. Druga pozwala ją odczytać, trzecia sprawdzić alarmy związane z urządzeniem. **Nie zakładaj**, że sam brak alarmu zawsze dowodzi poprawności rescue — przeprowadź test odczytu i przywrócenia w labie.
+
+**Gotcha:** rescue **nie tworzy się automatycznie w każdym nowym urządzeniu**. Na niektórych platformach alarm \`Rescue configuration is not set\` informuje właśnie o braku zapisu. Ale jeśli zapiszesz rescue **w chwili uszkodzenia konfiguracji**, późniejszy \`rollback rescue\` przywróci ten sam błąd.
+
+### 4.13.3. Przywrócenie rescue — transakcyjnie, a nie „magicznie”
+
+**Urządzenie: LAB-SRX01 — Operational Mode, najpierw przeczytaj rescue i ustal, czego chcesz**
+
+~~~junos
+show system configuration rescue
+show system commit
+~~~
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wyłącznie izolowany lab lub uzgodniona procedura awaryjna**
+
+~~~junos
+rollback rescue
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**Krytyczna rzecz:** \`rollback rescue\` wczytuje zapisany punkt do candidate. To **nie musi od razu zmienić działającej sieci**. Dopiero zatwierdzenie (a wcześniej analiza diffu) uruchamia zmianę. W czasie pending \`commit confirmed\` sprawdzaj stan operacyjny, **nie wykonuj przypadkiem nowego \`commit check\`**, bo możesz potwierdzić zmianę.
+
+### 4.13.4. Brak rescue, zła rescue albo uszkodzony filesystem
+
+Oficjalna dokumentacja mówi: gdy rescue **nie istnieje albo nie jest poprawną, kompletną konfiguracją**, próba \`rollback rescue\` może się nie powieść. Nie wolno udawać, że odzyskanie jest gwarantowane.
+
+W klasycznym Junos rescue bywa zapisana pod \`/config/rescue.conf.gz\`. To istotne podczas procedur diagnostycznych i RMA, ale **nie edytuj tego pliku ręcznie** jako zwykłego zamiennika \`commit\`. Na Junos OS Evolved niektóre mechanizmy odzyskiwania mogą mieć inny przebieg — kieruj się odpowiednią instrukcją platformową.
+
+**Do zapamiętania:** backup off-device, rollback history i rescue to **trzy różne warstwy odporności**.  
+**Do zrozumienia:** wszystkie zależą od świadomej decyzji, **która konfiguracja rzeczywiście była dobra**.
+
+Źródła: [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html), [Rescue and Recovery of Configuration File](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/rescue-and-recovery-config-file.html), [show system configuration rescue](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-configuration-rescue.html).
+
+---
+
+## 4.14. Konfiguracja i weryfikacja całego systemu — jedna sieć, wiele usług [A]
+
+### 4.14.1. Czym różni się lista komend od gotowego site'u?
+
+Załóżmy, że w projekcie zapisano:
+
+- \`system host-name\`;
+- konto \`labadmin\`;
+- NTP;
+- syslog;
+- SNMPv3;
+- archiwizację SCP;
+- rescue.
+
+Ktoś robi \`commit complete\` i zamyka ticket. Czy site jest gotowy? **Nie wiemy.**
+
+Nie przetestowano logowania drugą sesją, nie wiadomo, czy NTP synchronizuje się w odpowiedniej instancji, NMS nie odebrał SNMPv3 GET, a serwer backupów nie otrzymał pliku. **Konfiguracja na papierze ≠ usługa w praktyce**.
+
+### 4.14.2. End-to-end mapa zależności
+
+~~~mermaid
+flowchart TD
+  MGMT["OOB management IP + routing"] --> AAA["AAA: local / TACACS+ / RADIUS"]
+  MGMT --> NTP["NTP + zegar"]
+  MGMT --> SYS["Syslog → SIEM"]
+  MGMT --> SNMP["SNMPv3 → NMS"]
+  MGMT --> ARCH["Archival SCP → backup"]
+  AAA --> SSH["Nowa sesja SSH Admin"]
+  NTP --> SIEM["Wiarygodny timeline"]
+  SYS --> SIEM
+  SSH --> VERIFY["Kryteria handover"]
+  SNMP --> VERIFY
+  ARCH --> VERIFY
+  SIEM --> VERIFY
+  RESCUE["Local rescue + OOB console"] --> VERIFY
+~~~
+
+Widzisz wspólny punkt? **Management reachability**. Jeśli ktoś w HLD przeniesie management na \`mgmt_junos\`, a nie zaktualizuje usług i routingu, pięć pozornie niezależnych systemów może jednocześnie przestać działać. To jedna z najważniejszych rzeczy, jakie warto zrozumieć na poziomie senior engineer.
+
+### 4.14.3. Uniwersalny read-only commissioning checklist — bez wklejania niebezpiecznych zmian
+
+**Urządzenie: LAB-SRX01 — Operational Mode, zestaw diagnostyczny**
+
+~~~junos
+show version
+show chassis hardware
+show system alarms
+show chassis alarms
+show system uptime
+show interfaces terse
+show route table inet.0
+show configuration system | display set
+show configuration interfaces | display set
+show cli authorization
+show system users
+show ntp associations
+show ntp status
+show snmp statistics
+show snmp v3
+show log messages | last 40
+show system commit
+show system configuration rescue
+~~~
+
+**Wskazówka operatorska:** na różnych urządzeniach polecenia dotyczące chassis, SNMPv3, NTP lub rescue mogą mieć różną dostępność bądź zwrócić brak danych, gdy funkcja nie jest skonfigurowana. Nie kwalifikuj całego wdrożenia jako FAIL tylko dlatego, że wybrany model nie ma danej komendy; potwierdź **przeznaczenie i wsparcie** konkretnej funkcji.
+
+### 4.14.4. Dowód na działanie usługi musi pochodzić z dwóch stron
+
+Dla każdej usługi zbierz **dowód lokalny i zdalny**:
+
+| Usługa | Dowód z Junos | Dowód z systemu współpracującego |
+|---|---|---|
+| SSH | \`show system users\`, syslog | Nowa sesja z bastiona do właściwego IP |
+| AAA | Log/rola użytkownika | Log accept/reject/accounting z TACACS+/RADIUS |
+| NTP | \`show ntp associations\`, \`status\` | NTP server widzi klienta, poprawny czas |
+| Syslog | Konfiguracja i lokalny event | Właściwy event w SIEM z poprawnym host/time |
+| SNMPv3 | \`show snmp statistics\` i v3 | Udany authPriv GET z NMS |
+| Archival | Config/log transferu | Plik i data na off-device backup server |
+| Rescue | \`show system configuration rescue\` | Test odtworzenia wykonany w izolowanym labie |
+
+Nie próbuj udowadniać SNMPv3 z samego \`show snmp v3\`: urządzenie może mieć poprawną konfigurację, ale żaden NMS nie dotarł do niego po UDP/161. Nie próbuj udowadniać archiwizacji z samego \`transfer-on-commit\`.
+
+### 4.14.5. Post-change / handover: co wpisujesz do dokumentacji?
+
+Dla oddania nowej lokalizacji zachowaj:
+- hostname, model, serial, wersję Junos, lokalizację fizyczną, rack, OOB IP i management routing instance;
+- kontrolowane mapowanie portów i uplinków (z LLDP);
+- wynik testu login class, TACACS+ i konta break-glass (bez hasła);
+- NTP source, offset, strefę czasu i logi SIEM;
+- NMS poll i status SNMPv3, ale bez zapisania sekretów;
+- adres serwera backup i dowód transferu/odtworzenia;
+- wersję rescue i procedurę recovery;
+- link do HLD/LLD, ServiceNow Change, CMDB i plan aktualizacji software.
+
+**Nie publikuj prawdziwych adresów management, credentiali i konfiguracji klienta w publicznym repo GitHub.** Nasze przykłady używają dokumentacyjnych sieci i są celowo odseparowane od produkcji.
+
+### 4.14.6. Czego uczy ta lekcja ponad zwykłe JNCIA?
+
+Na poziomie Associate musisz rozpoznać funkcje Junos i skonfigurować podstawy. W pracy senior engineer liczy się **również to, czy cały system jest możliwy do utrzymania przez zespół przez kolejne lata**. Dlatego wplatamy tutaj:
+- zależności usług zarządzających od OOB/VRF;
+- AAA fallback i role;
+- SNMPv3 authPriv z realnym poll;
+- archiwizację poza urządzeniem;
+- change management i rescue.
+
+To są świadome **praktyczne rozszerzenia głębi**, a nie twierdzenie, że każdy szczegół jest literalnym pytaniem z oficjalnego JNCIA.
+
