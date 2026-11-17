@@ -324,3 +324,380 @@ Następnie stosujesz test \`commit confirmed\` oraz weryfikujesz **nową sesję*
 
 Źródła: [Junos User Accounts](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-user-accounts.html), [Root Password](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-root-password.html).
 
+
+
+---
+
+## 4.4. Login classes — skoro login działa, dlaczego komenda jest zabroniona? [A]
+
+### 4.4.1. „Mogę się zalogować, ale nie mogę zrobić show configuration”
+
+Pomyśl o budynku przemysłowym. Jedna karta wejściowa otwiera recepcję, inna serwerownię, a przepustka administratora otwiera szafę i pozwala wymienić zasilacz. Fakt, że **bramka rozpoznała kartę**, nie oznacza, że możesz wejść do każdego pomieszczenia.
+
+Tak samo w Junos: **authentication** odpowiada na pytanie „kim jesteś?”, a **authorization** — „co wolno Ci robić?”. Lokalnie rolę i uprawnienia wyznacza **login class**, zdalny TACACS+/RADIUS może dostarczać dodatkowe atrybuty zależne od integracji.
+
+**Most z Cisco:** zwykłe \`username noc privilege 1\` kontra \`privilege 15\` i TACACS+ command authorization. Jednak Junos nie sprowadza uprawnień do jednego numeru 0–15. Ma klasy i **permission flags**, a także mechanizmy dopuszczania/odmawiania konkretnych komend i gałęzi konfiguracji.
+
+### 4.4.2. Cztery klasy, które powinieneś rozpoznawać bez Google
+
+Zanim stworzysz własną klasę, zrozum cztery wbudowane:
+- **\`super-user\` / \`superuser\`** — administracja z pełnym zakresem uprawnień według systemu i wydania;
+- **\`operator\`** — możliwość wykonywania typowych działań operacyjnych, m.in. clear, network, reset, trace, view; to **nie** znaczy to samo co read-only;
+- **\`read-only\`** — ograniczona obserwacja;
+- **\`unauthorized\`** — brak użytecznych uprawnień CLI.
+
+W praktyce do NOC L1 możesz chcieć **mniej niż operator**, bo operator potrafi wykonać niektóre działania destrukcyjne. Czy osoba odpowiedzialna tylko za obserwację powinna móc czyścić sesje lub resetować statystyki? To decyzja bezpieczeństwa i change management.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, sprawdzenie własnych uprawnień**
+
+~~~junos
+show cli authorization
+show system users
+~~~
+
+Po zalogowaniu jako \`labadmin\` i \`nocview\` porównaj wyniki. Nie zgaduj, co oznacza read-only na konkretnej platformie — pokaż dowód.
+
+### 4.4.3. Własna klasa bez przypadkowego przyznania pełnego dostępu
+
+Tworzymy \`LAB-NOC\`, która może wyświetlać informacje, ale nie ma dostępu do typowych operacji administracyjnych.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit]**
+
+~~~junos
+set system login class LAB-NOC permissions view
+set system login class LAB-NOC idle-timeout 15
+set system login user nocview class LAB-NOC
+show | compare
+~~~
+
+Po commit sprawdź sesję nowo zalogowanego \`nocview\`. **15** oznacza tu minuty bezczynności. Nie każda próba \`show configuration\` musi działać przy każdym zestawie permission flags. Jeśli potrzebujesz szerszego wglądu, rozważ osobną flagę \`view-configuration\`, ale sprawdź **dokładną listę uprawnień i nazwy w \`permissions ?\` na danym release**.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], interaktywne odkrywanie flag**
+
+~~~junos
+edit system login class LAB-NOC
+set permissions ?
+~~~
+
+Dla takiego polecenia \`?\` jest narzędziem pomocy CLI, nie linijką automatycznie importowaną z pliku \`.set\`.
+
+### 4.4.4. Gotcha: „allow-commands” nie jest magicznym obejściem pozostałych przywilejów
+
+Junos pozwala definiować m.in. **\`allow-commands\`, \`deny-commands\`, \`allow-configuration\`, \`deny-configuration\`** oraz ich warianty dopasowań. To kuszące: „dam NOC dostęp tylko do \`show route\` jednym regexem”.
+
+Ale pamiętaj o dwóch warstwach:
+1. **Permission flags** decydują o bazowym dostępie do grup poleceń i hierarchii.
+2. **Reguły allow/deny** precyzują wyjątki, a ich semantyka zależy od wybranego wariantu regex.
+
+Oficjalna dokumentacja ostrzega, że stara rodzina \`allow/deny-commands\` i nowsza \`*-regexps\` mogą stosować różny mechanizm dopasowania. **Nie wgrywaj przypadkowego wyrażenia regularnego z forum do produkcji**; testuj go na koncie ograniczonym w labie.
+
+Dodatkowy haczyk: przy pewnych rozszerzonych regexach występują ograniczenia dotyczące \`load override\`; nie projektuj RBAC tak, jakby jedna flaga „all” plus deny regex dawała automatycznie bezpieczną izolację. [Junos User Access Privileges](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html).
+
+### 4.4.5. Model inżynierski do projektowania uprawnień
+
+Gdy projektujesz role dla klienta, podziel zespół:
+- **NOC Read-Only** — odczyt statusów i konfiguracji w dopuszczonym zakresie;
+- **LAN Operator** — określone komendy operacyjne, np. testy sieciowe, tylko jeśli akceptuje to procedura;
+- **Network Engineer** — zarządzanie wybranymi gałęziami i zmiany;
+- **Break Glass Administrator** — awaryjna, audytowana rola z pełnymi uprawnieniami.
+
+Nie utożsamiaj „operator” z „bezpieczne polecenia”. Uprawnienia są zależne od komendy i **jej parametrów**: na Cisco \`clear ip bgp *\` ma inne skutki niż \`show ip bgp summary\`, i w Junos ta sama intuicja jest cenna.
+
+Źródła: [Login Classes Overview](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-login-class-overview.html), [show cli authorization](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-cli-authorization.html), [Login Class Permissions](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html).
+
+---
+
+## 4.5. Metody uwierzytelniania — AAA i pułapka „serwer milczy” kontra „serwer odmawia” [A]
+
+### 4.5.1. Centrala AAA przestała odpowiadać w piątek po 18:00
+
+Wyobraź sobie, że administrujesz kilkuset urządzeniami. Każdy inżynier ma indywidualne konto, a prawo do komend jest zarządzane przez firmowy TACACS+. W piątek jeden z serwerów AAA przestaje odpowiadać. Czy zespół utraci dostęp do wszystkich switchy? Czy lokalny administrator uratuje sytuację?
+
+Prawidłowa odpowiedź zależy od **authentication order**, odpowiedzi serwera i konfiguracji lokalnych kont. Nie wystarczy zapamiętać „Junos fallback to local”.
+
+W Cisco \`aaa authentication login default group tacacs+ local\` wygląda znajomo, ale na Junos implementacja **\`system authentication-order\`** ma kluczowy szczegół: **brak odpowiedzi** z serwera i **jawny reject** nie zawsze prowadzą do tego samego wyniku.
+
+### 4.5.2. Zanim włączysz AAA, narysuj przepływ dostępu
+
+~~~mermaid
+flowchart TD
+  LOGIN["Nowa sesja SSH: labadmin"] --> KEY{"Klucz publiczny skonfigurowany\n i poprawny?"}
+  KEY -->|Tak| ACCESS["Dostęp zgodny z login class / AAA"]
+  KEY -->|Nie lub nie użyto| TAC["TACACS+ / RADIUS według order"]
+  TAC -->|Accept| ACCESS
+  TAC -->|Timeout / brak odpowiedzi| LOCAL["Próba local password\njako last resort"]
+  TAC -->|Reject| CHECK{"Czy password jest\njawnie w authentication-order?"}
+  CHECK -->|Tak| LOCAL
+  CHECK -->|Nie| DENY["Odmowa logowania"]
+  LOCAL -->|Valid| ACCESS
+  LOCAL -->|Invalid| DENY
+~~~
+
+**Zastrzeżenie:** diagram upraszcza szczegóły autoryzacji, typy kluczy SSH i złożone sekwencje dwóch usług AAA. Dla konkretnego order użyj oficjalnej tabeli zachowania z dokumentacji. Schemat pokazuje najważniejszy kontrast **reject vs timeout**.
+
+### 4.5.3. Bezpieczny pierwszy etap: local only
+
+Dopóki nie ma uruchomionego serwera AAA w EVE-NG, przećwicz lokalne konta i ich login classes. Samo wpisanie \`authentication-order tacplus\` nie uruchamia serwera TACACS+ w sieci.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant laboratoryjny LOCAL ONLY**
+
+~~~junos
+set system authentication-order password
+show | compare
+~~~
+
+To działa z kontami skonfigurowanymi w \`system login\`. Pamiętaj, że prawidłowo skonfigurowane **SSH public keys** mogą być sprawdzane przed metodami z \`authentication-order\`, dlatego przy testach z hasłami odróżnij sposób logowania klienta SSH od ustawień samego Junos.
+
+### 4.5.4. Wariant Enterprise — TACACS+ jako pierwsza próba, local password jako fallback
+
+Zakładamy wyizolowane środowisko szkoleniowe, w którym serwer TACACS+ istnieje naprawdę pod \`192.0.2.40\` i jest osiągalny. **Jeżeli go nie ma, nie wykonuj tego wariantu.** Nie zapisuj tajnego shared secret do GitHuba.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant demonstracyjny wymagający serwera AAA**
+
+~~~junos
+set system authentication-order [ tacplus password ]
+set system tacplus-server 192.0.2.40 source-address 192.0.2.10
+~~~
+
+Osobno trzeba wprowadzić wymagany **shared secret** w bezpiecznej sesji/zarządzanym kanale, ale nie dostarczamy tu wrażliwej wartości:
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], szablon polecenia z obowiązkowym sekretami z vault, nie do bezpośredniego commit**
+
+~~~text
+set system tacplus-server 192.0.2.40 secret <Z_VAULT_NIE_W_GITHUB>
+~~~
+
+**To polecenie jest NIEKOMPLETNE bez rzeczywistego sekretu** i powyższy wiersz z nawiasami kątowymi nie jest przeznaczony do wklejenia. Trzeba także skonfigurować zgodne konto/template i mapowanie praw na serwerze AAA. Same \`tacplus-server\` oraz \`authentication-order\` nie gwarantują, że użytkownik dostanie oczekiwaną klasę.
+
+**Uwaga o priorytecie:** gdy ustawisz \`[ tacplus password ]\`, Junos spróbuje TACACS+, a następnie metodę lokalną zgodnie z warunkami. Jeśli zamiast tego określisz samo \`tacplus\`, zachowanie przy remote REJECT będzie inne.
+
+### 4.5.5. Nieuświadomiony gotcha: jawny remote REJECT nie musi pozwolić użyć lokalnego konta
+
+Zapamiętaj konkretny przypadek, bo może Cię zaskoczyć w production outage.
+
+**Wariant 1 — \`authentication-order tacplus\`:** jeśli serwer jest osiągalny i **odrzuca login**, Junos zwykle **kończy próbę odmową**, zamiast przechodzić do local password. Gdy **wszystkie serwery nie odpowiadają**, Junos przewiduje awaryjne sięgnięcie po local password.
+
+**Wariant 2 — \`authentication-order [ tacplus password ]\`:** local password jest jawnie dodane do kolejności, więc po **reject** z TACACS+ również może zostać podjęta lokalna próba (zgodnie z konfiguracją i specyfiką metody).
+
+Nie zakładaj, że wszystko to działa identycznie jak Cisco \`group tacacs+ local\`. Wciąż musisz sprawdzić, **czy hasło lokalne istnieje** dla danego użytkownika i jaka klasa nada uprawnienia.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, weryfikacja po poprawnym wdrożeniu AAA**
+
+~~~junos
+show configuration system authentication-order
+show configuration system tacplus-server
+show log messages | match "sshd|tac|login"
+show cli authorization
+~~~
+
+Źródło potwierdzające dokładnie różnicę timeout/reject: [Authentication Order for RADIUS, TACACS+, and Local Password](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-authentication-order.html).
+
+### 4.5.6. Wariant RADIUS i kwestia \`source-address\`
+
+Centralne AAA może opierać się na RADIUS (np. ClearPass lub ISE), również w sieciach Juniper. Tu kluczowy błąd operatorski polega na zapomnieniu **adresu źródłowego**, z którego Junos wyśle zapytanie. Serwer AAA może akceptować pakiety tylko od zarejestrowanych klientów. Gdy Junos wybierze inny source IP, prawidłowy shared secret nie pomoże.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant RADIUS alternatywny wobec TACACS**
+
+~~~junos
+set system authentication-order [ radius password ]
+set system radius-server 192.0.2.41 source-address 192.0.2.10
+~~~
+
+Tutaj również wymagany jest odpowiedni sekret i konfiguracja po stronie serwera; **nie uruchamiaj tego wariantu bez rzeczywistej infrastruktury RADIUS**. Pamiętaj, że \`system radius-server\` do administracyjnego logowania na router to **inny kontekst** niż \`access profile\` dla użytkowników 802.1X/captive portal.
+
+**Most z Cisco ISE/ClearPass:** często spotykasz \`ip radius source-interface Loopback0\` lub \`ip tacacs source-interface\`. W Junos wskazujesz \`source-address\` w konkretnym obiekcie serwera, a dodatkowe routing instances wymagają świadomego projektu ścieżki.
+
+### 4.5.7. AAA to także authorization i accounting
+
+Możesz mieć poprawnie uwierzytelnionego użytkownika TACACS+, ale serwer nie mapuje go na właściwy lokalny template albo nie dostarcza Juniper-specific VSA. Użytkownik wchodzi i widzi ograniczoną klasę lub brak polecenia.
+
+To nie oznacza „TACACS jest zepsuty”. Odróżnij:
+- **Authentication** — kto to?
+- **Authorization** — co wolno wykonać?
+- **Accounting** — jakie działania i sesje odnotowano?
+
+W Cisco te trzy A są dobrze znane. W Junos dochodzi przejrzysta hierarchia kont oraz login classes. Prawidłowy greenfield wymaga także logowania operacji administratorów i synchronizacji czasu (NTP), bo bez niej accounting i syslog mają wątpliwą wartość dowodową.
+
+Dalsza weryfikacja: [TACACS+ Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-tacacs-authentication.html), [RADIUS Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-radius-authentication.html).
+
+---
+
+## 4.6. Typy interfejsów i ich właściwości — nie pomyl warstwy fizycznej z management [A]
+
+### 4.6.1. Dlaczego \`ge-0/0/0\` nie jest całym interfejsem IP
+
+W Cisco na ISR wpisujesz \`interface Gi0/0/0\`, a dalej \`ip address\`, \`description\`, \`speed\` itd. Na Junos struktura zwykle ma co najmniej trzy warstwy:
+- **interfejs fizyczny** (np. \`ge-0/0/0\`);
+- **logical unit** (np. \`.0\`);
+- **protocol family** (np. \`family inet\`, \`inet6\`, \`ethernet-switching\`).
+
+To nie jest kosmetyka parsera. Fizyczny port może mieć parametry niezależne od konkretnego logicznego \`unit\`, a rodzina protokołów określa, czy pracujemy z IPv4/IPv6/switching.
+
+~~~mermaid
+flowchart TD
+  PHY["ge-0/0/0 — port fizyczny"] --> DES["description / mtu / link status"]
+  PHY --> U0["unit 0 — logical interface"]
+  U0 --> INET["family inet — adres IPv4"]
+  U0 --> INET6["family inet6 — adres IPv6 (jeśli używany)"]
+  PHY --> U100["unit 100 — przykład subinterface"]
+  U100 --> TAG["vlan-id 100 — przy prawidłowym vlan-tagging"]
+~~~
+
+**Ograniczenie przykładu:** nie każda kombinacja families/units może współistnieć na każdym porcie i urządzeniu; trunki Ethernet i switching wymagają właściwego typu encapsulation i trybu interfejsu.
+
+### 4.6.2. Rzeczywiste zdjęcie portów — ale zdjęcie nie zastąpi Hardware Guide
+
+Zanim zaczniesz podawać numer portu remote hands, zwróć uwagę na fizyczne elementy w sprzęcie. Widzisz na poniższej fotografii interfejsy SFP i porty o różnej roli. **Nie odczytasz jednak z tego zdjęcia mapowania \`fxp0\`, \`me0\`, \`ge-0/0/0\` swojego modelu.**
+
+![Panel frontowy przełącznika Juniper QFX5100 z portami SFP i uplinkami; fotografia ilustracyjna starszej platformy, nie urządzenia laboratoryjnego](https://upload.wikimedia.org/wikipedia/commons/9/99/Juniper_Networks_QFX5100_ethernet_switch.jpg)
+
+*Źródło: Juniper Networks, „Juniper Networks QFX5100 ethernet switch.jpg”, [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Juniper_Networks_QFX5100_ethernet_switch.jpg), licencja [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), bez modyfikacji; obraz hostowany zewnętrznie. **Model historyczny wyłącznie jako ilustracja portów**, a nie rekomendacja zakupowa.*
+
+Na realnym EX4400 OOB \`me0\` jest z tyłu urządzenia; na części SRX port \`fxp0\` też może być w innym miejscu. W każdym rolloutcie porównuj **Hardware Guide, \`show chassis hardware\`, \`show interfaces terse\`** i opis patchpanelu.
+
+### 4.6.3. Adres na routerze SRX a port switchingowy EX
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], przykład L3 IPv4 na jednym porcie danych**
+
+~~~junos
+set interfaces ge-0/0/0 description "P2P-TO-LAB-R2"
+set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.1/30
+~~~
+
+To nie jest polecenie z założenia odpowiednie do każdego EX access. Na EX w roli L2 najpierw definiujesz switching, VLAN i ewentualny **IRB** jako bramę. Na SRX musisz też rozważyć **security-zone** i host-inbound albo flow policies; routing IP sam nie pozwala automatycznie na ruch użytkowników.
+
+**Urządzenie: EX-ACCESS-01 — Configuration Mode [edit], przykład adresu bramy L3 na logicznym IRB, wyłącznie dla wspieranej konfiguracji i VLAN**
+
+~~~junos
+set interfaces irb unit 20 family inet address 10.20.0.1/24
+~~~
+
+Ten wiersz **nie tworzy sam VLAN 20 ani nie podłącza go do IRB**. Szczegółowy model VLAN/IRB jest w rozdziale 14. W tym miejscu uczymy się rozpoznawać **role interfejsów** i zależności.
+
+### 4.6.4. Co oznaczają nazwy \`lo0\`, \`irb\`, \`ae\`, \`me0\`, \`fxp0\`, \`vme\`?
+
+Zamiast kolejnej tabeli bez kontekstu, pomyśl o projekcie nowego biura:
+
+**\`ge-/xe-/et-\`** wskazują zwykle fizyczne rodziny Ethernet i ich nominalne prędkości (np. 1/10/100G, z licznymi wyjątkami sprzętowymi). **\`lo0\`** to loopback — stabilny adres kontrolny, np. router ID, source dla usług, gdzie ma to sens. **\`irb\`** to L3 gateway dla domeny bridging/VLAN. **\`ae\`** to aggregated Ethernet (porównanie Cisco Port-channel). **\`me0\`** to management w wielu EX; **\`fxp0\`** na wielu routerach/SRX; **\`vme\`** może służyć do zarządzania Virtual Chassis.
+
+**Gotcha:** **\`ge-0/0/0.0\` i \`ge-0/0/0\` to nie identyczne poziomy konfiguracji**. Pierwsza forma wskazuje logical interface, druga fizyczną nazwę. Na Junos \`unit 0\` nie jest wirtualnym portem „niezależnym od physical”.
+
+### 4.6.5. Diagnostyka: port jest up, ale IP nie odpowiada
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show interfaces terse
+show interfaces ge-0/0/0 extensive
+show route table inet.0
+show arp
+show configuration interfaces | display set
+~~~
+
+Czy fizyczny link jest up? Czy logical unit jest up? Czy ma adres we właściwej rodzinie? Czy next-hop ma ARP? Czy forwarding nie jest blokowany security policy? Dopiero potem analizuj uplink.
+
+**Most z Cisco:** \`show ip interface brief\`, \`show interfaces\`, \`show arp\`, \`show ip route\` — ta sama logika troubleshooting, ale różne widoki danych.
+
+### 4.6.6. Management routing instance — nie wpisuj „default route” bez zrozumienia, gdzie trafi
+
+Przy przenoszeniu management do odrębnej instancji warto znać kontekst \`mgmt_junos.inet.0\`. W Junos **\`set system management-instance\`** może wydzielić tę instancję dla management, ale **należy sprawdzić wsparcie i dokładne zachowanie dla modelu/release**.
+
+Nie pokazujemy tego jako bezrefleksyjnego „jednolinijkowego hardeningu”, ponieważ w istniejącym site taka zmiana może przenieść ruch NTP/AAA/syslog poza aktualną trasę, odcinając urządzenie od infrastruktury.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, odczyt przed decyzją o wydzieleniu management**
+
+~~~junos
+show configuration system management-instance
+show route table inet.0
+show route table mgmt_junos.inet.0
+show interfaces terse | match "fxp|me|vme"
+~~~
+
+Brak tabeli \`mgmt_junos.inet.0\` na danym obrazie nie jest awarią; to sygnał, że konfiguracja/wersja może jej nie wykorzystywać. Więcej o routing instances w rozdziale 6.
+
+Źródła: [Management Interface in a Dedicated Instance](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/topic-map/management-interface-in-non-default-instance.html), [EX4400 hardware initial configuration](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html).
+
+---
+
+## 4.7. Configuration groups — jedna konfiguracja dla setek portów bez kopiowania 100 razy [A]
+
+### 4.7.1. Skąd bierze się różnica między template a rzeczywistą konfiguracją?
+
+Klient ma 120 switchy EX i jeden standard firmowy: \`description\` według konwencji, syslog do SIEM, NTP, wspólny parametr interfejsów. Masz dwa rozwiązania:
+
+**Pierwsze:** kopiujesz 120 razy te same \`set\` do każdego urządzenia. Kiedy zmienia się NTP, musisz sprawdzić i poprawić 120 konfiguracji.
+
+**Drugie:** definiujesz w Junos **configuration group**, a następnie decydujesz, gdzie ta grupa jest stosowana. Konfiguracja dziedziczona nie musi być zapisana bezpośrednio w każdej gałęzi.
+
+**Most z Cisco:** trochę jak template lub profile w Cisco Catalyst Center, \`interface range\` albo skrypt Ansible, ale **configuration groups działają wewnątrz samego Junos** i są elementem hierarchii. Nie są zewnętrznym systemem orkiestracji ani nie uruchamiają się na wszystkich switchach firmy bez uprzedniego wdrożenia.
+
+### 4.7.2. Własna grupa i jej aktywacja — dwie oddzielne czynności
+
+Zaczynamy od bezpiecznego parametru tekstowego, aby nie ryzykować routingu.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], izolowany LAB**
+
+~~~junos
+set groups LAB-IDENTITY system login message "LAB managed by group LAB-IDENTITY"
+set apply-groups LAB-IDENTITY
+show groups LAB-IDENTITY
+show system login | display inheritance
+show | compare
+~~~
+
+**Haczyk:** samo \`set groups ...\` **nie musi niczego zmienić**. Dopiero \`apply-groups\` na odpowiednim poziomie daje dziedziczenie. To jak przygotowanie template, którego jeszcze nie przypisałeś.
+
+**Ostrzeżenie labowe:** jeśli masz już skonfigurowany lokalnie \`system login message\`, wartość lokalna zwykle **ma pierwszeństwo** nad odziedziczoną i nie zobaczysz nowego banneru jako skutecznego ustawienia. To **celowy test precedence**, a nie awaria grup.
+
+### 4.7.3. Pierwszeństwo i efekt „niewidzialnej konfiguracji”
+
+Wyobraź sobie, że grupa wymusza \`system login message "GLOBAL"\`, ale w konfiguracji lokalnej ktoś wcześniej wstawił \`"SITE-LOCAL"\`. Którą wartość zobaczy użytkownik? **Lokalną**, bo konkretna konfiguracja na danym poziomie nadpisuje dziedziczoną.
+
+Teraz masz **dwie grupy** stosowane do tego samego poziomu. Oficjalna dokumentacja mówi: **pierwsza nazwa na liście \`apply-groups\` ma wyższy priorytet** niż kolejne. Dodatkowo grupa zastosowana głębiej w hierarchii może mieć pierwszeństwo przed grupami z wyższego poziomu.
+
+~~~mermaid
+flowchart TB
+  G1["Group A: NTP / banner"] --> APPLY["apply-groups [ A B ]"]
+  G2["Group B: fallback defaults"] --> APPLY
+  APPLY --> MERGE["Efektywna konfiguracja"]
+  LOCAL["Local statement (konkretny poziom)"] -->|ma pierwszeństwo| MERGE
+  MERGE --> SHOW["display inheritance / show | display inheritance"]
+~~~
+
+**Pytanie podchwytliwe:** czy \`show configuration system login\` musi jawnie pokazać wszystkie inherited statements? **Nie.** \`| display inheritance\` jest potrzebne, żeby zobaczyć, skąd wzięły się ustawienia.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, weryfikacja dziedziczenia**
+
+~~~junos
+show configuration groups | display set
+show configuration system login | display inheritance
+show configuration | display inheritance
+~~~
+
+### 4.7.4. Jak wyłączyć dziedziczenie tylko tam, gdzie jest wyjątek?
+
+W prawdziwym projekcie jedna lokalizacja ma osobny syslog, drugi budynek inne NTP, a trzeci odmienny link. Nie usuwaj grupy globalnie dla wszystkich. Junos ma **\`apply-groups-except\`** pozwalające ograniczyć dziedziczenie na wybranym poziomie.
+
+Należy wiedzieć, że **nie da się zastosować \`apply-groups-except\` na samym root** w taki sam sposób jak wewnątrz gałęzi. Dokładny zakres wyłączenia i wynikowy config sprawdź w \`display inheritance\`.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], usunięcie laboratoryjnego przykładu po ćwiczeniu, nie zatwierdzaj cudzych zmian**
+
+~~~junos
+delete apply-groups LAB-IDENTITY
+delete groups LAB-IDENTITY
+show | compare
+~~~
+
+**Gotcha: \`junos-defaults\`** to specjalna, ukryta grupa systemowa; nie można jej traktować jak dowolnego własnego template ani przypisać zwykłym \`apply-groups junos-defaults\`. Zapisz w pamięci różnicę między **własną configuration group** i **systemowymi defaults**.
+
+### 4.7.5. A co z wildcard?
+
+W grupach możesz używać **wildcard** (np. dla rodziny portów). To przydatne, gdy konfigurowane są setki interfejsów, ale również bardzo niebezpieczne: zbyt szerokie dopasowanie może wpłynąć na **uplink core** albo port zarządzania, choć chciałeś zmienić tylko access.
+
+Nie pokazujemy tego na produkcyjnym porcie. W laboratorium najpierw używamy pojedynczego banneru, a dopiero potem testujemy wildcard z wyraźną listą pasujących interfejsów i kontrolą \`show | compare\` oraz \`display inheritance\`.
+
+**Na pamięć:** \`groups\` definiuje; \`apply-groups\` włącza; \`apply-groups-except\` wyłącza dziedziczenie w danej gałęzi; local statement zwykle wygrywa; kolejność grup ma znaczenie.  
+**Do zrozumienia:** configuration groups zwiększają powtarzalność, ale utrudniają intuicyjny odczyt rzeczywistej konfiguracji bez \`display inheritance\`.
+
+Źródła: [Use Configuration Groups to Quickly Configure Devices](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html), [apply-groups CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/apply-groups.html).
+
