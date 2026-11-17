@@ -1062,3 +1062,184 @@ Jeżeli do odzyskania dostępu potrzebowałeś single-user mode, sama nowa warto
 **Do zrozumienia:** secure/insecure console, FIPS i Evolved mogą blokować/zmieniać procedurę.  
 **Do przećwiczenia:** na osobnej instancji vSRX, której odzyskanie jest dozwolone, prześledź wyłącznie ścieżkę potwierdzoną dla tej wersji, bez naruszania aktywnych labów.
 
+
+
+---
+
+## 5.8. Procedury monitorowania, konserwacji i diagnozowania — od zgłoszenia P1 do zamknięcia ticketu [A]
+
+### 5.8.1. Inżynier Tier 3 nie wykonuje najwięcej komend. Zadaje najlepsze pytania.
+
+Wyobraź sobie dwóch administratorów podczas tego samego incydentu. Pierwszy wkleja trzy strony `show` i mówi: „Nie widzę błędu”. Drugi uruchamia pięć poleceń, ale po każdym zawęża hipotezę. Po dziesięciu minutach wie, że pakiety dochodzą do SRX z właściwym source IP, że nie pojawia się odpowiednia sesja, a na wyjściowym interfejsie nie ma ramek. **Drugi administrator zebrał dowód przyczynowy**, nie tylko dużo danych.
+
+Dobra procedura diagnostyczna nie jest katalogiem komend. Jest **maszyną do eliminowania hipotez**.
+
+~~~mermaid
+flowchart TD
+   INCIDENT["INC: użytkownik traci ERP"] --> SCOPE["Scope: kto, kiedy, z jakiego VLAN / SSID?"]
+   SCOPE --> L1["L1: state, errors, peer link"]
+   L1 --> L2["L2: VLAN, MAC, LLDP, LAG, STP"]
+   L2 --> L3["L3: source, routing table, ARP/NDP, return path"]
+   L3 --> SEC["Security: SRX zones, policies, sessions, ACL/filters"]
+   SEC --> APP["DNS/TCP/HTTPS/aplikacja"]
+   APP --> ACTION["Najmniejsza naprawa i rollback plan"]
+   ACTION --> PROOF["Pre/post: CLI + klient + monitoring"]
+~~~
+
+**To nie jest obowiązkowa kolejność wykonywania wszystkich komend.** Jeżeli od razu wiesz, że port flappuje i rosną CRC, nie potrzebujesz analizować DNS przez 40 minut. Diagram to **model hipotez**, nie „odczytaj wszystkie warstwy zanim pomyślisz”.
+
+### 5.8.2. Pierwsze pięć minut: ustal impact i ostatnią zmianę
+
+W środowisku wielolokalizacyjnym najważniejsze jest, aby uniknąć ogólnego pytania „czy Internet działa?”.
+
+Ustal:
+- **dokładną lokalizację** i affected CI;
+- VLAN, adres IP klienta i jego default gateway;
+- czy symptom jest tylko WLAN, tylko LAN, czy oba;
+- czy dotyczy jednej aplikacji czy całego TCP/IP;
+- kiedy się zaczął i kiedy był ostatni working state;
+- czy w tym czasie był change, reboot, flap, zanik zasilania, utrata WAN;
+- czy masz klienta testowego oraz osobę po stronie aplikacji;
+- jakie są **trzy warunki rozwiązania** problemu uzgodnione z klientem.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, read-only pierwsza minuta**
+
+~~~junos
+show system uptime
+show system commit
+show system alarms
+show interfaces terse
+show lldp neighbors
+show log messages | last 60
+~~~
+
+**Most z Cisco:** `show logging`, `show version`, `show interfaces status`, `show cdp neighbors` + Change History. W Junos także łączysz **alarm z topologią i chwilą zmiany**.
+
+**Gotcha:** `show system commit` nie jest pełną historią wszystkich zdarzeń. Interfejs mógł opaść po odłączeniu włókna bez żadnego commita. Monitorowanie NMS i syslog muszą dostarczyć tę część dowodów.
+
+### 5.8.3. Mapa fizyczna: nie ufaj samemu `description`
+
+Wyobraź sobie, że port opisano `UPLINK-CORE-1`, ale lokalny technik podczas wcześniejszej migracji przepiął go do innego switcha. `show interfaces descriptions` pokaże **tekst zapisany przez człowieka**, nie faktycznego peer.
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode**
+
+~~~junos
+show interfaces descriptions
+show lldp neighbors
+show lldp neighbors detail
+show interfaces terse
+~~~
+
+Porównaj LLDP local port → remote system → remote port. Jeśli są agregacje, pamiętaj, że LLDP może raportować **fizyczne members**, a konfiguracja uplinku działa na `ae`. Nie nazywaj `ge-0/0/47` samotnym uplinkiem, gdy jest członkiem `ae0`.
+
+Na Cisco masz CDP i LLDP. W Junos standardowym odpowiednikiem do discovery jest LLDP. Nie zakładaj, że każdy neighbor ogłasza system name czy remote port — zależy od peer i konfiguracji.
+
+### 5.8.4. Gdzie ginie pakiet? Pięć odrębnych miejsc
+
+W naszym uproszczonym scenariuszu klient A próbuje uzyskać dostęp do serwera B.
+
+**Miejsce 1 — klient:** zły VLAN, DNS, gateway, Wi-Fi policy, proxy.
+
+**Miejsce 2 — switch access:** physical errors, VLAN membership, storm control, MAC learning, LACP/STP.
+
+**Miejsce 3 — routing:** brak aktywnej trasy, zły VRF, nierozwiązany ARP, asymetria.
+
+**Miejsce 4 — firewall:** brak policy, sesji, NAT, UTM, host-inbound (gdy celem jest sam firewall).
+
+**Miejsce 5 — serwer:** listener TCP, host firewall, TLS, application pool i ACL.
+
+Pamiętasz z Cisco rozróżnienie CoPP/traffic to device vs transit? Na SRX szczególnie uważaj: **ping do samej bramy** trafia do `host-inbound`; **ping przez SRX** jest rozpatrywany jako ruch tranzytowy przez security flow/policies. Sukces pierwszego nie udowadnia drugiego.
+
+**Urządzenie: R1-vSRX — Operational Mode, route/ARP i flow dla ruchu testowego**
+
+~~~junos
+show interfaces terse
+show route 203.0.113.10
+show arp
+show security flow session summary
+show security flow session
+~~~
+
+**Nie wyciągaj wniosku „firewall blokuje” tylko dlatego, że nie widzisz sesji.** To może oznaczać, że pakiet nie dotarł do SRX, policy go odrzuciła przed utworzeniem sesji, ruch poszedł inną drogą albo sesja wygasła. Zweryfikuj fizyczny ingress, security zone i konkretne flow diagnostics zgodnie z dokumentacją modelu.
+
+### 5.8.5. Zły „fix” bywa większą awarią niż pierwotny symptom
+
+Podczas P1 ktoś proponuje:
+- `clear interfaces statistics` — tracisz dowód wzrostu liczników;
+- `clear security flow session all` — usuniesz aktywne sesje klientów;
+- `restart routing` — możesz przerwać wiele sesji routingowych;
+- `request system reboot` — odetniesz cały site;
+- `load override` — możesz usunąć aktywną konfigurację.
+
+Każde z tych poleceń ma określony kontekst, ale żadne **nie jest domyślną „naprawą” bez root cause**. W razie konieczności rozważ minimalny i odwracalny zakres. Dla przykładu, jeśli masz błędną konfigurację jednego statementu, popraw go punktowo z `show | compare`, a nie zastępuj całego configu.
+
+### 5.8.6. Monitoring proaktywny kontra reagowanie na alarm
+
+**Monitoring proaktywny** to NMS zbierający baseline interface utilization, optical DOM, errors, CPU, RE memory, NTP status, syslog i HA. **Incident response** to analiza zmiany stanu w konkretnym czasie.
+
+Zaprojektuj progi, ale nie wierz bezkrytycznie jednemu procentowi. Na przykład „80% link utilization” może oznaczać:
+- przez 10 sekund incydentowy burst;
+- przez całą godzinę stały traffic;
+- średnią z pięciu minut, która ukrywa microbursts;
+- niedopasowanie sampling interval.
+
+**Most z Cisco:** w Catalyst możesz mieć egress drops mimo średnio niskiego bandwidth na porcie. ASIC buffer i microbursts nie muszą być widoczne w zwykłym pięciominutowym average. W Junos podobnie: analizuj queue drops i model PFE/CoS, a nie tylko Gbps na interfejsie.
+
+### 5.8.7. Protokół wykonania change — standard, który obniża liczbę incydentów
+
+Zanim zmienisz konfig:
+1. Przeczytaj HLD/LLD, wymaganą ścieżkę ruchu, affected CI i zależności.
+2. Zanotuj precheck, normalny baseline, aktualny `show system commit` i użytkowników.
+3. Sprawdź console/OOB, route management i backup.
+4. W `configure private` przygotuj **minimalną** zmianę.
+5. Wykonaj `show | compare` i `commit check` **przed** `commit confirmed`.
+6. Po `commit confirmed` zbierz testy **bez dodatkowego `commit check`** — bo może potwierdzić zmianę.
+7. Potwierdź commit dopiero po testach dostępności i usług.
+8. Zapisz postcheck, wynik klienta i historyczny stan w ticket.
+
+**Pamiętaj:** jeśli zmiana jest software upgrade, confirmed commit nie zastępuje procedury software rollback; gdy to restart, nie potrzebujesz candidate change, ale nadal potrzebujesz change window i planu odzyskania.
+
+### 5.8.8. Evidence-based handover — co należy do worknotes?
+
+W dobrym worknotes znajdują się:
+- symptom i exact affected scope;
+- identyfikacja urządzenia, portu i jego roli;
+- data/czas i źródło timestamp;
+- komendy diagnostyczne i **wniosek z ich wyników**;
+- działania, kto je wykonał i czy zmieniły stan;
+- potwierdzony root cause lub **hipoteza z poziomem pewności**;
+- wynik postcheck, test klienta i status;
+- kto przejmuje następny krok, jeśli problem nie jest w network domain.
+
+To różnica między „checked switch all fine” i informacją, która umożliwia kolejnej zmianie Tier 3 kontynuowanie pracy.
+
+### 5.8.9. Jeden scenariusz — trzy hipotezy
+
+**Symptom:** wybrane stacje na WLAN nie otwierają ERP, ale ping do default gateway jest dobry. Stawiasz hipotezy:
+- VLAN WLAN ma złą trasę do serwera;
+- SRX security policy blokuje TCP/443 dla source subnet WLAN;
+- serwer nie ma poprawnej drogi powrotnej do podsieci WLAN.
+
+**Urządzenie: R1-vSRX — Operational Mode, przyjmujemy, że SRX jest na ścieżce i mamy zgodę na diagnostykę**
+
+~~~junos
+show route 203.0.113.20
+show security policies
+show security flow session summary
+show interfaces terse
+~~~
+
+**Urządzenie: PC-WLAN — Windows PowerShell, test z rzeczywistej karty WLAN**
+
+~~~powershell
+ipconfig /all
+route print -4
+Test-NetConnection 203.0.113.20 -Port 443 -InformationLevel Detailed
+~~~
+
+Dopiero zestawienie wyników pozwala powiedzieć, czy problem był po stronie network, FW, return path, DNS czy aplikacji. Nie kończ incydentu wyłącznie na podstawie testu z RE.
+
+**Na pamięć:** `show`, `monitor`, `ping`, `traceroute` to narzędzia, nie diagnozy.  
+**Do zrozumienia:** minimalny test rozstrzygający ogranicza ryzyko.  
+**Do przećwiczenia:** wykonaj przynajmniej trzy różne scenariusze z 5.9 i napisz worknotes oparte na dowodach.
+
