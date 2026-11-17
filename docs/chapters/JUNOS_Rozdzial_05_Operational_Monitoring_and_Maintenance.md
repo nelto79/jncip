@@ -1944,3 +1944,112 @@ Jeżeli umiesz samodzielnie:
 
 to rozdział spełnił cel. Nie musisz zapamiętywać każdego ekranu `show`; masz wiedzieć, **co próbujesz na nim udowodnić**.
 
+
+
+---
+
+## 5.REF. Operator's field guide — pytanie → dowód z CLI [EXT]
+
+To nie jest zastępstwo wykładu, tylko narzędzie na koniec lekcji. Gdy odbierasz P1 o 03:00, masz pamiętać **jaką obserwację musisz wykonać**, a nie przepisywać tabele na pamięć.
+
+| Pytanie operacyjne | Odczyt CLI Junos | Typowa pułapka |
+|---|---|---|
+| Co to za model i OS? | `show version`, `show chassis hardware` | Nie wyciągaj wniosku o wspieranym upgrade po samej rodzinie EX/SRX |
+| Kiedy urządzenie wróciło? | `show system uptime`, `show log messages` | Uptime od chwili reboot nie jest historią całego incydentu |
+| Czy są alarmy? | `show system alarms`, `show chassis alarms` | Brak alarmu ≠ brak usterki aplikacji |
+| Czy fizyczny port działa? | `show interfaces terse` | `up/up` nie wyklucza errors i drops |
+| Czy są rosnące błędy? | `show interfaces ... extensive` | Porównaj dwa pomiary, nie jedną wartość |
+| Czy optyka ma sensowną moc? | `show interfaces diagnostics optics` | Rx vs Tx i specyfikacja transceivera |
+| Kto jest faktycznym peer? | `show lldp neighbors detail` | `description` to tekst, nie dowód fizycznego peer |
+| Czy route istnieje i jest active? | `show route`, `show route hidden` | Route configured ≠ active; prefix ≠ liczba route |
+| Czy jest FIB/next-hop? | `show route forwarding-table`, `show arp` | RE FIB display nie jest na każdej platformie czytnikiem rzeczywistego ASIC |
+| Czy process/RE ma problem? | `show system processes extensive`, `show chassis routing-engine` | CPU RE ≠ automatycznie stop forwarding PFE |
+| Czy log zmienia się na żywo? | `monitor start messages`, `monitor stop messages` | Śledzenie logów nie aktywuje brakującego sysloga |
+| Jak obserwować port? | `monitor interface`, `monitor interface traffic` | Dane live nie zastępują długoterminowej telemetrii |
+| Czy RE widzi pakiety? | `monitor traffic interface ...` | Nie widzi automatycznie całego transit PFE |
+| Jak wybrać źródło testu? | `ping ... source`, `routing-instance` | Ping z RE ≠ ping z klienta WLAN |
+| Jak sprawdzić ścieżkę? | `traceroute` | Gwiazdka w jednym hopie ≠ potwierdzony drop transit |
+| Czy port TCP przyjmuje? | `telnet host port` (jeśli dostępne) | TCP connect ≠ zdrowa aplikacja |
+| Czy jest miejsce na image? | `show system storage`, `cleanup dry-run` | Nie czyść logów bez zachowania dowodów |
+| Jak instalować software? | `request system software add` | Exact package/path/HA/validation zależne od modelu/release |
+| Jak odróżnić software rollback? | `request system software rollback` — na wspieranych platformach | `rollback 1` dotyczy konfiguracji |
+| Czy jest reboot zaplanowany? | `show system reboot` | Pamiętaj o `clear system reboot`, jeśli trzeba anulować |
+| Jak zatrzymać OS? | `request system halt` | Nie jest to zawsze fizyczny power-off |
+| Jak odzyskać root password? | Platformowa console recovery + `plain-text-password` | Hardening/FIPS/Evolved mogą zmienić lub zablokować procedurę |
+
+**Jeden operator, jedna zasada:** nie kopiuj na produkcję komend destrukcyjnych z ściągi. Jeśli nie wiesz, jak wpłyną na sesje i klientów, najpierw ustal to na podstawie dokumentacji i testowego labu.
+
+---
+
+## 5.SOURCES. Źródła, pytania z dokumentacji i status weryfikacji
+
+### Jak wykorzystano źródła?
+
+Kwerenda skupiła się na publicznej dokumentacji **CLI Reference, Installation & Upgrade, Operational Monitoring, Interface Diagnostics, User Access** oraz materiałach Day One. Mechanizmy z dokumentacji zostały przekształcone w **pytania sytuacyjne i odpowiedzi wplecione w wykład**. Sekcja 5.TEST to dodatkowy sprawdzian autorski, nie skopiowany oficjalny bank pytań.
+
+Nie deklarujemy odczytania interaktywnego płatnego practice exam ani autentycznych pytań JNCIA. Wątpliwe odpowiedzi z forów są jedynie inspiracją do hipotezy, nie źródłem autorytatywnej składni.
+
+### Monitoring i CLI
+
+1. [Using Operational Commands to Monitor a Device](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-operational-mode-commands-monitoring.html) — `show`, procesy, reboot/halt, logi.
+2. [Junos show interfaces extensive](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-interfaces-extensive.html) — liczby błędów, per-platform fields.
+3. [Understanding Dropped Packets and Untransmitted Traffic](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/using-show-commands-for-packet-drops.html) — dlaczego nie wszystkie drops oznaczają to samo.
+4. [monitor interface](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-interface.html) — aktualizowana obserwacja portu i ograniczenia terminala.
+5. [monitor traffic](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-traffic.html) — capture z perspektywy RE i opcje.
+6. [monitor start](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-start.html), [monitor stop](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-stop.html) — obserwacja logu na żywo.
+7. [show route](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route.html), [show route hidden](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-hidden.html) — aktywne i ukryte trasy.
+8. [show system processes](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-processes.html) — RE CPU/procesy.
+9. [Digital Optical Monitoring](https://www.juniper.net/documentation/us/en/software/junos/chassis/topics/concept/digital-optical-monitoring.html) — pomiary Tx/Rx/temperature oraz alarmy.
+10. [clear interfaces statistics](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/clear-interfaces-statistics.html) — skutki zerowania liczników.
+
+### Testy connectivity i ścieżki
+
+11. [ping CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/ping.html) — source, routing-instance, size, count, DF.
+12. [traceroute CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/traceroute.html) — routing-instance, metody i warianty.
+13. [Monitor and Analyze Network Traffic](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/analyze-network-traffic-by-using-packet-capture.html) — wymagania i ograniczenia capture.
+
+### Software, recovery, OS lifecycle
+
+14. [Software Installation and Upgrade Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/software-install-and-upgrade-overview.html) — ogólna metoda i ograniczenia.
+15. [Prepare for Software Install and Upgrade](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/prepare-sotware-install-and-upgrade.html) — stan systemu, storage i backup.
+16. [request system software add](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add.html) — rodziny pakietów, `validate`, wyjątki SRX 24.4R1, GRES/ISSU.
+17. [Junos OS Evolved software add](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add-evo.html) — osobna ścieżka.
+18. [request system software rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-rollback.html) — software rollback, nie konfiguracja.
+19. [Junos OS Evolved rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-rollback-evo.html) — osobny model rollback.
+20. [System snapshots](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/backing-up-install-using-snapshot.html), [Junos OS Evolved snapshots](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade-evo/topics/topic-map/evo-backup-snapshot.html) — boot media i backup images.
+21. [request system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-reboot.html), [request system halt](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-halt.html), [show system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-reboot.html).
+22. [Recover a Root Password — Junos](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/recovering-root-password.html) i [Junos OS Evolved](https://www.juniper.net/documentation/us/en/software/junos/user-access-evo/user-access/topics/topic-map/recovering-root-password.html).
+23. [Storage cleanup](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-storage-cleanup.html).
+24. [Day One: Beginner's Guide to Learning Junos](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf) — materiał szkoleniowy, starsze przykłady weryfikuj per release.
+25. [JTAC Suggested Software Releases (KB21476)](https://supportportal.juniper.net/s/article/KB21476) — weryfikuj aktualność dla modelu i daty przed projektowaniem zmiany.
+
+### Fotografie i diagramy
+
+- [SFP-front-RX-TX.jpg](https://commons.wikimedia.org/wiki/File:SFP-front-RX-TX.jpg) — fotografia bazowa **Adamantios**, oznaczenia **MichaelFrey**, licencja [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). Na GitHubie jest **hotlink** do Wikimedia, bez lokalnego rehostingu; pokazuje Tx i Rx modułu SFP w sekcji 5.3.5a.
+- Diagramy Mermaid są **oryginalnymi diagramami dydaktycznymi** w pliku Markdown. Nie są odczytem z urządzenia ani oficjalnymi schematami hardware Juniper.
+
+### Granice techniczne i uczciwość metodologiczna
+
+**Źródła potwierdzają mechanizmy** opisane w tekście, ale nie dają gwarancji, że każda opcja jest dostępna na dowolnym EX/QFX/MX/SRX. Szczególnie platform-dependent są: `monitor interface`, DOM, counters PFE, `request system snapshot`, `request system software add`, `vmhost`, VC/cluster i procedury bootloader root recovery.
+
+**Nie uruchomiono tu EVE-NG**, nie instalowano Junos image i nie wykonano wirtualnych fault injections. Konfiguracje `R1-vSRX` i `R2-vSRX` są *planowanymi przykładami*, które należy skorygować po rozpoznaniu rzeczywistych portów i obrazu.
+
+**Nie stosuj `load override`, `zeroize`, `request system reboot/halt`, `restart routing`, `clear interfaces statistics` ani zmian OOB bez rozumienia zakresu, odpowiedniego change window i planu powrotu.**
+
+---
+
+## 5.END. Epilog — wracamy do telefonu z 02:41
+
+Na początku mieliśmy alert o braku aplikacji, zielony uplink i działający ping. Teraz nie odpowiesz już odruchowo „sieć jest OK”.
+
+Odpowiesz:
+
+*„Uplink jest administracyjnie i fizycznie up, ale to tylko pierwszy dowód. Sprawdzę, czy rosną błędy i drops, czy trasa jest aktywna w właściwym routing context, czy SRX przepuszcza nowe sesje, jaka jest droga powrotna oraz czy klient po stronie WLAN rzeczywiście zestawia TCP do aplikacji. Jeśli znajdziemy przyczynę, wybierzemy minimalną zmianę z rollback planem i zweryfikujemy usługę po obu stronach”.*
+
+Ta odpowiedź nie jest specyficzna dla Junos, Cisco ani żadnego innego producenta. To **dojrzała metoda inżynierska**. Junos daje nam precyzyjne narzędzia i nowe pułapki, których trzeba się nauczyć, by z tej metody korzystać skutecznie.
+
+W następnym rozdziale przejdziemy do **Routing Fundamentals**: RIB/FIB, route preference, static routing, routing instances i decyzji o forwardingu. Wszystkie dzisiejsze narzędzia `show/monitor/ping/traceroute` posłużą nam jako dowody podczas nauki routingu.
+
+**Blueprint:** 5. Operational Monitoring and Maintenance [A] — 5.1–5.8, 5.9 [LAB]. **Wersja rozdziału: 17 listopada 2026.**  
+**Status laboratorium: PLANNED / NOT RUNTIME VALIDATED.**  
+
