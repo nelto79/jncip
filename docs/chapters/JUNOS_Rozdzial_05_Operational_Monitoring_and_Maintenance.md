@@ -1243,3 +1243,454 @@ Dopiero zestawienie wyników pozwala powiedzieć, czy problem był po stronie ne
 **Do zrozumienia:** minimalny test rozstrzygający ogranicza ryzyko.  
 **Do przećwiczenia:** wykonaj przynajmniej trzy różne scenariusze z 5.9 i napisz worknotes oparte na dowodach.
 
+
+
+---
+
+## 5.9. [LAB] Diagnostyka niedziałającego interfejsu, brakującej trasy i błędnej konfiguracji
+
+### 5.9.1. Tym razem nie chodzi o konfigurowanie OSPF — chodzi o sposób myślenia podczas P1
+
+W rozdziale 2 mieliśmy topologię diamond 4×vSRX. Tutaj, zanim wejdziemy w OSPF/BGP i ECMP, użyjemy **dwóch vSRX i dwóch klientów**, aby odseparować mechanizmy: fizyczny interfejs, statyczną trasę i security policy. Zmniejszamy liczbę ruchomych części. Dopiero gdy rozumiesz, dlaczego pakiet nie dotarł, warto analizować bardziej złożony routing.
+
+**Status: PLANNED.** Nie wygenerowano `.unl` ani nie przetestowano CLI na Twoim obrazie vSRX. Użyj niezależnej kopii labu z oddzielną konsolą; **nie zmieniaj topologii CH02/CH03/CH04 ani istniejących sieci firmowych**.
+
+~~~mermaid
+flowchart LR
+  PC1["PC-A / VPCS\n192.0.2.10/24\nGW .1"] --- LAN1["LAN CLIENTS"]
+  LAN1 --- R1["R1-vSRX\nge-0/0/1: 192.0.2.1\nge-0/0/0: 198.51.100.1"]
+  R1 --- P2P["Transit 198.51.100.0/30"]
+  P2P --- R2["R2-vSRX\nge-0/0/0: 198.51.100.2\nge-0/0/1: 203.0.113.1"]
+  R2 --- LAN2["LAN SERVERS"]
+  LAN2 --- PC2["PC-B / VPCS\n203.0.113.10/24\nGW .1"]
+  CONS["Konsole EVE R1/R2"] -.-> R1
+  CONS -.-> R2
+~~~
+
+**Wybrałem pule TEST-NET RFC 5737**, aby topologia nie sugerowała rzeczywistych produkcyjnych adresów. Nie zestawiaj routingu do Internetu. **Mapowanie vNIC → `ge-0/0/0` / `ge-0/0/1` jest założeniem**, nie stwierdzeniem o Twoim vSRX. Potwierdź je przez console oraz `show interfaces terse`.
+
+### 5.9.2. Sprzęt i adresacja
+
+| Urządzenie | Interfejs | Rola | Adres |
+|---|---|---|---|
+| PC-A | eth0 | Klient w sieci CLIENTS | 192.0.2.10/24; GW 192.0.2.1 |
+| R1-vSRX | ge-0/0/1.0 | CLIENTS | 192.0.2.1/24 |
+| R1-vSRX | ge-0/0/0.0 | TRANSIT | 198.51.100.1/30 |
+| R2-vSRX | ge-0/0/0.0 | TRANSIT | 198.51.100.2/30 |
+| R2-vSRX | ge-0/0/1.0 | SERVERS | 203.0.113.1/24 |
+| PC-B | eth0 | Serwer testowy | 203.0.113.10/24; GW 203.0.113.1 |
+
+**Ważne:** te urządzenia używają **SRX flow mode**, a nie prostego routera bez polityk. Aby w ogóle rozważać działający tranzyt ICMP, musimy ustawić **security zones i policies**. Gdybyśmy tego nie zrobili, fault „brak trasy” zostałby zamaskowany przez **domyślny brak zezwalającej polityki**.
+
+### 5.9.3. Read-only discovery: nie konfiguruj portu, zanim go rozpoznasz
+
+**Urządzenie: R1-vSRX — Operational Mode przez konsolę EVE**
+
+~~~junos
+show version
+show chassis hardware
+show interfaces terse
+show configuration interfaces | display set
+show configuration security zones | display set
+show configuration routing-options | display set
+~~~
+
+**Urządzenie: R2-vSRX — Operational Mode przez konsolę EVE**
+
+~~~junos
+show version
+show chassis hardware
+show interfaces terse
+show configuration interfaces | display set
+show configuration security zones | display set
+show configuration routing-options | display set
+~~~
+
+**Odpowiedzi wymagane przed dalszą pracą:** które vNIC są portami danych? Czy `ge-0/0/0` należy do wybranego segmentu? Czy w konfiguracji istnieją już overlapping addresses, default security policies, fabryczne DHCP albo NAT? Czy masz działającą konsolę niezależną od tych interfejsów?
+
+Jeśli masz już prekonfigurowany lab, nie wklejaj poniższych `set` na ślepo. Konfiguracja baseline dotyczy **nowej, wydzielonej instancji**, z którą nie współpracują inni administratorzy. Nie wykonuj factory reset bez osobnej zgody.
+
+### 5.9.4. Budowanie baseline R1 — wytłumaczmy każdy element
+
+Co chcemy? R1 ma znać swoją sieć klienta, sieć transit i drogę do sieci PC-B. Dodatkowo ma pozwalać na **ICMP transit od CLIENTS do TRANSIT**. Udostępnimy też ograniczony ping do własnych adresów interfejsów w labie, żeby móc je testować jako host-bound.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], TYLKO nowa izolowana instancja**
+
+~~~junos
+set system host-name R1-vSRX
+set interfaces ge-0/0/1 description "CH05-CLIENTS"
+set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24
+set interfaces ge-0/0/0 description "CH05-TRANSIT-TO-R2"
+set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.1/30
+set routing-options static route 203.0.113.0/24 next-hop 198.51.100.2
+set security zones security-zone CLIENTS interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone TRANSIT interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security policies from-zone CLIENTS to-zone TRANSIT policy CH05-ALLOW-PING match source-address any
+set security policies from-zone CLIENTS to-zone TRANSIT policy CH05-ALLOW-PING match destination-address any
+set security policies from-zone CLIENTS to-zone TRANSIT policy CH05-ALLOW-PING match application junos-ping
+set security policies from-zone CLIENTS to-zone TRANSIT policy CH05-ALLOW-PING then permit
+show | compare
+commit check
+~~~
+
+**Co należy zweryfikować w parserze konkretnego vSRX?** Obecność predefiniowanej aplikacji `junos-ping` i obsługę danej składni security zone. Jeśli w obrazie nie istnieje, przygotuj odpowiednią definicję ICMP zgodnie z jego dokumentacją; **nie zastępuj bezmyślnie `junos-ping` przez `application any` w produkcji**.
+
+Pamiętaj, że **root password i konto administracyjne** powinny już istnieć zgodnie z rozdziałem 4. Zestaw powyżej jest **fragmentem LAB baseline**, a nie kompletną fabryczną konfiguracją do wystawienia urządzenia do Internetu.
+
+Dopiero po `show | compare` oraz `commit check` w izolowanym labie z konsolą:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], ostrożna aktywacja baseline w LAB**
+
+~~~junos
+commit confirmed 5
+~~~
+
+Po rzeczywistym teście adresu i sesji management potwierdź. **Nie używaj `commit check` po `commit confirmed`**, ponieważ może on nieświadomie potwierdzić zmianę.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], świadome potwierdzenie po weryfikacji**
+
+~~~junos
+commit
+~~~
+
+### 5.9.5. Baseline R2 — gdzie umieszczamy politykę?
+
+R2 ma adres tranzytowy po stronie R1 i lokalną sieć PC-B. Ma też znać trasę zwrotną do CLIENTS na R1. Krytyczny detal: **R2 musi pozwalać na nową sesję przychodzącą ze strefy TRANSIT do strefy SERVERS**. Echo Reply w drugą stronę będzie obsługiwany przez stan sesji flow, więc zwykle nie potrzeba odrębnego odwrotnego policy dla odpowiedzi.
+
+**Urządzenie: R2-vSRX — Configuration Mode [edit private], tylko nowa izolowana instancja**
+
+~~~junos
+set system host-name R2-vSRX
+set interfaces ge-0/0/0 description "CH05-TRANSIT-TO-R1"
+set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.2/30
+set interfaces ge-0/0/1 description "CH05-SERVERS"
+set interfaces ge-0/0/1 unit 0 family inet address 203.0.113.1/24
+set routing-options static route 192.0.2.0/24 next-hop 198.51.100.1
+set security zones security-zone TRANSIT interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone SERVERS interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security policies from-zone TRANSIT to-zone SERVERS policy CH05-ALLOW-PING match source-address any
+set security policies from-zone TRANSIT to-zone SERVERS policy CH05-ALLOW-PING match destination-address any
+set security policies from-zone TRANSIT to-zone SERVERS policy CH05-ALLOW-PING match application junos-ping
+set security policies from-zone TRANSIT to-zone SERVERS policy CH05-ALLOW-PING then permit
+show | compare
+commit check
+~~~
+
+Po akceptacji diff i w obecności konsoli uruchom analogiczny `commit confirmed 5`, przeprowadź service check i potwierdź. Nie wpisuj tych wierszy na istniejący SRX z realnymi strefami i policy.
+
+### 5.9.6. Baseline VPCS i pomiar end-to-end
+
+W VPCS konfigurujesz IP w formacie charakterystycznym dla tej aplikacji; nie są to komendy Junos.
+
+**Urządzenie: PC-A — VPCS Console, adres i brama**
+
+~~~text
+ip 192.0.2.10/24 192.0.2.1
+show ip
+ping 192.0.2.1
+~~~
+
+**Urządzenie: PC-B — VPCS Console, adres i brama**
+
+~~~text
+ip 203.0.113.10/24 203.0.113.1
+show ip
+ping 203.0.113.1
+~~~
+
+**Urządzenie: PC-A — VPCS Console, test do PC-B przez oba SRX**
+
+~~~text
+ping 203.0.113.10
+trace 203.0.113.10
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode, dowód routingu i stanu flow**
+
+~~~junos
+show interfaces terse
+show route 203.0.113.0/24
+show arp
+show security flow session summary
+~~~
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show route 192.0.2.0/24
+show security flow session summary
+show interfaces terse
+~~~
+
+**Oczekiwany mechanizm:** PC-A trafia do R1, R1 kieruje pakiet do 198.51.100.2, R2 przekazuje do PC-B. Powrót przez R2 i R1, przy poprawnym stateful flow i politykach, umożliwia ICMP Echo Reply.
+
+**To są przewidywane wyniki, nie zmierzone PASS.** Jeśli host nie odpowiada, nie przechodź do fault injection! Najpierw doprowadź baseline do działania. Częste przyczyny niepowodzenia to niepoprawna mapa ge ports, włączony fabryczny NAT, istniejąca conflicting security policy, brak routingu zwrotnego albo pomylony next-hop.
+
+### 5.9.7. LAB A — interfejs nie działa: fizyka czy administracyjne disable?
+
+**Cel:** odróżnić awarię warstwy 1 od świadomego administracyjnego wyłączenia portu.
+
+**Warunek bezpieczeństwa:** twoja niezależna konsola **nie może korzystać z tego samego portu**; fault wykonujesz na R1 ge-0/0/0, który w izolowanym labie obsługuje jedynie testową sieć transit.
+
+**Przed fault — Urządzenie: R1-vSRX, Operational Mode**
+
+~~~junos
+show interfaces terse | match ge-0/0/0
+show interfaces ge-0/0/0 extensive
+show route 203.0.113.0/24
+show security flow session summary
+~~~
+
+**Fault injection — Urządzenie: R1-vSRX, Configuration Mode [edit private], tylko LAB**
+
+~~~junos
+set interfaces ge-0/0/0 disable
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**Nie potwierdzaj** tego commita; chcemy obserwować auto-rollback. W tym czasie, przez **konsolę**, odczytuj wyłącznie stan operational:
+
+**Urządzenie: R1-vSRX — Operational Mode (osobna konsola), monitoring podczas pending confirmed commit**
+
+~~~junos
+show interfaces terse
+show system commit
+show log messages | last 30
+show route 203.0.113.0/24
+~~~
+
+**Urządzenie: PC-A — VPCS Console, sprawdzenie usługi**
+
+~~~text
+ping 203.0.113.10
+~~~
+
+Oczekiwania: port `ge-0/0/0` zostanie administracyjnie wyłączony, droga do PC-B przestanie działać. Trasa statyczna może pozostać w konfiguracji, ale jej stan operacyjny/next-hop może zmienić się na inactive lub unresolved. To pokazuje, że **route configured ≠ route forwarding**.
+
+Po upływie dwóch minut bez potwierdzenia Junos powinien przywrócić wcześniejszą konfigurację. Sprawdź historię i powtórz ping. Jeśli nadal nie działa, problem może być inny niż sam admin disable — zbierz fakty.
+
+**Pytanie z życia:** czy `show interfaces ge-0/0/0 extensive` z liczbą CRC > 0 byłoby teraz dowodem uszkodzonego kabla? **Nie.** W tym ćwiczeniu root cause jest **administrative disable**. Nie wymieniaj wkładki.
+
+### 5.9.8. LAB B — brakuje trasy: RIB, FIB czy policy?
+
+**Cel:** odróżnić brak routingu od blokady traffic security i od braku fizycznego linku.
+
+Po przywróceniu baseline i zakończeniu pending timer rozpocznij nowy eksperyment. Na R1 usuniemy **jedną** statyczną trasę — tylko do dokumentacyjnego prefiksu PC-B.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], tylko LAB**
+
+~~~junos
+delete routing-options static route 203.0.113.0/24
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode z konsoli, bez ponownego commit/check podczas pending timer**
+
+~~~junos
+show route 203.0.113.0/24
+show route forwarding-table
+show interfaces terse
+show system commit
+~~~
+
+**Urządzenie: PC-A — VPCS Console**
+
+~~~text
+ping 203.0.113.10
+~~~
+
+**Przewidywany rezultat:** interfejs transit nadal jest **up**, ale `inet.0` nie ma już odpowiedniej trasy do sieci PC-B. Jeżeli istnieje inna droga, np. default route, ruch może pójść innym kierunkiem — dlatego **najpierw kontrolujemy baseline, czy nie ma dodatkowej trasy**. To kolejny powód, dla którego nie możemy uznać każdego failed ping za brak trasy.
+
+Po niepotwierdzonym timerze porównaj `show route` i klienta. **Nie wykonuj nowego `commit check`** zanim nie zobaczysz, że pending rollback się zakończył.
+
+### 5.9.9. LAB C — konfiguracja jest poprawna składniowo, ale ruch nie działa
+
+**Cel:** pokazać, dlaczego `commit check` nie jest symulatorem sieci.
+
+Najłatwiejszy błąd do odtworzenia to **zbyt restrykcyjna security policy** na R2. W labie, po zapewnieniu niezależnej konsoli i zapisaniu baseline, zmienimy akcję polityki `CH05-ALLOW-PING` na **deny**.
+
+**Urządzenie: R2-vSRX — Configuration Mode [edit private], tylko LAB i tylko istniejący testowy obiekt**
+
+~~~junos
+delete security policies from-zone TRANSIT to-zone SERVERS policy CH05-ALLOW-PING then permit
+set security policies from-zone TRANSIT to-zone SERVERS policy CH05-ALLOW-PING then deny
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**Przewidywanie:** config może przejść walidację, bo `then deny` jest poprawną akcją policy. Jednak **nowe** sesje ICMP klient–serwer będą blokowane. To jest różnica między **configuration syntax validation** a **service validation**.
+
+**Ważny gotcha SRX:** wcześniej ustanowione **stateful sessions** mogą działać do wygaśnięcia, nawet jeśli zmienisz policy. Jeśli ping wciąż działa przez krótką chwilę, nie wyciągaj wniosku, że deny policy „nie działa”. Ustal, czy obserwujesz nową sesję, użyj odpowiednio kontrolowanego timeoutu i sprawdź `show security flow session`. **Nie wykonuj globalnego `clear security flow session all`** dla zabawy — nawet w labie warto świadomie unikać niepotrzebnej destrukcji dowodów.
+
+**Urządzenie: R2-vSRX — Operational Mode przez konsolę, read-only stan polityk i sesji**
+
+~~~junos
+show security policies
+show security flow session
+show interfaces terse
+show route 192.0.2.0/24
+show system commit
+~~~
+
+**Urządzenie: PC-A — VPCS Console, test po powstaniu nowego flow**
+
+~~~text
+ping 203.0.113.10
+~~~
+
+Po automatycznym rollbacku (nie potwierdzaj) sprawdź, czy R2 powrócił do akcji permit i czy **nowe** sesje klienta działają.
+
+**Oczekiwany wniosek:** `show interfaces terse` może być `up/up`, `show route` może być poprawne, a ruch nadal będzie blokowany w security layer. To klasyczne przejście od diagnostyki L3 do firewall.
+
+### 5.9.10. LAB D — nieprawidłowa składnia i logika konfiguracji
+
+**Cel:** oddzielić błąd samej składni od poprawnej składni o złym znaczeniu.
+
+Poniższy fragment jest **świadomie niepoprawny**: prefiks IPv4 z długością 33 jest błędny. Nie ma powodu wykonywać commita.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], celowy błędny input TYLKO w odizolowanym LAB**
+
+~~~junos
+set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/33
+~~~
+
+**Oczekiwanie:** parser/validation odrzuci polecenie, nie powstanie prawidłowy candidate z takim adresem. Następnie sprawdź, czy nie pojawiła się żadna niezacommitowana przypadkowa zmiana.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], read-only kontrola candidate**
+
+~~~junos
+show | compare
+~~~
+
+**Porównanie:** przykład z błędnym /33 powinien zostać odrzucony składniowo; przykład z policy `then deny` w LAB C może przejść commit check, choć łamie wymaganie biznesowe. Ten kontrast jest bardziej wartościowy niż zapamiętanie dwóch definicji.
+
+### 5.9.11. LAB E — obserwuj żywy symptom przez `monitor`
+
+Podczas LAB A uruchom z drugiej konsoli monitoring interfejsu albo logu, aby zobaczyć, **kiedy** nastąpiło przejście ze stanu up do down. Najpierw sprawdź, czy image obsługuje polecenie monitor z konkretnego terminala.
+
+**Urządzenie: R1-vSRX — Operational Mode, druga sesja na czas ćwiczenia A**
+
+~~~junos
+monitor start messages
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode, zakończenie monitoringu po uzyskaniu dowodu**
+
+~~~junos
+monitor stop messages
+~~~
+
+Później porównaj zdarzenie w logu z czasem w `show system commit` i `show interfaces ... extensive`. Jeżeli NTP nie działa w labie, zanotuj brak pewności względem timeline.
+
+### 5.9.12. LAB F — dlaczego `monitor traffic` nie jest dowodem na brak forwardingu?
+
+Uruchom pakiety PC-A → PC-B i sprawdź `monitor traffic` na R1. Następnie wykonaj ping do **własnego interfejsu** R1 i porównaj, co pojawiło się w capture.
+
+**Urządzenie: R1-vSRX — Operational Mode, krótki capture w izolowanym LAB**
+
+~~~junos
+monitor traffic interface ge-0/0/1 no-resolve count 20
+~~~
+
+**Urządzenie: PC-A — VPCS Console, host-bound ICMP do R1**
+
+~~~text
+ping 192.0.2.1
+~~~
+
+**Urządzenie: PC-A — VPCS Console, tranzytowy ICMP przez R1 i R2**
+
+~~~text
+ping 203.0.113.10
+~~~
+
+**Pytanie:** czy w capture widziałeś każde echo transit? Jeśli nie, nie masz prawa stwierdzić „R1 go nie forwarduje”. Sprawdź flow sessions i zachowanie platformy; w hardware PFE często potrzebujesz innych narzędzi niż `monitor traffic`.
+
+### 5.9.13. LAB G (opcjonalnie) — test upgrade/recovery bez dotykania produkcji
+
+Ten rozdział ma również maintenance. Możesz przygotować **dodatkową jednorazową kopię R1** i przetestować boot, snapshot oraz software version verification. Ale prawdziwy upgrade wymaga obrazu **dla dokładnego vSRX i jego wersji**, pliku z legalnego źródła i ścieżki zgodnej z dokumentacją.
+
+Nie generujemy skryptu `request system software add ... no-validate reboot` na ślepo. Zamiast tego używamy **runbook validation**:
+- zidentyfikuj model i release;
+- sprawdź package family i supported path;
+- sprawdź storage;
+- sprawdź backup, console i snapshot/recovery;
+- zapisz precheck;
+- przygotuj image bez umieszczania go w GitHub;
+- sprawdź proceduralne ograniczenia;
+- dopiero po zatwierdzeniu realnego LAB upgrade wykonaj właściwą akcję.
+
+**Dowód PASS upgrade:** wersja po reboot zgodna z planem, interfejsy i sesje działały, nie ma nieoczekiwanych alarmów, a przywrócenie starego obrazu (jeżeli ćwiczono) jest wspierane i udokumentowane. Sam output `installation succeeded` nie wystarcza.
+
+### 5.9.14. Interpretacja wyników — nie uczymy się gotowych odpowiedzi
+
+| Fault | Co może zobaczyć operator? | Co powinno rozstrzygnąć? |
+|---|---|---|
+| `disable` transit | Admin down/link down, stracona droga, log zmian | Port, diff candidate, active status |
+| Usunięta static route | Port up, brak drogi do remote LAN | `show route`, FIB i routing instance |
+| Policy deny | Trasy i porty up, nowe flow odrzucane | Policy hit / sesje SRX i test z PC |
+| Zły prefiks /33 | Parser / config validation error | Brak zastosowanej zmiany w candidate |
+| Brak NTP | Timeline logów niepewny | `show ntp status` i źródło czasu |
+| Brak capture transit na RE | Brak pakietów w `monitor traffic` | RE vs PFE, flow/session, test klienta |
+
+**To są mechanizmy do potwierdzenia w Twoim uruchomionym labie**, nie gotowy raport PASS.
+
+### 5.9.15. Cleanup i kontrola baseline
+
+Po każdym ćwiczeniu potwierdź, że nie pozostał oczekujący `commit confirmed` oraz niezatwierdzone zmiany. Sprawdź, czy link, trasa i policy wróciły do pierwotnego stanu.
+
+**Urządzenie: R1-vSRX — Operational Mode, read-only final check**
+
+~~~junos
+show system commit
+show interfaces terse
+show route 203.0.113.0/24
+show security policies
+show security flow session summary
+show log messages | last 20
+~~~
+
+**Urządzenie: R2-vSRX — Operational Mode, read-only final check**
+
+~~~junos
+show system commit
+show interfaces terse
+show route 192.0.2.0/24
+show security policies
+show security flow session summary
+~~~
+
+**Urządzenie: PC-A — VPCS Console, test końcowy**
+
+~~~text
+ping 203.0.113.10
+~~~
+
+Dokumentuj PASS/FAIL/NOT TESTED. Jeśli fault injection nie został rzeczywiście przeprowadzony, nie udawaj wyniku tylko na podstawie przewidywanego outputu. Nie wykonuj `rollback 0` w shared candidate, gdy mogą tam być zmiany innego administratora.
+
+### 5.9.16. Dowody, bez których laboratorium nie jest ukończone
+
+Dla każdego LAB A–D zapisz w `VERIFY.md`:
+1. Data/godzina i czas NTP (lub brak wiarygodnego czasu).
+2. Dokładne wersje vSRX, wersja EVE i mapowanie NIC→ge.
+3. Prawdziwy precheck.
+4. Komenda fault injection, `show | compare`, wynik commit check, pending timer.
+5. Wynik `show interfaces/route/security` **podczas awarii**.
+6. Wynik testu PC-A → PC-B oraz powrót do baseline.
+7. Co zadziałało, co nie i jaka jest hipoteza, jeśli wynik odbiega od oczekiwań.
+8. Zamknięcie labu bez aktywnego pending commit i bez sekretów w repo.
+
+**Nie commituj full configuration z hasłem root, shared secrets, kluczami, prywatną siecią ani prawdziwymi danymi klienta do GitHub.**
+
+### 5.9.17. Wzorcowe worknotes — jak opisać wykonany test, nie udając rzeczywistego incydentu?
+
+> **Przykład szablonowy — nie jest raportem wykonanego testu:**  
+> “Investigated simulated loss of connectivity PC-A to PC-B in isolated CH05 EVE-NG. Verified both interface states, RIB/FIB entries and SRX security policy/session status. Root cause: [insert confirmed fault]. Recovery: [auto-rollback/manual fix]. Postchecks: [enter actual ping and CLI outcomes]. Lab status: [PASS/FAIL/NOT TESTED]. No production systems affected.”
+
+W realnym worknotes usuń placeholdery i podaj **rzeczywiście uzyskane wyniki**, nie kopiuj tekstu jako potwierdzenie wykonanych działań.
+
