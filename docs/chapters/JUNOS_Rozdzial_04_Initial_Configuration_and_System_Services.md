@@ -701,3 +701,246 @@ Nie pokazujemy tego na produkcyjnym porcie. W laboratorium najpierw używamy poj
 
 Źródła: [Use Configuration Groups to Quickly Configure Devices](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html), [apply-groups CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/apply-groups.html).
 
+
+
+---
+
+## 4.8. NTP — gdy zegar kłamie, cała dokumentacja incydentu przestaje się składać [A]
+
+### 4.8.1. Trzy urządzenia, trzy czasy, jeden incydent P1
+
+Wyobraź sobie, że w środę o 09:04 firewall blokuje aplikację, o 09:05 switch zgłasza flap uplinku, a o 09:03 TACACS+ odnotowuje zmianę konfiguracji. Czy zdarzenia miały taką kolejność? Nie możesz tego stwierdzić, dopóki nie wiesz, czy zegary tych urządzeń są zsynchronizowane.
+
+W dużym środowisku Enterprise logi z routera, WLC, NAC, firewall i SIEM trafiają do jednego miejsca. **NTP jest spoiwem korelacji zdarzeń.** Nie wystarczy, że data wyświetlana przez \`show system uptime\` „mniej więcej się zgadza”.
+
+**Most z Cisco:** znasz \`ntp server\`, \`ntp source\`, \`show ntp status\`, \`show ntp associations\`. Na Junos odpowiedniki znajdują się pod \`system ntp\`, a obserwacja używa bardzo podobnych komend operational. Ważna różnica: konfiguracja źródłowego IP, routing instance i stan protokołu muszą zgadzać się z architekturą management.
+
+### 4.8.2. Server, association, stratum i realna synchronizacja
+
+NTP client kieruje zapytania do jednego lub kilku serwerów. Serwer może być skonfigurowany i odpowiadać, ale **nie zostać wybrany jako aktualne źródło synchronizacji**. Zależy to od jakości źródeł, błędów, preferencji i stanu protokołu. \`prefer\` nie wymusza wyboru serwera, który jest nieosiągalny lub niewiarygodny.
+
+~~~mermaid
+flowchart LR
+  MASTER["Autorytatywne źródło czasu\ncorporate NTP"] --> S1["NTP 192.0.2.30"]
+  MASTER --> S2["NTP 192.0.2.31"]
+  S1 --> EX["EX4400 / Junos"]
+  S2 --> EX
+  S1 --> FW["SRX / Junos"]
+  S2 --> FW
+  EX --> LOG["Syslog z porównywalnym timestamp"]
+  FW --> LOG
+~~~
+
+**Dwa serwery w konfiguracji nie oznaczają automatycznie, że oba są dobre.** Gdy jeden ma niepoprawny czas, Junos musi go rozpoznać i ocenić. Dla małych środowisk używaj oficjalnych firmowych serwerów lub świadomie zaprojektowanych źródeł, nie przypadkowych hostów w Internecie.
+
+### 4.8.3. Konfigurujemy NTP z zaufanego segmentu
+
+Na naszym izolowanym labie serwer czasu powinien znajdować się na \`LAB-SERVICES\` pod \`192.0.2.30\` — **jeśli faktycznie uruchomisz tam działającą usługę NTP**. Drugi \`192.0.2.31\` jest opcjonalny.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], NTP dla lokalnej sieci management**
+
+~~~junos
+set system ntp server 192.0.2.30 prefer
+set system ntp source-address 192.0.2.10
+set system time-zone Europe/Warsaw
+show | compare
+~~~
+
+\`source-address\` musi należeć do właściwego interfejsu z osiągalnością do serwera. Jeśli korzystasz z dedykowanej \`management-instance\`, **routing-instance może być potrzebny również dla ruchu NTP** — nie kopiuj tego przykładu wprost bez sprawdzenia architektury.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, po konfiguracji i odczekaniu na pracę NTP**
+
+~~~junos
+show ntp associations
+show ntp status
+show system uptime
+ping 192.0.2.30
+~~~
+
+**Czego szukasz?** Zobacz, czy urządzenie ma widoczne association, czy właściwy serwer jest wybrany, jaki jest offset, delay i jakość synchronizacji. Sam działający ping do serwera **nie dowodzi**, że UDP/123 oraz NTP działają.
+
+### 4.8.4. Gotcha: \`set system time-zone\` nie synchronizuje czasu
+
+Jest 15:00 UTC, a polski operator widzi 16:00 lokalnie w listopadzie. Zmiana time-zone wyjaśnia sposób **wyświetlania czasu lokalnego**, ale **nie dostarcza informacji o prawidłowym czasie absolutnym**. To dwa różne zagadnienia.
+
+**Na pamięć:** time-zone ≠ NTP. **Do zrozumienia:** zegar sprzętowy, synchronizacja NTP, wyświetlanie czasu i znacznik czasu w zewnętrznym SIEM są odrębnymi warstwami. W projektach międzynarodowych często standaryzuje się UTC dla logów i raportów, a lokalną strefę zostawia interfejsowi użytkownika.
+
+### 4.8.5. Gotcha: dobry adres serwera w konfiguracji nie oznacza dobrego źródła IP na urządzeniu
+
+Wyobraź sobie, że na urządzeniu masz zarówno \`fxp0\` jak i \`ge-0/0/0\`. NTP dochodzi do serwera tylko z OOB VRF. Router wysyła jednak pakiety z niewłaściwego source IP lub tablicy routingu. Monitoring pokazuje „NTP unreachable”, choć lokalny ping bez wskazania źródła potrafi przejść inną ścieżką.
+
+**Diagnostyka:** sprawdź \`show route\` we właściwej tabeli, ping z odpowiednim source, ACL pomiędzy urządzeniem a serwerem i \`show ntp associations\`. Jeśli NTP nie synchronizuje się mimo UDP connectivity, zweryfikuj konfigurację i stan **samego serwera**.
+
+Źródła: [Network Time Protocol](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/ntp-edit-system.html), [Example: Configure NTP](https://www.juniper.net/documentation/us/en/software/junos/time-mgmt/topics/example/example-configure-ntp.html).
+
+---
+
+## 4.9. SNMP — dlaczego monitoring ma widzieć urządzenie, ale nie móc nim dowolnie sterować? [A]
+
+### 4.9.1. Router działa, ale Spectrum/Zabbix/Grafana widzą go jako „unknown”
+
+W piątek po 18:00 system monitoringu wysyła alert „device lost”, choć SSH do routera działa. Co to oznacza? Nie wiesz jeszcze, czy padło urządzenie, SNMP agent, ACL/VRF, czy po prostu NMS nie rozpoznaje odpowiedniego użytkownika.
+
+W Cisco znasz SNMPv2c (community string) i SNMPv3 (\`authPriv\`). Na Junos logika jest podobna, ale konfiguracja SNMPv3 rozdziela **USM** (tożsamość, uwierzytelnienie, szyfrowanie) i **VACM** (kontrola dostępu do MIB). Nie wystarczy wpisać jednego hasła i liczyć na polling.
+
+### 4.9.2. Dlaczego SNMPv2c community jest niewystarczające do nowej sieci
+
+SNMPv2c używa community jako prostego mechanizmu dostępu, bez ochrony transmisji porównywalnej z SNMPv3 authPriv. W segmentach legacy może być nadal używane, ale **nie powinien to być domyślny wybór dla nowego Enterprise campus**, jeśli masz NMS wspierający v3.
+
+**Gotcha:** community string w SNMPv2c **nie jest** pełnym uwierzytelnieniem użytkownika w znaczeniu SNMPv3. Nie nazywaj go bezpiecznym „hasłem szyfrującym”.
+
+### 4.9.3. USM, VACM, engine ID — trzy elementy jednej sesji monitoringu
+
+~~~mermaid
+flowchart LR
+  NMS["NMS (np. Zabbix / Spectrum)\nSNMPv3 authPriv"] --> S["Agent SNMP Junos"]
+  S --> E["Engine ID"]
+  S --> U["USM: user/auth/privacy"]
+  U --> V["VACM: security-name → group → view"]
+  V --> M["Dozwolone OID/MIB"]
+  V -. "niedozwolone OID" .-> D["Brak uprawnienia"]
+~~~
+
+**Co widzisz na rysunku?** Najpierw NMS i agent uzgadniają kontekst bezpieczeństwa, a następnie **VACM** ustala, co danemu użytkownikowi wolno odczytać. Uwierzytelnienie może zakończyć się powodzeniem, lecz dostęp do konkretnego OID nadal może być zabroniony.
+
+**Kluczowy gotcha:** producent zaleca **skonfigurować stabilny lokalny SNMP engine ID przed utworzeniem użytkowników USM**. Klucze pochodne SNMPv3 zależą od engine ID; jego zmiana po utworzeniu użytkowników może zaburzyć poprawne uwierzytelnianie.
+
+### 4.9.4. Bezpieczna konfiguracja SNMPv3 authPriv — bez wpisywania tajnych haseł do GitHub
+
+W produkcyjnym projekcie uzgodnij:
+- nazwa użytkownika SNMPv3;
+- algorytm uwierzytelniania wspierany przez Junos i NMS;
+- algorytm privacy wspierany przez obie strony;
+- read-only MIB view;
+- właściwy engine ID;
+- droga i źródło ruchu NMS;
+- ograniczenie źródeł pollingu na sieci management.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], bez sekretów, szkielet widoku i VACM**
+
+~~~junos
+set snmp engine-id use-mac-address
+set snmp view LAB-RO oid .1 include
+set snmp v3 vacm security-to-group security-model usm security-name NMS-RO group LAB-NMS
+set snmp v3 vacm access group LAB-NMS default-context-prefix security-model usm security-level privacy context-match exact
+set snmp v3 vacm access group LAB-NMS default-context-prefix security-model usm security-level privacy read-view LAB-RO
+~~~
+
+Teraz dochodzimy do kluczy USM. W pełnej konfiguracji potrzeba prawdziwych silnych sekretów, ale w publicznym podręczniku **nie zapisujemy ich jako działających haseł**. Poniższe wiersze to **szablon koncepcyjny, nie zestaw gotowy do \`commit\`**.
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], NIEKOMPLETNY SZABLON SNMPv3 (sekrety uzupełnij z vault)**
+
+~~~text
+set snmp v3 usm local-engine user NMS-RO authentication-sha authentication-password <AUTH_SECRET_Z_VAULT>
+set snmp v3 usm local-engine user NMS-RO privacy-aes128 privacy-password <PRIV_SECRET_Z_VAULT>
+~~~
+
+Pamiętaj: \`<...>\` to **placeholder**, nie dosłowna komenda do wysłania na urządzenie. W środowiskach wymagających nowszych algorytmów (np. SHA-2/AES w określonych wariantach) zweryfikuj model i release w [Juniper SNMPv3 Configuration](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html). Nie zakładaj, że \`authentication-sha\` oznacza w każdym modelu SHA-256.
+
+### 4.9.5. Dlaczego sam SNMPv3 nie wystarczy do kontroli dostępu
+
+Juniper podkreśla, że **SNMPv3 nie używa tego samego mechanizmu \`clients\` co SNMPv2c**. To nie znaczy, że należy otwierać UDP/161 do całego Internetu. Najlepszą praktyką jest **odseparowana sieć zarządzania i odpowiedni firewall filter/ACL/policy** pozwalające tylko określonym NMS na polling.
+
+**Most z Cisco:** podobnie jak SNMPv3 view/group/user + ACL na Cisco. Nie pozwalaj, żeby sam silny sekret zastępował network-layer access control.
+
+### 4.9.6. Polling vs traps vs informs
+
+**Polling:** NMS wysyła żądanie SNMP do urządzenia (typowo UDP/161).  
+**Trap:** urządzenie wysyła powiadomienie do odbiorcy (typowo UDP/162), zwykle bez standardowego potwierdzenia dostarczenia.  
+**Inform:** powiadomienie z mechanizmem potwierdzania przez odbiorcę.
+
+**Gotcha egzaminacyjny:** poprawny polling **nie dowodzi**, że trapy dochodzą. Ruch idzie w innym kierunku, może mieć inne source IP, port i politykę security. W Junos SNMPv3 trapy wymagają dodatkowo konfiguracji \`notify\`, \`target-address\`, \`target-parameters\` i ewentualnie \`notify-filter\`. Dlatego nie „włączamy trapów” jedną przypadkową komendą.
+
+W rozdziale Associate rozumiemy mechanizm; rozbudowaną konfigurację trapów i telemetry streaming rozwiniemy przy monitoringu i automatyzacji.
+
+### 4.9.7. Weryfikacja SNMPv3 i diagnostyka
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show configuration snmp | display set
+show snmp statistics
+show snmp v3
+show log messages | match "snmp|SNMP"
+~~~
+
+Na NMS wykonaj rzeczywisty test SNMPv3 (GET na podstawowy OID), a następnie sprawdź logi i liczniki na Junos. Jeśli pojawia się komunikat o błędnej autoryzacji, sprawdź **engine ID, security-name, authentication/privacy algorithms, VACM mapping i hasła**. Jeśli nie ma pakietów, najpierw routing/ACL.
+
+**Do zapamiętania:** SNMPv3 = USM + VACM; \`authPriv\` = uwierzytelnienie + ochrona danych; trap ≠ polling; \`clients\` dla v2c ≠ kontrola dostępu v3.  
+**Do przećwiczenia:** ping z NMS, SNMPv3 GET, celowe niedopasowanie VACM security-name, sprawdzenie przyczyny, poprawa.
+
+Źródła: [Configure SNMP in Junos OS](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmp-in-junos-os.html), [Configure SNMPv3](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html), [Junos SNMP FAQs](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/junos-os-snmp-faqs.html).
+
+---
+
+## 4.10. System log / syslog — Router musi umieć opowiedzieć, co się wydarzyło [A]
+
+### 4.10.1. Widzisz „link down” — ale czy to wydarzyło się przed czy po zmianie?
+
+Wracamy do incydentu P1 z prologu. W logu Junos zapisano, że \`ge-0/0/1\` przestał odpowiadać. Jednak zespół firewall twierdzi, że problem zaczął się 20 minut później. Jeżeli syslog z różnych urządzeń ma różne znaczniki czasu, analiza kolejności zdarzeń może być błędna.
+
+Dlatego kolejność greenfield ma sens: **najpierw działający routing management i NTP, potem centralne logowanie**, a następnie archiwizacja i monitoring. Bez tego kolejne systemy dostają niepełny obraz.
+
+### 4.10.2. Facility i severity — dwa sposoby klasyfikacji tej samej wiadomości
+
+W Cisco znasz logging facility i severity (emergencies, alerts, critical, errors, warnings, notifications, informational, debugging). Junos używa podobnego modelu **facility + severity**, ale konkretne nazwy facility i sposób kierowania zdarzeń są opisane w jego konfiguracji systemowej.
+
+Pomyśl o poczcie:
+- **facility** mówi, *z jakiego działu* przyszedł list (np. authorization, daemon, any);
+- **severity** mówi, *jak pilna* jest wiadomość (np. notice, info, warning).
+
+**Haczyk:** \`any notice\` obejmuje zdarzenia o tym i wyższym priorytecie według zasad logowania, a nie wyłącznie wiersze dosłownie oznaczone NOTICE. \`authorization info\` pozwala zbierać szczegóły zdarzeń związanych z logowaniem/autoryzacją.
+
+### 4.10.3. Konfigurujemy lokalne logi i zdalny serwer w labie
+
+**Urządzenie: LAB-SRX01 — Configuration Mode [edit], lokalny plik i serwer syslog w segmencie management**
+
+~~~junos
+set system syslog file messages any notice
+set system syslog file messages authorization info
+set system syslog host 192.0.2.30 any notice
+set system syslog host 192.0.2.30 authorization info
+set system syslog source-address 192.0.2.10
+show | compare
+~~~
+
+\`LAB-SERVICES\` pod \`192.0.2.30\` musi naprawdę uruchamiać odbiornik syslog, a pomiędzy urządzeniami ruch syslog musi być dozwolony. **Domyślny zdalny syslog UDP nie zapewnia transport encryption i gwarancji dostarczenia**. Wymagania TLS, portów, formatu wiadomości i retencji SIEM należy uzgodnić osobno.
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show log messages | last 40
+show log messages | match "mgd|sshd|UI_COMMIT"
+show configuration system syslog | display set
+show system uptime
+~~~
+
+Jeśli nie widać nic na serwerze, pierwsze pytanie brzmi: czy \`LAB-SERVICES\` odbiera pakiety? Drugie: jaki source IP i routing instance wybrał Junos? Trzecie: czy log jest kierowany do właściwej facility/priorytetu? Nie rozwiązuje się tego przez \`set ... any any\` na wszystkich urządzeniach bez oszacowania skali danych.
+
+### 4.10.4. Gotcha z prawdziwej społeczności Junipera: „syslog zalał konsolę”
+
+W [wątku technicznym Juniper Community o \`set system syslog user * any info\`](https://community.juniper.net/discussion/set-system-syslog-user-any-info-creating-log-storms) administrator opisał problem z nadmierną liczbą logów docierających do sesji użytkowników. To dobry przypadek, bo mało kto na egzaminie tłumaczy konsekwencje słowa \`user *\`.
+
+**Różnica:**
+- \`syslog file ...\` kieruje zdarzenia do lokalnego pliku;
+- \`syslog host ...\` do serwera;
+- \`syslog user ...\` do odpowiednich zalogowanych użytkowników.
+
+Nie włączaj masowo **\`user * any info\`** w produkcji, jeśli nie chcesz zamienić każdej sesji CLI w niekończący się strumień wiadomości. To może utrudnić nawet wpisanie polecenia ratunkowego podczas incydentu.
+
+**Most z Cisco:** znasz różnicę między \`logging console\`, \`logging buffered\` i \`logging host\`, choć składnia i formaty Junos są inne. Dobór kanału logowania wpływa na **operatora**, nie tylko na archiwum.
+
+### 4.10.5. Source IP i kolekcja w SIEM — po co jeszcze \`host-name\` i NTP?
+
+SIEM może rozpoznawać urządzenie po nazwie i adresie. Jeśli syslog wychodzi z nieoczekiwanego interfejsu, system może wstawić zdarzenia do niewłaściwego CI. Jeśli godzina jest błędna, incident timeline będzie mylący. Jeśli facility nie obejmuje login events, auditing będzie niepełny.
+
+**Praktyczna checklista:** skonfiguruj stabilną tożsamość urządzenia, sprawdź NTP, source-address/syslog host, przeprowadź test remote collection, zweryfikuj parsowanie i powiązanie z CMDB, ustal retention i zabezpieczenie transportu.
+
+### 4.10.6. Lokalny syslog to nie SRX security flow log
+
+Na SRX istnieją odrębne mechanizmy logowania **ruchu security/flow** (policy session events) i logowania systemowego (procesy, użytkownicy, daemon messages). **Nie zakładaj**, że \`set system syslog host\` automatycznie wyśle wszystkie szczegółowe wpisy o każdej sesji firewall.
+
+Konfiguracja SRX security logging/stream i polityk należy do osobnego obszaru security. W tym rozdziale skupiamy się na **system logging**, dlatego nie mieszamy obu przestrzeni.
+
+Źródło: [Direct System Log Messages to a Remote Destination](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/directing-system-log-messages-to-a-remote-destination.html), [Logging, SNMP, and Telemetry](https://www.juniper.net/documentation/us/en/software/junos/srx400-series-configuration-essentials/config-essentials-user-guide-srx4xx/topics/concept/logging-snmp.html).
+
