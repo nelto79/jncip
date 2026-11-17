@@ -239,3 +239,281 @@ Najpierw uzgodnij **co jest celem** (konkretny klient, uplink, port, protokół)
 **Do zrozumienia:** RE capture ≠ ruch transit PFE.  
 **Do przećwiczenia:** porównaj w labie ping do IP samego R1 z ruchem pomiędzy dwoma VPCS; sprawdź, co `monitor traffic` rzeczywiście widzi.
 
+
+
+---
+
+## 5.3. Statystyki interfejsów — jak rozpoznać awarię kabla, przeciążenie i problem z optyką [A]
+
+### 5.3.1. „Interfejs up/up, więc to nie LAN” — błąd, który kosztuje godziny
+
+Telefon z fabryki. „Aplikacja działa powoli tylko w budynku B. Port uplink jest up/up, więc proszę eskalować do serwera”. To klasyczny błąd myślowy. Interfejs Ethernet może mieć poprawny link, a mimo to gubić ramki z powodu uszkodzonego światłowodu, wadliwej wkładki SFP, przeciążenia egress queue lub niedopasowanej konfiguracji.
+
+Musimy oddzielić cztery rodzaje sygnału:
+1. **Stan linku** — czy urządzenie widzi carrier i administracyjne włączenie?
+2. **Błędy transmisji** — czy ramki dochodzą uszkodzone?
+3. **Odrzucenia i kolejki** — czy prawidłowe pakiety są gubione z powodu buforów/polityki?
+4. **Trendy** — czy problem **narasta teraz**, czy licznik jest stary?
+
+~~~mermaid
+flowchart TD
+  SYM["Wolna aplikacja, uplink UP"] --> PHY{"CRC/FCS lub carrier transitions rosną?"}
+  PHY -->|Tak| L1["Podejrzenie L1:\npatch, SFP, światłowód, peer"]
+  PHY -->|Nie| Q{"Drops/egress queue rosną?"}
+  Q -->|Tak| CONG["Congestion, oversubscription, CoS"]
+  Q -->|Nie| PATH["Sprawdź VLAN/L3,\nSRX policy, serwer i aplikację"]
+  L1 --> CHANGE["Potwierdź także licznik na drugim końcu"]
+  CONG --> CHANGE
+  PATH --> CHANGE
+  CHANGE --> TEST["Re-test klienta + trend counters"]
+~~~
+
+**Most z Cisco:** `show interfaces Gi1/0/24` i liczniki input errors/CRC/output drops to znane narzędzia. Na Junos zrobisz podobnie, ale interpretacja nazw liczników może zależeć od **rodziny PFE, platformy i portu**. Oficjalny przewodnik producenta wyraźnie rozróżnia input errors, resource errors, carrier transitions i drop statistics. [Understanding Dropped Packets](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/using-show-commands-for-packet-drops.html).
+
+### 5.3.2. Stosujesz zawężanie problemu od fizyki do ruchu aplikacyjnego
+
+**Urządzenie: EX-ACCESS-01 — Operational Mode, start diagnozy uplinku**
+
+~~~junos
+show interfaces terse | match ge-0/0/47
+show interfaces descriptions | match ge-0/0/47
+show interfaces ge-0/0/47 extensive
+show log messages | match "ge-0/0/47"
+~~~
+
+Pomyśl, co tak naprawdę czytasz. Jeśli na `ge-0/0/47` masz kilka tysięcy input errors, nie możesz jeszcze stwierdzić, czy pojawiły się w czasie dzisiejszego incydentu. Zrób pierwszy pomiar wraz z czasem, potem drugi po np. 60 sekundach **normalnego obciążenia**; policz zmianę liczników. Pamiętaj o możliwości resetów liczników po reboot, flapie, zmianie karty lub `clear interfaces statistics`.
+
+**Przykład ilustracyjny — NIE rzeczywisty output Junos:**
+
+| Pomiar | CRC / input errors | Egress drops |
+|---|---:|---:|
+| 10:00:00 | 12 400 | 1 500 |
+| 10:01:00 | 12 580 | 1 500 |
+| Przyrost przez 60 s | **+180** | 0 |
+
+Interpretacja: w tej minucie rosną błędy input. Nie ma dowodu, że egress congestion jest główną przyczyną. To uzasadnia weryfikację L1 i licznika **na porcie peer**.
+
+**Gotcha:** nawet szybki przyrost CRC **nie pozwala automatycznie wskazać winnego komponentu**. Uszkodzenie może być w kablu, złączu, nadajniku zdalnej strony, odbiorniku lokalnej strony albo w torze optycznym. Potrzebujesz testu krzyżowego lub porównania z peer.
+
+### 5.3.3. Liczniki, które musisz rozumieć, nie tylko kojarzyć po nazwie
+
+**Input errors / CRC / FCS:** uszkodzenie odebranych ramek. Uwaga: konkretne kategorie błędów i sposób sumowania zależą od platformy; nie każdy licznik jest prostą sumą pozostałych.
+
+**Carrier transitions:** zmiany stanu carrier. Wzrost razem z flap events wzmacnia hipotezę niestabilnej warstwy fizycznej, ale sam licznik bywa kumulowany od startu.
+
+**Output drops:** pakiety odrzucone przy transmisji. Mogą wskazywać problem kolejkowania, ale **nie zawsze** są dowodem przeciążenia fizycznego portu. Niektóre liczniki obejmują specyficzne dla PFE odrzucenia i wymagają analizy egress queues / CoS.
+
+**Framing/MTU:** duże pakiety, drops związane z MTU, błędy nadmiarowej długości. Przy tunelach/VPN asymetria MTU potrafi zepsuć wybrane aplikacje, choć ping 64 bajty działa.
+
+**FEC/optical errors:** na wyższych prędkościach i transceiverach możesz spotkać dodatkowe pomiary BER, FEC i sygnału optycznego. Nie interpretuj wszystkich liczników jednakowo na ge/xe/et i w wirtualnym vSRX.
+
+### 5.3.4. Digital Optical Monitoring (DOM) — co naprawdę oznacza -18 dBm?
+
+Wyobraź sobie link 10G przez dwie szafy i patch panel. Na Juniperze odczytujesz **Rx optical power -18 dBm**. Czy to dobry sygnał? Nie odpowiadaj bez informacji o module i jego dopuszczalnym Rx range. Inny transceiver może mieć progi warning/alarm w zupełnie innym zakresie.
+
+**Urządzenie: EX-DIST-01 — Operational Mode, wyłącznie sprzęt z optyką obsługującą DOM**
+
+~~~junos
+show chassis hardware
+show interfaces diagnostics optics xe-0/0/0
+show interfaces xe-0/0/0 extensive
+~~~
+
+DOM zazwyczaj pokazuje temperaturę, napięcie, Tx laser output power, Rx optical power oraz alarmy i warning thresholds. **Nie myl Tx i Rx**: Rx mówi, jaki sygnał dociera od nadajnika po drugiej stronie; Tx mówi, co lokalny moduł wysyła.
+
+**Gotcha:** `show interfaces diagnostics optics` może nie być dostępne na danym portcie lub module; wirtualny vSRX **nie ma fizycznego lasera**, więc ten lab wymaga prawdziwego EX/QFX/SRX z odpowiednią wkładką lub analizy udokumentowanego, wyraźnie oznaczonego outputu przykładowego. [Digital Optical Monitoring](https://www.juniper.net/documentation/us/en/software/junos/chassis/topics/concept/digital-optical-monitoring.html).
+
+### 5.3.5. Dwa końce światłowodu — eksperyment myślowy
+
+**Kierunek A → B:** nadajnik **A Tx** → włókno → odbiornik **B Rx**.  
+**Kierunek B → A:** nadajnik **B Tx** → drugie włókno → odbiornik **A Rx**.
+
+~~~mermaid
+flowchart LR
+  subgraph A["Switch A"]
+    ATX["A Tx"]
+    ARX["A Rx"]
+  end
+  subgraph B["Switch B"]
+    BTX["B Tx"]
+    BRX["B Rx"]
+  end
+  ATX -->|"światłowód A→B"| BRX
+  BTX -->|"światłowód B→A"| ARX
+~~~
+
+Jeśli **A Rx** widzi bardzo słaby sygnał, to nie jest bezpośrednia informacja o **A Tx**. Weryfikuj nadajnik B, tor B→A, budżet optyczny i zabrudzone złącza. Przy modułach BiDi/WDM może być **jedno włókno i różne długości fali** — diagram klasycznej pary włókien nie opisuje wtedy całej architektury.
+
+Właśnie dlatego technik onsite powinien przekazać **model SFP, typ medium, długość linku i DOM z obu stron**, a nie tylko stwierdzenie „sygnał jest niski”.
+
+### 5.3.6. `clear interfaces statistics` — test, który może zniszczyć dowód incydentu
+
+Kiedy licznik jest stary, możesz chcieć go wyzerować, żeby zobaczyć przyrost od zera. To wygodne, ale w środowisku produkcyjnym **zmieniasz bazę odniesienia także dla innych operatorów, telemetry lub raportu**. Nie wykonuj `clear` w P1 bez wcześniejszego snapshotu i uzgodnienia.
+
+**Urządzenie: EX-LAB-01 — Operational Mode, wyłącznie izolowany LAB po zapisaniu counters**
+
+~~~junos
+clear interfaces statistics ge-0/0/1
+~~~
+
+Preferowana metoda w produkcji to **dwa odczyty i delta**, bez kasowania liczników. Juniper dokumentuje też szczególne zachowania clear przy failover RE i na różnych FPC — nie zakładaj, że reset w jednej jednostce zeruje wszystkie kopie counterów. [clear interfaces statistics](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/clear-interfaces-statistics.html).
+
+### 5.3.7. Jakie dowody w SNOW/ServiceNow, a jakie do LLD?
+
+Dla incydentu z linkiem:
+- Oba hostnames i interfejsy wraz z opisami.
+- Timestamp **w tej samej strefie czasowej** (NTP).
+- Status admin/link i czas ostatniej zmiany.
+- Delta CRC/drops/carrier transitions dla interwału.
+- DOM obu stron, model i typ wkładki.
+- Fizyczny przebieg (patchpanel/ODF), wyniki testu onsite.
+- Rekomendacja: wymiana patchcordu/SFP, przeniesienie portu, kontrola uplinku lub zmiana QoS — **dopiero po dowodach**.
+
+**Na pamięć:** `show interfaces ... extensive`, `diagnostics optics`, `monitor interface`.  
+**Do zrozumienia:** CRC ≠ output drops, stan `up` ≠ brak problemu, Rx ≠ Tx.  
+**Do przećwiczenia:** zrób dwa odczyty licznika, policz deltę i przedstaw hipotezę bez niepotrzebnego `clear`.
+
+---
+
+## 5.4. Narzędzia sieciowe — ping, traceroute, telnet i SSH jako eksperymenty diagnostyczne [A]
+
+### 5.4.1. „Ping działa” to nie pełna definicja osiągalności
+
+Klient zgłasza: tylko użytkownicy na WLAN nie mogą otworzyć serwera ERP, a ten sam serwer odpowiada z LAN. Operator uruchamia ping **z routera** i ogłasza „sieć działa”. Ale pakiet z routera ma inny **source IP, routing instance, politykę bezpieczeństwa, drogę w sieci i czasem nawet inny typ ruchu** niż pakiet z klienta WLAN.
+
+To nie problem Junos. To problem metodologii diagnostycznej. Dobry inżynier testuje **hipotezę, a nie tylko narzędzie**.
+
+**Most z Cisco:** `ping vrf MGMT source Loopback0` i extended ping to mechanizm znany z IOS XE. W Junos użyj `source`, `routing-instance` i odpowiednich opcji ping. Zwróć uwagę na to, czy test jest dostępny na danej platformie i czy source istnieje w danej tablicy.
+
+### 5.4.2. Cztery różne testy ICMP, cztery różne pytania
+
+**Urządzenie: R1-vSRX — Operational Mode, odizolowany LAB z istniejącą trasą do 198.51.100.2**
+
+~~~junos
+ping 198.51.100.2 count 5
+ping 198.51.100.2 source 198.51.100.1 count 5
+ping 198.51.100.2 size 1400 count 5
+show route 198.51.100.2
+~~~
+
+1. **Zwykły ping:** czy RE może wysłać/odebrać ICMP do celu używając wybranej drogi i source?
+2. **Ping z source:** czy działa **konkretny adres źródłowy**, który chcesz zbadać?
+3. **Duższy ping:** czy większe datagramy też dochodzą? Nie jest to automatycznie pełny test PMTUD/MTU — bez odpowiedniego DF pakiety IPv4 mogą być fragmentowane.
+4. **Routing:** czy masz trasę i jaki jest next-hop w właściwej tablicy?
+
+**Haczyk:** dla IPv4 w dokumentacji `size` odnosi się do rozmiaru danych ICMP (zgodnie z daną implementacją CLI), a nie całkowitej długości ramki Ethernet. Jeśli testujesz MTU, zweryfikuj **jak Junos liczy size dla IPv4/IPv6** i czy ustawiono `do-not-fragment` na wspieranej platformie. [ping CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/ping.html).
+
+### 5.4.3. Nie mieszaj `mgmt_junos` z `inet.0`
+
+Załóżmy, że router ma dedykowany port management i tablicę `mgmt_junos.inet.0`. Zwykły ping do `192.0.2.30` może podjąć próbę w `inet.0`, gdzie drogi do serwera nie ma. Nie oznacza to automatycznie awarii kabla OOB.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, tylko jeśli `mgmt_junos` istnieje**
+
+~~~junos
+show route table mgmt_junos.inet.0
+ping 192.0.2.30 routing-instance mgmt_junos count 5
+~~~
+
+Jeśli instancji nie ma, polecenie zwróci błąd — **nie twórz jej dla samego ćwiczenia bez projektu management**. Pamiętaj, że `routing-instance` jest wyborem tablicy routingu, a `source` — lokalnego adresu pakietu. To dwa różne pytania.
+
+### 5.4.4. Traceroute: brak odpowiedzi jednego hopa nie dowodzi, że ruch tam ginie
+
+Każdy zna traceroute z gwiazdkami:
+- Hop 1 odpowiada.
+- Hop 2 pokazuje `*`.
+- Hop 3 odpowiada i aplikacja działa.
+
+Czy hop 2 „przestał forwardować”? Nie. Urządzenie mogło ograniczyć ICMP Time Exceeded, zablokować odpowiedzi z control plane, a sam **forwarding transit** działał. To klasyczny przypadek RE/PFE separation z rozdziału 2.
+
+**Urządzenie: R1-vSRX — Operational Mode, lab z trasą do zdalnego hosta**
+
+~~~junos
+traceroute 203.0.113.2
+traceroute 203.0.113.2 no-resolve
+show route 203.0.113.2
+~~~
+
+Traktuj traceroute jako **wskazówkę o drodze i odpowiedziach urządzeń**, nie ostateczny dowód ścieżki biznesowej. Różnice per-hop mogą wynikać z ECMP, asymetrycznej trasy powrotnej, MPLS/tuneli, filtrów lub rodzaju probes.
+
+**Most z Cisco:** gwiazdka `*` w `traceroute` na IOS XE nie znaczy „ruter dropuje każdą ramkę użytkownika”. W Junos dokładnie tak samo. [traceroute CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/traceroute.html).
+
+### 5.4.5. Telnet nie jest zalecaną metodą administracji, ale narzędziem diagnostycznym bywa przydatny
+
+Blueprint wymienia **telnet i SSH** jako narzędzia. Rozróżnijmy dwie rzeczy:
+- **Telnet do administrowania siecią** wysyła dane uwierzytelniające bez ochrony porównywalnej z SSH i nie powinien być domyślnie aktywną usługą management nowego site.
+- **Wywołanie klienta `telnet host port`** może być prostym testem zestawienia TCP do określonego portu, o ile CLI i release wspierają taką składnię.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, wyłącznie autoryzowany test do laboratoryjnego listenera TCP/443**
+
+~~~junos
+telnet 192.0.2.30 port 443
+~~~
+
+To sprawdza możliwość **zestawienia TCP**, nie dowodzi poprawności TLS, certyfikatu ani działania aplikacji HTTP. Zwykły `telnet` na port SSH może dać banner, ale nie jest klientem bezpiecznej sesji SSH. **Nie wpisuj tam haseł do usług produkcyjnych.**
+
+Na niektórych platformach dostępność `telnet` klienta może być ograniczona. Wtedy użyj zatwierdzonego narzędzia z klienta Linux/Windows. Nie włączaj serwera Telnet na Junos tylko dlatego, że chcesz wykonać test TCP do innego hosta.
+
+### 5.4.6. SSH jako test, a nie tylko kanał administracyjny
+
+Jeżeli możesz zalogować się z bastiona na EX, to dowód, że masz **transport TCP/22 + SSH negotiation + authorization użytkownika** z tego miejsca. Ale jeśli ten sam EX nie może zalogować się na serwer kopii zapasowych, może to wskazywać inne source IP, VRF, ACL i host keys.
+
+**Urządzenie: LAB-SRX01 — Operational Mode, test inicjowanego przez urządzenie SSH do laboratoryjnego serwera**
+
+~~~junos
+ssh labuser@192.0.2.30
+~~~
+
+Nie wpisuj w publiczny ticket hasła ani fingerprintu wyciągniętego z niezaufanego źródła. Połączenie SSH do hosta musi przejść prawidłową weryfikację jego tożsamości.
+
+**Urządzenie: LAB-ADMIN — Linux shell, niezależny test SSH W KIERUNKU urządzenia**
+
+~~~bash
+ssh labadmin@192.0.2.10
+~~~
+
+**Pytanie:** dlaczego oba testy są potrzebne? Bo **kierunki i źródła połączeń są inne**. Firewall lub routing może przepuszczać jeden, a blokować drugi.
+
+### 5.4.7. Test z klienta: Windows i Linux
+
+Czasem urządzenie Junos jest tylko częścią ścieżki. Musisz sprawdzić, czy usterka dotyczy jednego NIC, DNS, WLAN czy IP routing.
+
+**Urządzenie: PC-CLIENT-WIN — Windows PowerShell**
+
+~~~powershell
+ipconfig /all
+route print -4
+Test-NetConnection 203.0.113.20 -Port 443 -InformationLevel Detailed
+tracert -d 203.0.113.20
+~~~
+
+**Urządzenie: PC-CLIENT-LINUX — Linux shell**
+
+~~~bash
+ip -br address
+ip route get 203.0.113.20
+traceroute -n 203.0.113.20
+~~~
+
+To narzędzia klienta, nie komendy Junos. Kluczowy jest **porównywalny zakres**: jeśli problem dotyczy WLAN, wykonaj test ze stacji na WLAN, z rzeczywistym source IP, nie wyłącznie z routera management.
+
+### 5.4.8. Szkic decyzyjny: czy brak ping jest problemem L3?
+
+~~~mermaid
+flowchart TD
+  FAIL["Ping do celu FAIL"] --> SRC{"Czy source i routing-instance\nodpowiadają klientowi?"}
+  SRC -->|Nie| RETEST["Popraw test z właściwego źródła"]
+  SRC -->|Tak| RT{"Czy aktywna trasa i next-hop istnieją?"}
+  RT -->|Nie| ROUTE["Sprawdź RIB/FIB, routing i ARP"]
+  RT -->|Tak| FILTER{"Czy ICMP może być blokowany?"}
+  FILTER -->|Tak| TCP["Sprawdź usługę TCP / policy / sesję"]
+  FILTER -->|Nie| PATH["L1/L2, return path, serwer, capture"]
+  RETEST --> VERIFY["Test ponowny i wynik klienta"]
+  ROUTE --> VERIFY
+  TCP --> VERIFY
+  PATH --> VERIFY
+~~~
+
+**Na pamięć:** `ping ... source`, `routing-instance`, `traceroute`, `ssh`, `telnet ... port`.  
+**Do zrozumienia:** działający ICMP z RE nie potwierdza aplikacji ani drogi klienta.  
+**Do przećwiczenia:** uruchom dwa ping z różnymi source i porównaj z pomiarem klient–serwer w izolowanym labie.
+
