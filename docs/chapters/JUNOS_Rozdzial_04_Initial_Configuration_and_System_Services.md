@@ -1662,3 +1662,276 @@ show system users
 
 **Status całego laboratorium pozostaje PLANNED**, dopóki ktoś faktycznie nie uruchomi go i nie zapisze dowodów w \`labs/ch04-initial-config/VERIFY.md\`.
 
+
+
+---
+
+## 4.TS. [EXT] Dziesięć rzeczywistych scenariuszy troubleshootingu
+
+W dobrym podręczniku nie wystarczy znać **happy path**. Podczas rozmowy kwalifikacyjnej seniora, maintenance window albo egzaminu ktoś poda Ci symptom i zapyta „co sprawdzisz jako pierwsze?”. Nie chcę listy pięćdziesięciu komend do uruchomienia. Chcę, żebyś **umiał przewidzieć, który etap procesu zawiódł**.
+
+### 4.TS.1. „Mam ping do SRX, ale SSH nie działa”
+
+**Symptom:** LAB-ADMIN pinguje adres zarządzania, lecz TCP/22 kończy się timeoutem.
+
+**Możliwy błąd myślenia z Cisco:** „Skoro IP odpowiada, to chyba problem z hasłem”. Nie. Hasło jest sprawdzane **dopiero po ustanowieniu odpowiedniego transportu SSH**. Timeout może powstać wcześniej.
+
+**Urządzenie: LAB-SRX01 — Operational Mode z konsoli**
+
+~~~junos
+show interfaces terse
+show route table inet.0
+show configuration system services ssh | display set
+show configuration security zones | display set
+show log messages | match "sshd|ssh|login"
+~~~
+
+**Tok diagnozy:** port właściwej platformy → adres i routing powrotny → listener SSH → SRX host-inbound/firewall filter → TCP reachability → dopiero authentication i login class. Jeśli na Cisco używałbyś VTY ACL, w Junos pamiętaj, że SRX może mieć **security zones** oraz odrębne mechanizmy ograniczania dostępu do RE.
+
+**Root cause** nie może być ustalony jedynie z ping. Potwierdź rzeczywisty test TCP/22 z bastiona.
+
+### 4.TS.2. „AAA działa, ale moje lokalne hasło już nie”
+
+**Symptom:** użytkownik \`labadmin\` loguje się lokalnie, gdy serwer TACACS+ jest wyłączony, ale przy działającym serwerze z błędnym policy login jest odrzucany.
+
+**Przewidywanie:** w systemie ustawiono tylko \`authentication-order tacplus\`, a serwer jawnie odrzuca login. To nie jest to samo co brak odpowiedzi.
+
+**Urządzenie: LAB-SRX01 — Operational Mode z konsoli / działającej sesji awaryjnej**
+
+~~~junos
+show configuration system authentication-order
+show configuration system tacplus-server | display set
+show log messages | match "tac|login|sshd"
+~~~
+
+**Naprawa:** ustal oczekiwany model fallback i politykę bezpieczeństwa klienta, sprawdź prawdziwą odpowiedź serwera oraz zgodność login template/class; nie włączaj „password” w produkcji bez oceny ryzyka i uzgodnienia z Security Team.
+
+**Most z Cisco:** rozróżnienie AAA \`REJECT\` vs \`TIMEOUT\` bywa równie istotne, ale nie zakładaj identycznego przebiegu dla różniących się syntaksów.
+
+### 4.TS.3. „Zalogowałem się, ale nawet \`show configuration\` jest niedostępne”
+
+**Symptom:** SSH działa, ale polecenie ma błąd autoryzacji.
+
+**Urządzenie: LAB-SRX01 — Operational Mode jako ograniczony użytkownik**
+
+~~~junos
+show cli authorization
+show system users
+~~~
+
+**Hipoteza:** konto dostało login class z flagami niewystarczającymi do przeglądania danej sekcji. Sprawdź centralny VSA/template, nie tylko lokalną \`class\`. Nie „naprawiaj” wszystkiego przez natychmiastowe przypisanie \`super-user\`, bo usuniesz kontrolę dostępu.
+
+### 4.TS.4. „NTP server jest skonfigurowany, ale logi mają błędne godziny”
+
+**Symptom:** konfiguracja zawiera \`system ntp server\`, jednak timeline w SIEM jest rozjechany.
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show ntp associations
+show ntp status
+show system uptime
+show configuration system time-zone
+show configuration system ntp | display set
+~~~
+
+**Hipotezy:** źródło jest nieosiągalne, pakiety UDP/123 są blokowane, source-address/VRF jest zły, serwer nie jest synchronizowany albo operator myli time-zone z faktycznym czasem. Ping do serwera nie zastępuje odczytu **selected association + status**.
+
+### 4.TS.5. „NMS pokazuje SNMPv3 Authentication Failure”
+
+**Symptom:** z bastiona SSH działa, ale NMS nie może odczytać \`sysUpTime.0\`.
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show snmp statistics
+show snmp v3
+show configuration snmp | display set
+show log messages | match "snmp|SNMP"
+~~~
+
+**Pytania:** czy problemem jest UDP/161, engine ID, security name, algorytm auth/privacy, błędny sekret, czy VACM view? Jeśli nie ma w ogóle ruchu do urządzenia, nie zaczynaj od podmiany hasła. **SNMPv3 authPriv** to kombinacja wielu parametrów, a nie pojedynczy community string.
+
+### 4.TS.6. „Syslog lokalnie jest, a w SIEM nie ma nic”
+
+**Symptom:** \`show log messages\` zawiera zdarzenia, lecz serwer \`192.0.2.30\` nie.
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show configuration system syslog | display set
+show route table inet.0
+show log messages | last 30
+show interfaces terse
+~~~
+
+**Hipotezy:** brak routing do hosta, zły source IP, pomylony port/protokół, blokada ACL, brak nasłuchu po stronie serwera, niewłaściwa facility/severity. Zła interpretacja \`any notice\` może dodatkowo ukryć zdarzenia poziomu informational, których szuka zespół.
+
+**Gotcha:** nawet jeśli centralne logowanie działa, nie należy bez ograniczeń kierować \`any info\` do wszystkich zalogowanych terminali przez \`syslog user *\`.
+
+### 4.TS.7. „W \`show configuration\` nie ma ustawienia, które urządzenie stosuje”
+
+**Symptom:** masz nieoczekiwany banner lub parametr portu, którego nie skonfigurowano bezpośrednio w tej gałęzi.
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show configuration | display inheritance
+show configuration groups | display set
+show configuration | display set
+~~~
+
+**Hipoteza:** ustawienie jest odziedziczone przez \`apply-groups\` albo pochodzi z lokalnego override. Sprawdź precedence: lokalny statement → grupy bardziej szczegółowe → kolejność \`apply-groups\`. Na Cisco porównałbyś template w Catalyst Center albo profil zastosowany do interfejsu, ale Junos robi to wewnątrz hierarchii.
+
+### 4.TS.8. „Backup ma działać po każdym commit, ale katalog serwera jest pusty”
+
+**Symptom:** \`transfer-on-commit\` jest w konfiguracji, a plik na backup server nie powstał.
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show configuration system archival | display set
+show log messages | match "transfer|scp|archive"
+file list /var/transfer/config/
+~~~
+
+**Hipotezy:** server SSH nie przyjmuje klucza, brak praw zapisu katalogu, fingerprint host key nie został zweryfikowany, serwer jest niedostępny z właściwej instancji routing, albo transfer czeka w kolejce. **Commit complete nie potwierdza SCP delivery.**
+
+Nie zapisuj hasła do URL \`scp://user:password@server\` dla wygody. Wycofaj ten pomysł i przygotuj bezpieczną autentykację i ograniczone konto.
+
+### 4.TS.9. „Rollback rescue kończy się błędem”
+
+**Symptom:** potrzebujesz ratunku, ale urządzenie zgłasza brak lub niepoprawny rescue config.
+
+**Urządzenie: LAB-SRX01 — Operational Mode**
+
+~~~junos
+show system configuration rescue
+show system commit
+show system alarms
+~~~
+
+**Root cause:** rescue nigdy nie została zapisana albo jest niekompletna/niezgodna. **Nie można odtworzyć punktu, którego nie utworzono.**
+
+Jeśli rescue zawiera błędną konfigurację, również nie pomoże. W takim przypadku planujesz odzyskanie z lokalnej historii lub **zewnętrznego backupu**. Nie zakładaj, że rollback na vSRX jest zawsze odpowiednikiem factory reset.
+
+### 4.TS.10. „Zmieniłem management-instance i nagle padły SSH, AAA, NTP oraz syslog”
+
+**Symptom:** kilka pozornie niezależnych usług przestało działać po małej zmianie OOB routing.
+
+**Urządzenie: LAB-SRX01 — Operational Mode przez niezależną konsolę**
+
+~~~junos
+show configuration system management-instance
+show route table inet.0
+show route table mgmt_junos.inet.0
+show interfaces terse
+show configuration system ntp | display set
+show configuration system tacplus-server | display set
+show configuration system syslog | display set
+~~~
+
+**Hipoteza:** źródła ruchu management i routing context zostały zmienione, ale poszczególne usługi nadal próbują używać niewłaściwej ścieżki. Nie naprawiaj pięciu usług osobno, zanim nie ustalisz **wspólnej przyczyny**.
+
+To jest najbardziej wartościowy nawyk Tier 3: nie szukasz pięciu niezależnych bugów; pytasz, **która wspólna zależność łączy wszystkie objawy**.
+
+---
+
+## 4.TEST. Sprawdzian z rozumienia — 18 scenariuszy z odpowiedziami [A / EXT]
+
+*Pytania są autorskie, inspirowane oficjalnymi mechanizmami Junos i praktyką eksploatacyjną. Nie kopiujemy komercyjnych banków pytań, nie nazywamy pytań własnych oficjalnymi pytaniami certyfikacyjnymi.*
+
+**Najpierw sam przewidź wynik**, dopiero potem przeczytaj wyjaśnienie.
+
+### 4.TEST.1. Pytania
+
+1. Nowy EX4400 i SRX300 stoją na tej samej półce. Czy można założyć, że oba mają fabrycznie ten sam IP i ten sam trust zone?
+
+2. Konsola pozwala zalogować się jako root bez hasła. Czy z tego wynika, że root może bezpiecznie logować się przez SSH z dowolnej sieci?
+
+3. vSRX ma adres na \`fxp0\`. Czy oznacza to automatyczne istnienie odrębnej \`mgmt_junos.inet.0\`?
+
+4. Dodałeś \`set system name-server 192.0.2.53\`, ale DNS nie działa. Czy stworzyłeś tym poleceniem serwer DNS?
+
+5. \`labadmin\` ma poprawne hasło, ale klasa \`read-only\` i próbuje commit. Co powstrzyma zmianę?
+
+6. Utworzyłeś \`system login class LAB-NOC permissions view\`, ale \`show configuration\` może być ograniczone. Dlaczego?
+
+7. TACACS+ nie odpowiada. Co może zrobić Junos, jeśli masz lokalne hasło? A gdy TACACS+ **odsyła reject**, a \`password\` nie znajduje się jawnie w authentication-order?
+
+8. Dla \`authentication-order [ tacplus password ]\` serwer odpowiada reject. Czy lokalne konto ma szansę zostać sprawdzone?
+
+9. Dlaczego AAA z \`source-address\` wskazującym niewłaściwą IP może nie działać mimo poprawnego shared secret?
+
+10. Utworzyłeś \`groups LAB-STD\`, lecz nie ma \`apply-groups\`. Czy konfiguracja grupy działa? Co jeśli wartość lokalna przeczy odziedziczonej?
+
+11. Zmieniłeś \`system time-zone\`. Czy teraz wszystkie zegary w sieci są zsynchronizowane?
+
+12. \`show ntp associations\` pokazuje serwer, ale \`show ntp status\` nie potwierdza synchronizacji. Czy można zatwierdzić test NTP jako PASS?
+
+13. NMS potrafi pingować Junos i używa poprawnego użytkownika USM, lecz VACM nie zawiera read-view. Czy polling na pewno zadziała?
+
+14. NMS potrafi pobrać SNMPv3 \`sysUpTime.0\`, ale nie otrzymuje trapów. Czy polling i trapy są jednym mechanizmem?
+
+15. Na SRX skonfigurowano \`system syslog host 192.0.2.30 any notice\`. Czy to oznacza, że szczegółowe logi każdej sesji firewall znajdą się w zdalnym SIEM?
+
+16. \`transfer-on-commit\` jest w konfiguracji, a operator widzi \`commit complete\`. Czy można wnioskować, że plik backupu dotarł do serwera?
+
+17. Chcesz szybko wrócić do znanej dobrej konfiguracji, ale nikt nigdy nie wykonał \`request system configuration rescue save\`. Co się stanie przy \`rollback rescue\`?
+
+18. Po wprowadzeniu \`commit confirmed\` sprawdzasz konfigurację przez kolejne \`commit check\`. Czy masz gwarancję, że timer rollback nadal działa?
+
+### 4.TEST.2. Wyjaśnienia odpowiedzi
+
+**1. Nie.** SRX300 z fabrycznym \`trust/untrust\` i EX4400 z \`me0\` mają różne profile oraz role. Dokładne defaulty sprawdzamy per model/release.
+
+**2. Nie.** Dostęp console i SSH to odrębne mechanizmy. W nowym site tworzymy osobiste konto, testujemy je i dopiero potem ograniczamy root SSH.
+
+**3. Nie.** Fizyczny port management i dedykowana routing instance są różnymi pojęciami. Bez poprawnej konfiguracji mgmt VRF usługi mogą używać \`inet.0\`.
+
+**4. Nie.** Podałeś adres resolvera, który nadal musi rzeczywiście działać i być osiągalny.
+
+**5. Authorization/login class.** Samo rozpoznanie użytkownika nie daje prawa do modyfikowania active configuration.
+
+**6. Permission flags.** \`view\` i szersze uprawnienia konfiguracji nie są tym samym; wymagany zakres weryfikujemy przez \`show cli authorization\` i dokumentację.
+
+**7. Timeout i reject nie są tożsame.** Gdy serwer jest niedostępny, możliwy jest fallback local; przy jawnym reject i bez password w order zwykle następuje odmowa. To zależy od dokładnego \`authentication-order\`.
+
+**8. Tak.** Jawne dołączenie \`password\` przewiduje próbę metody lokalnej po określonym remote reject. Nie gwarantuje sukcesu bez prawidłowego lokalnego konta.
+
+**9.** Serwer AAA może identyfikować klienta po source IP, a routing/filter może nie umożliwiać powrotu. Shared secret nie naprawia niedostępności sieci.
+
+**10.** Sama grupa nie musi działać bez \`apply-groups\`; lokalna wartość zwykle ma pierwszeństwo. \`display inheritance\` pokazuje wynik.
+
+**11. Nie.** Strefa czasu reguluje prezentację, a NTP dostarcza synchronizację. To odrębne elementy.
+
+**12. Nie.** Potrzebne jest potwierdzenie stanu synchronizacji, nie tylko zobaczenie adresu serwera.
+
+**13. Nie.** VACM musi nadać dostęp do wybranych MIB OID; poprawne hasło USM nie oznacza dowolnego odczytu.
+
+**14. Nie.** Polling jest inicjowany z NMS, trap przez urządzenie; różne kierunki, konfiguracje i często porty.
+
+**15. Nie.** System log i SRX security session logging nie są automatycznie tym samym strumieniem.
+
+**16. Nie.** Transfer może się nie powieść po commit; sprawdź log i odbiornik, a w DR przetestuj restore.
+
+**17.** Próba może zakończyć się błędem. Nie można automatycznie przywrócić niezapisanej albo wadliwej rescue.
+
+**18. Nie.** Oficjalna dokumentacja dopuszcza, że \`commit check\` potwierdzi oczekujący \`commit confirmed\`. Oczekujący timer sprawdzamy operacyjnie.
+
+### 4.TEST.3. Jak sprawdzić, czy rozdział jest naprawdę opanowany?
+
+Nie musisz recytować wszystkich linii SNMPv3 VACM na pamięć. Po przejściu laboratorium powinieneś samodzielnie:
+
+- wybrać poprawny interfejs management dla konkretnego modelu;
+- utworzyć bezpieczne konto i ograniczoną klasę;
+- przewidzieć, kiedy AAA fallback zadziała;
+- skonfigurować NTP i dowieść synchronizacji;
+- wyjaśnić, dlaczego SNMPv3 authPriv wymaga USM i VACM;
+- odróżnić system syslog od SRX security log;
+- otrzymać off-device backup i dowód zapisu;
+- wykonać kontrolowany rescue restore i wiedzieć, że nie jest to automatyczny rollback do produkcji;
+- przeprowadzić cały commissioning bez zapisywania credentiali w repo.
+
+Jeżeli nie potrafisz odpowiedzieć na „**jaki dokładnie dowód potwierdza działanie usługi?**”, wróć do 4.14 i laboratorium, zamiast szukać następnej suchej tabeli.
+
