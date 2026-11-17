@@ -1935,3 +1935,104 @@ Nie musisz recytować wszystkich linii SNMPv3 VACM na pamięć. Po przejściu la
 
 Jeżeli nie potrafisz odpowiedzieć na „**jaki dokładnie dowód potwierdza działanie usługi?**”, wróć do 4.14 i laboratorium, zamiast szukać następnej suchej tabeli.
 
+
+
+---
+
+## 4.CLI. Podręczna mapa poleceń — dopiero po przejściu lekcji [EXT]
+
+W tym miejscu tabela jest już uzasadniona: nie zastępuje mechanizmów, tylko przypomina, **jakie pytanie stawiasz urządzeniu** podczas prawdziwego incidentu lub change'u.
+
+| Pytanie | Przykładowe polecenie / obszar Junos | Czego NIE dowodzi |
+|---|---|---|
+| Co naprawdę uruchomiłem? | \`show version\`, \`show chassis hardware\` | Że model ma ten sam factory default co inna rodzina |
+| Jaki mam adres OOB? | \`show interfaces terse\` | Że mam właściwy routing do bastiona |
+| Skąd wziął się ten parametr? | \`show configuration ... \| display inheritance\` | Że zwykły widok zawsze ujawnia wszystkie groups |
+| Kto może się logować? | \`show configuration system login\` | Że nowa sesja naprawdę przejdzie AAA |
+| Jaką rolę otrzymałem? | \`show cli authorization\` | Że inny użytkownik ma identyczną klasę |
+| Dlaczego AAA nie działa? | \`show configuration system authentication-order\`, log | Czy serwer timeoutował, czy wykonał reject |
+| Gdzie jest management route? | \`show route table inet.0\`, \`mgmt_junos.inet.0\` | Że port management automatycznie tworzy VRF |
+| Czy NTP jest w konfiguracji? | \`show configuration system ntp\` | Że zegar jest zsynchronizowany |
+| Czy NTP naprawdę działa? | \`show ntp associations\`, \`show ntp status\` | Że SIEM ma poprawną time-zone |
+| Czy jest SNMP agent i auth? | \`show snmp statistics\`, \`show snmp v3\` | Że NMS wykonał udany polling |
+| Czy system tworzy logi? | \`show log messages \| last 30\` | Że remote SIEM je odebrał |
+| Czy jest zewnętrzna archiwizacja? | \`show configuration system archival\` | Że serwer SCP ma kopię |
+| Czy jest rescue? | \`show system configuration rescue\` | Że jest dobra i można odzyskać wszystkie usługi |
+| Jakie ostatnie zmiany? | \`show system commit\` | Że rollback historii jest off-device backupem |
+
+**Zasada senior engineer:** dowód na działanie usługi zbierasz z **urządzenia i systemu docelowego**. Jedna linijka \`set\` nie jest dowodem na transport danych.
+
+---
+
+## 4.SOURCES. Materiały producenta, bibliografia i ograniczenia
+
+Poniżej są **jawne źródła techniczne** i punkty, które szczególnie przydały się do weryfikacji haczyków. W rozdziale korzystamy z nich jako podstawy do własnego wykładu; nie przedstawiamy scenariuszy własnych jako pytań skopiowanych z egzaminu.
+
+### Start, sprzęt, podstawowa konfiguracja
+
+- [Initial Configuration Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/concept/initial-configuration-overview.html).
+- [Configuring Junos on SRX300](https://www.juniper.net/documentation/us/en/hardware/srx300/topics/topic-map/srx300-configuring-junos.html) — fabryczne trust/untrust, IRB, zmiany NETCONF od 25.2R1.
+- [Configure Junos OS on EX4400](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html) — management \`me0\`, konsola, zachowanie po \`load factory-default\`.
+- [Management Interface in a Dedicated Instance](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/topic-map/management-interface-in-non-default-instance.html).
+- [Root Authentication](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/root-authentication-edit-system.html).
+
+### Tożsamość administratora i AAA
+
+- [User Accounts](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-user-accounts.html).
+- [Login Classes Overview](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-login-class-overview.html).
+- [User Access Privileges](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html).
+- [show cli authorization](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-cli-authorization.html).
+- [Authentication Order](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-authentication-order.html) — kluczowe: **AAA timeout ≠ AAA reject**.
+- [TACACS+ Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-tacacs-authentication.html).
+- [RADIUS Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-radius-authentication.html).
+
+### Dziedziczenie, synchronizacja czasu, monitoring
+
+- [Use Configuration Groups](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html).
+- [apply-groups](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/apply-groups.html).
+- [Network Time Protocol](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/ntp-edit-system.html).
+- [Example: Configure NTP](https://www.juniper.net/documentation/us/en/software/junos/time-mgmt/topics/example/example-configure-ntp.html).
+- [Configure SNMPv3](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html) — USM, VACM, engine ID.
+- [Junos SNMP FAQ](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/junos-os-snmp-faqs.html).
+- [Remote Syslog](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/directing-system-log-messages-to-a-remote-destination.html).
+- [Juniper Community: syslog user * any info](https://community.juniper.net/discussion/set-system-syslog-user-any-info-creating-log-storms) — prawdziwy problem operatorski, odpowiedź techniczna skonfrontowana z oficjalną dokumentacją.
+
+### Backup, tracing i odzyskiwanie
+
+- [Back Up Configurations to an Archive Site](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/cli/topics/task/junos-software-system-management-router-configuration-archiving.html).
+- [archival CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/archival-edit-system.html).
+- [Tracing OSPF/IS-IS](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-is-is-ospf.html).
+- [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html).
+- [show system configuration rescue](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-configuration-rescue.html).
+- [Rescue and Recovery of Configuration File](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/rescue-and-recovery-config-file.html).
+- [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html) — ostrzeżenie o \`commit check\` w czasie pending commit confirmed.
+
+### Licencja wykorzystanego obrazu
+
+- W sekcji 4.6 znajduje się oryginalna fotografia przełącznika [Juniper Networks QFX5100 Ethernet switch](https://commons.wikimedia.org/wiki/File:Juniper_Networks_QFX5100_ethernet_switch.jpg), autor: **Juniper Networks**, [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), **bez modyfikacji**, hotlink Wikimedia Commons. Obraz nie jest pobrany do repo. Jego celem jest jedynie pokazanie różnych fizycznych rodzajów portów; **nie przedstawia modelu używanego w naszym labie**.
+- Wszystkie diagramy Mermaid w tym rozdziale są autorskimi uproszczeniami dydaktycznymi.
+
+### Co zostało sprawdzone, a czego nie?
+
+**Zweryfikowano w źródłach:** semantykę factory-default (per model), interfejs \`me0\` EX4400, root login/keys, role i AAA fallback, precedence groups, NTP, USM/VACM SNMPv3, system syslog, transfer-on-commit, rescue, podstawowy model traceoptions oraz nieoczywiste zachowanie \`commit check\`.
+
+**Nie zweryfikowano runtime:** mapowania QEMU NIC konkretnego vSRX w EVE-NG, usług LAB-SERVICES, realnych rekordów syslog, authPriv GET, repozytorium backup, AAA ACCEPT/TIMEOUT/REJECT, czy \`commit confirmed\` automatycznie wycofał zmianę na konkretnym release. Nie oznaczaj tych elementów jako PASS bez wykonania testów.
+
+**Granice platformowe:** EX4400 z \`me0\`, SRX z \`fxp0\`, wirtualny vSRX, MX, QFX, Junos OS Evolved, SRX cluster i Virtual Chassis mogą mieć różne formaty interfejsów, ścieżki routingu management, zasady host-inbound, obsługę usług i restrykcje systemowe. Każdy przykład należy dopasować do rzeczywiście wykrytego modelu/release.
+
+---
+
+## 4.END. Zakończenie — co znaczy „site gotowy do produkcji”?
+
+O 08:15 instalator pytał, czy może przekazać nowy Juniper do eksploatacji, bo świeci na zielono.
+
+Teraz odpowiedź potrafisz uzasadnić:
+
+*„Nie wystarczy działający link. Potrzebujemy prawidłowej tożsamości urządzenia, przejrzystego management access, kont indywidualnych i awaryjnych, potwierdzonego AAA, zsynchronizowanego czasu, działającego sysloga, monitoringu SNMPv3, zewnętrznej kopii konfiguracji i zweryfikowanej rescue. Dopiero wtedy inny inżynier będzie mógł utrzymać to urządzenie w środku nocy”.*
+
+Gdy nauczysz się tak myśleć, **komendy Junos staną się tylko sposobem wykonania projektu**, a nie listą obcych słów. I właśnie o to chodzi w przejściu z Cisco do Junipera.
+
+**Blueprint:** Rozdział **4. Initial Configuration and System Services [A]**, punkty **4.1–4.14**, dodatkowo **4.15 [LAB]**; uzupełnienia praktyczne [EXT] w sekcjach 4.TS, 4.TEST i 4.CLI.
+
+**Status:** lekcja gotowa do nauki; laboratorium **PLANNED / NOT RUNTIME VALIDATED**.
+
