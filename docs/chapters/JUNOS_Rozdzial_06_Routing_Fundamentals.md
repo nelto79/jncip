@@ -1764,3 +1764,219 @@ Dla każdego eksperymentu zapisz:
 
 **Status sekcji 6.11:** **PLANNED / NOT RUNTIME VALIDATED** — czytelnik ma pełny instruktaż, ale potwierdzenie wykonania na konkretnym obrazie jest osobnym zadaniem.
 
+
+
+---
+
+## 6.CASE. [EXT] Ćwiczenia operatorskie — siedem błędnych intuicji, które trzeba wyeliminować
+
+Nie chcę kończyć wykładu testem polegającym na odtwarzaniu definicji. Lepiej przećwiczyć **prawdziwy tok diagnozy**: ktoś poda Ci symptom, Ty masz zaproponować minimalny test i przewidzieć, w której warstwie leży problem. Poniższe sytuacje są autorskimi rekonstrukcjami typowych incydentów Enterprise, a nie rzeczywistymi pytaniami egzaminacyjnymi ani ujawnionymi przypadkami klientów.
+
+### 6.CASE.1. „BGP/170 przegrywa ze static/5 — więc dlaczego pakiet idzie BGP?”
+
+R1 ma:
+- `0.0.0.0/0` via ISP-A — static/5;
+- `198.18.0.0/15` via ISP-B — BGP/170;
+- pakiet do `198.18.20.10`.
+
+Operator wskazuje static/5 jako drogę preferowaną. **Co jest błędne?** Porównał preference tras do **różnych prefiksów**. Najdłuższy matching prefix to `198.18.0.0/15`, więc jeśli jest aktywny i zainstalowany, wygrywa nad default. Preference/AD **nie porównuje** dwóch różnych długości prefixu jako tego samego kandydata.
+
+**Urządzenie: R1-EDGE — Operational Mode, odczyt na urządzeniu z taką konfiguracją**
+
+~~~junos
+show route 198.18.0.0/15
+show route 0.0.0.0/0
+show route forwarding-table destination 198.18.20.10
+~~~
+
+**Most z Cisco:** tak samo zadziała CEF LPM pomiędzy `B 198.18.0.0/15` a `S* 0.0.0.0/0`. Najpierw LPM, a nie najwyższy/niski AD „globalnie”.
+
+### 6.CASE.2. „Trasa jest aktywna, ale ARP do ISP nie istnieje”
+
+R1 ma connected uplink i static route via ISP-A. `show route` jest poprawny. Ping ERP timeoutuje. Engineer proponuje `delete routing-options static route` i ponowne `set`.
+
+**Jaka jest lepsza hipoteza?** Pakiet może nie otrzymać lokalnej informacji **MAC do next-hopa**, choć route jest aktywna na poziomie RIB. Trzeba potwierdzić stan uplinku, ARP i peer. Usunięcie/re-add static nic nie da, jeśli fizyczny peer lub VLAN jest niedostępny.
+
+**Urządzenie: R1-EDGE — Operational Mode, minimalny dowód**
+
+~~~junos
+show interfaces ge-0/0/0 extensive
+show arp
+show route forwarding-table destination 203.0.113.10
+ping 198.51.100.2 source 198.51.100.1 count 5
+~~~
+
+**Most z Cisco:** analogy `show ip cef adjacency` i `show arp` przy `show ip route`. Pamiętaj, że brak ARP nie musi od razu usunąć RIB entry.
+
+### 6.CASE.3. „W tabeli mam /24, ale pojedynczy host nie działa”
+
+Wszystkie hosty `203.0.113.0/24` są dostępne, oprócz `203.0.113.10`. Administrator widzi aktywną /24 i prosi o reset application server.
+
+**Co może być przyczyną?** Bardziej szczegółowa **/32 route do `discard`**, oddzielna polityka, problem ARP jednego hosta, ACL na serwerze. Nie trzeba od razu wymieniać całego WAN.
+
+**Urządzenie: R1-EDGE — Operational Mode**
+
+~~~junos
+show route 203.0.113.10/32 exact
+show route 203.0.113.0/24
+show route forwarding-table destination 203.0.113.10
+show arp
+~~~
+
+**Pytanie:** czy `show route 203.0.113.0/24` potwierdza, że pod tą siecią nie istnieją bardziej szczegółowe prefiksy? **Nie.** Właśnie dlatego odczytujesz także route do hosta i FIB. W razie wątpliwości o dokładny wariant `exact` potwierdź składnię przez CLI `?` lub źródło producenta.
+
+### 6.CASE.4. „Zmieniłem preference static na 200, ale ruch wciąż tędy idzie”
+
+Masz tylko static do `203.0.113.0/24`. Zmieniasz preference z 5 na 200, licząc na to, że Junos zacznie korzystać z ISP-B.
+
+**Dlaczego tak się nie stało?** Preference nie tworzy alternatywnej drogi. Jeśli nie istnieje **kwalifikowany route do tego samego prefiksu z niższą preference**, static/200 może nadal być aktywny. Stworzenie backup route wymaga rzeczywistego alternatywnego next-hopa, zwykle także odpowiednich mechanizmów failover.
+
+**Urządzenie: R1-EDGE — Operational Mode**
+
+~~~junos
+show route 203.0.113.0/24 extensive
+show route hidden
+show route forwarding-table destination 203.0.113.10
+~~~
+
+**Wniosek:** preference to **ranking dostępnych kandydatów**, a nie interfejsowy przełącznik primary/secondary.
+
+### 6.CASE.5. „Trasa jest w `CAMPUS-IOT.inet.0`, a z global WAN nie widzę urządzenia”
+
+Inżynier sprawdza `show route table CAMPUS-IOT.inet.0` — jest `10.10.10.0/24`. Z global `inet.0` próbuje ping hosta i dostaje timeout.
+
+**Prawidłowa diagnoza:** nie zakładaj automatycznego route leaking z routing instance do global. Sprawdź, do jakiej instance należy ingress interface, jak wykonano ping, czy istnieje interconnect/route leaking i czy firewall przepuszcza ruch.
+
+**Urządzenie: EX-DIST-01 — Operational Mode, jeśli instancja `CAMPUS-IOT` rzeczywiście istnieje**
+
+~~~junos
+show route table CAMPUS-IOT.inet.0
+show route table inet.0
+show configuration routing-instances CAMPUS-IOT | display set
+ping 10.10.10.10 routing-instance CAMPUS-IOT count 5
+~~~
+
+**Most z Cisco:** `ping vrf CAMPUS-IOT ...` vs ping z global routing table. Jeden test nie zastępuje drugiego.
+
+### 6.CASE.6. „Odpowiedź z serwera wychodzi innym routerem, a SRX gubi TCP”
+
+W środowisku redundantnym R1 obsługuje request klienta, ale serwer odsyła reply przez R3. Routing wygląda „poprawnie” na każdym urządzeniu osobno, a stan sesji SRX nie zgadza się.
+
+**Hipoteza:** asymetryczny routing + stateful firewall flow processing. Nie naprawisz tego przez zmianę preference na chybił trafił. Narysuj **obie strony pięciokrotki sesji**, wskaż ingress/egress i miejsce NAT. Potem rozważ, czy projekt wymaga symetrii lub odpowiednio wspieranego mechanizmu pracy w HA.
+
+**Urządzenie: R1-vSRX — Operational Mode, stan SRX**
+
+~~~junos
+show route 203.0.113.10
+show security flow session
+show security policies
+show route forwarding-table destination 203.0.113.10
+~~~
+
+**Most z Cisco:** HSRP/VRRP i redundantne trasy nie rozwiązują automatycznie problemu asymetrii przez firewall stateful.
+
+### 6.CASE.7. „Po zmianie source dla ping problem nagle się pojawił”
+
+Ping R1 → ERP bez `source` działa. Ping z `source 192.0.2.1` nie działa, a z PC-A tym bardziej. Czy wyciągasz wniosek „Junos źle rozwiązuje routing”?
+
+Nie. Zmienione **source IP** może powodować brak return route, inny ACL albo security policy. Z samego R1 możesz wykazać problem, ale nadal nie udowodniłeś identycznego zachowania jak dla PC-A. Wykonaj test end-to-end z rzeczywistego hosta.
+
+**Urządzenie: R1-vSRX — Operational Mode, różne source IP**
+
+~~~junos
+ping 203.0.113.10 count 5
+ping 203.0.113.10 source 192.0.2.1 count 5
+show route 203.0.113.10
+~~~
+
+**Urządzenie: PC-A-LINUX — Linux shell, test z prawdziwej sieci źródłowej**
+
+~~~bash
+ip route get 203.0.113.10
+ping -c 5 203.0.113.10
+~~~
+
+Pamiętaj o rozróżnieniu **ruchu z RE** i **transit PC-A** w procesie SRX.
+
+---
+
+## 6.CHEATSHEET. Mapa diagnostyczna dopiero po nauce mechanizmów [EXT]
+
+Nie musisz zapamiętać całych outputów. Zapamiętaj **pytanie i najkrótszy dowód**.
+
+| Co chcesz ustalić? | Komenda Junos | Co może zmylić? |
+|---|---|---|
+| Jaka jest główna RIB IPv4? | `show route table inet.0` | Route dla hosta może być w innej instance |
+| Jak wygląda IPv6? | `show route table inet6.0` | Brak ND albo host IPv6 default |
+| Ile destinations/routes? | `show route summary` | Liczba routes ≠ prefixes |
+| Która trasa jest aktywna? | `show route PREFIX detail` | Inactive ≠ hidden |
+| Czy route jest ukryta? | `show route hidden` | Nie wszystkie protokoły reprezentują niepoprawne candidates identycznie |
+| Co wie forwarding? | `show route forwarding-table destination IP` | Widok RE ≠ pełny raw ASIC |
+| Czy znam MAC next-hopa? | `show arp` | Nie dotyczy IPv6 |
+| Czy znam sąsiada IPv6? | `show ipv6 neighbors` | Nie dowodzi poprawności policy |
+| Czy istnieje właściwa instance? | `show route table NAME.inet.0` | Trasy nie przechodzą global bez leaking |
+| Skąd pochodzi trasa? | `show route protocol static/ospf/bgp` | Protokoły mogą nie działać w labie |
+| Czy candidate ma niezatwierdzony static? | `show | compare` w config mode | Active operational state nie zna candidate |
+| Czy ping używa dobrego źródła? | `ping IP source SOURCE` | Test z RE to nie test user transit |
+| Czy na SRX jest flow? | `show security flow session` | Brak sesji ma wiele możliwych przyczyn |
+
+**Konsekwencja dla realnego change:** żadna komenda z tej tabeli nie zwalnia z weryfikacji **klienta, aplikacji i return path**.
+
+---
+
+## 6.SOURCES. Bibliografia techniczna i pochodzenie przypadków
+
+### Źródła Juniper/HPE, na których oparto mechanizmy
+
+- [Junos Routing and Forwarding Tables](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-routing-forwarding-table-overview.html) — RIB, kernel, PFE.
+- [Routing Databases Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-protocols-routing-databases-overview.html) — active routes i forwarding.
+- [Understanding Route Preference Values](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/bgp/topics/concept/routing-protocols-default-route-preference-values.html) — domyślne values.
+- [Route Preferences Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-protocols-route-preferences-overview.html) — porównanie kandydatów i tiebreakers.
+- [Configure Static Routes](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/config_static-routes.html) — zweryfikowane przykłady IPv4 i IPv6.
+- [Static Route Preferences and Qualified Next Hops](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html) — multi-next-hop, fallback.
+- [Static Route Statements](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/static-edit-routing-options.html) — `reject`, `discard`, `next-table`, `resolve`, `retain`, `passive`.
+- [resolve statement](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/resolve-edit-routing-options.html) i [retain statement](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/retain-edit-routing-options.html) — incompatibility `resolve+retain`.
+- [BFD for Static Routes](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/bfd-static-routes.html) — ograniczenia detekcji.
+- [Routing Instances Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-instances-overview.html) i [Virtual Routing Instances on EX](https://www.juniper.net/documentation/us/en/software/junos/multicast-l2/topics/topic-map/virtual-routing-instances.html).
+- [show route CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route.html) — active/inactive/hidden.
+- [show route forwarding-table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
+- [show ipv6 neighbors](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-ipv6-neighbors.html) — ND/neighbor cache.
+- [Junos SRX Security Policies](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/topic-map/security-policy-configuration.html) — rozróżnienie routing i stateful policy.
+- [SRX Flow Processing](https://www.juniper.net/documentation/us/en/software/junos/flow-packet-processing/topics/topic-map/security-srx-devices-processing-overview.html) — flow/session i routing.
+- [Day One: Beginner's Guide to Learning Junos](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf) — oficjalny materiał szkoleniowy z przykładami routingu.
+- [Juniper Day One: Troubleshooting](https://www.juniper.net/documentation/en_US/day-one-books/topics/concept/troubleshooting.html) — rozróżnienie perspektyw RIB/FIB.
+- [VPCS manual (GNS3)](https://github.com/GNS3/vpcs/blob/master/man/vpcs.1) — ograniczenia i warianty IPv6 w laboratoriach VPCS (dlatego preferujemy Linux do statycznego IPv6).
+
+### Jak traktujemy pytania i gotchas
+
+Wykład zawiera **autorskie pytania problemowe** wyprowadzone z jawnych mechanizmów dokumentacji; nie twierdzimy, że zostały dosłownie skopiowane z oficjalnego egzaminu JNCIA/JNCIS/JNCIP. Nie korzystamy z exam dumps. Źródłowe przykłady producenta były inspiracją dla niezależnych sytuacji z Enterprise.
+
+Wyszukiwanie ujawniło kilkanaście ważnych gotchas, które zostały wyjaśnione **we właściwych sekcjach**, m.in. LPM vs preference, route hidden vs inactive, source route vs VRF, routing/ARP/flow separation, Junos BGP 170 vs Cisco AD, recursive next-hop, `resolve` vs `retain`, discard/reject, `no-readvertise` i floating static bez detekcji upstream.
+
+### Co jest zweryfikowane, a co pozostaje do sprawdzenia?
+
+**Zweryfikowano dokumentacyjnie:** semantykę RIB/FIB, wartości preference, interfejsowe Direct/Local, składnię podstawowych static IPv4/IPv6, kontekst virtual-router, kwalifikowane next-hopy, `discard/reject`, rozdzielenie ARP/ND oraz SRX security policies. Nie każdy wariant CLI jest identyczny na każdej generacji EX/QFX/MX/SRX.
+
+**Nie zweryfikowano runtime:** wersji vSRX i mapowania NIC, predefiniowanych aplikacji SRX w Twoim obrazie, polityk przepuszczających IPv6, host Linux firewall, EVE segmentów i rzeczywistego działania fault injections. Tylko rzeczywiste testy mogą przyznać status RUNTIME VALIDATED.
+
+Wszystkie diagramy Mermaid są autorskie i narysowane na potrzeby konkretnych mechanizmów. Nie dodawano dekoracyjnych zdjęć urządzeń, ponieważ do zrozumienia **lookup/next-hop/route preference** diagram procesu ma większą wartość niż fotografia chassis.
+
+---
+
+## 6.END. Epilog — wracamy do nowego site'u z dwoma uplinkami
+
+Na początku junior pokazał active static route, ale użytkownik ERP nadal nie działał. Teraz wiesz, że nie wystarczy powiedzieć „Junos wybrał Static/5”.
+
+Musisz zadać pytania:
+1. **Który routing context** używa pakiet z tego interfejsu?
+2. **Który najdłuższy prefix** w FIB pasuje do destination?
+3. **Która active route** została wybrana *dla tego prefixu* i jaka jest preference?
+4. **Jaki next-hop i egress** wskazuje FIB i czy ARP/ND go rozwiązuje?
+5. **Czy na SRX policy, flow i NAT** dopuszczają tę komunikację?
+6. **Czy droga powrotna** istnieje i czy aplikacja rzeczywiście działa od strony klienta?
+
+Jeżeli potrafisz odpowiedzieć na wszystkie sześć, masz fundament routingu, na którym można później zbudować OSPF, BGP, ECMP, route policies, filter-based forwarding i troubleshooting JNCIP-ENT.
+
+**Powiązanie z blueprintem:** 6.1–6.9 [A] → 6.10 [S] → 6.11 [LAB]. W rozdziale 7 rozwiniemy protocol-independent routing, RIB groups, FBF i zaawansowaną dystrybucję tras.  
+**Status materiału:** gotowy redakcyjnie do nauki i przeglądu. **LAB PLANNED / NOT RUNTIME VALIDATED.**
+
