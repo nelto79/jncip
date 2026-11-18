@@ -694,3 +694,206 @@ show arp
 **Do zrozumienia:** connected/local są skutkiem aktywnego adresu interfejsu, static — intencją administratora, default — najkrótszym dopasowaniem.  
 **Do przećwiczenia:** wyłącz port tranzytowy i porównaj status connected, static, FIB oraz sąsiadów.
 
+
+
+---
+
+## 6.8. Dynamic routing — dlaczego przy trzecim routerze zaczyna się rachunek kosztów administracyjnych? [A]
+
+### 6.8.1. Jedna trasa statyczna jest prosta. Trzysta tras statycznych to projekt utrzymaniowy.
+
+W małym biurze masz R1, R2 i dwie sieci. Statyczne `set routing-options static route` jest przejrzyste, bez wymiany protokołów i bez dodatkowej infrastruktury.
+
+Wyobraź sobie teraz firmę z 24 lokalizacjami. Każda dodaje VLAN, zmienia adresację albo dostaje drugi uplink WAN. W którym momencie administracja statycznymi trasami zamienia się w ryzyko?
+
+Za każdym razem, gdy nowy prefiks pojawi się w oddziale, trzeba zapewnić **jego rozpoznawalność w odpowiednich tablicach, poprawne trasy zwrotne i reakcję na awarie**. Bez automatycznej wymiany informacji możesz mieć dziesiątki zmian do wykonania w różnych miejscach, a jedna zapomniana trasa zwrotna popsuje usługę.
+
+Właśnie dlatego istnieją dynamiczne protokoły routingu. **Nie podejmują decyzji o trasie dla każdego pakietu**, lecz wymieniają informacje służące do budowania RIB.
+
+### 6.8.2. OSPF, IS-IS i BGP nie są trzema zamiennymi nazwami „dynamic route”
+
+**OSPF** to protokół link-state, popularny wewnątrz Enterprise. Routery budują wspólne wyobrażenie topologii w ramach odpowiednich obszarów, liczą SPF i instalują trasy. W Junos zobaczysz `show ospf neighbor`, `show ospf database` i wynik w `show route protocol ospf`. Konfiguracja i detale LSA/area type stanowią rozdział 9.
+
+**IS-IS** jest również link-state i ważny w bardziej rozbudowanych sieciach, częściej SP/core. Ma Level 1 i Level 2 oraz własny model LSDB. Szczegółowy kurs jest w rozdziale 10.
+
+**BGP** to path-vector, przydatny do wymiany prefiksów pomiędzy systemami autonomicznymi, ale również w dużych sieciach Enterprise, data center i WAN. BGP wybiera ścieżki przez atrybuty i policy, a wynik jest porównywany z innymi route sources. Rozdziały BGP rozwiną Local Preference, AS_PATH, MED, communities i route reflection.
+
+**Most z Cisco:** protokoły IP nie zmieniają podstaw dlatego, że pojawia się Junos. Natomiast **hierarchia konfiguracji, default preferences i routing-policy import/export** są inne.
+
+### 6.8.3. IGP kontra EGP — kontekst, nie tylko rozwinięcie skrótów
+
+**IGP** (Interior Gateway Protocol) służy do wymiany wiedzy w granicach kontrolowanej domeny routingu — zwykle OSPF lub IS-IS. **EGP** w praktyce nowoczesnych Enterprise to przede wszystkim BGP do sąsiedniej domeny/AS, chociaż iBGP działa również wewnątrz AS.
+
+Na przykład:
+- wewnątrz kampusu: OSPF dla core/distribution;
+- z dostawcą Internetu: BGP na WAN edge, jeśli jest odpowiednia potrzeba;
+- mały, pojedynczy branch: statyczna default route do SRX;
+- duży SD-WAN/cloud: mechanizmy dystrybucji tras zależne od konkretnej architektury i platformy.
+
+Nie wyprowadzaj jednak reguły „każdy kampus musi mieć OSPF”, bo nowoczesne EVPN-VXLAN i routed access zmieniają projekty, a niektóre biura świetnie działają na static routing.
+
+### 6.8.4. Dynamika nie oznacza natychmiastowej konwergencji
+
+Wyobraź sobie awarię primary link w sieci OSPF. Najpierw trzeba wykryć zmianę, zaktualizować relacje/topologię, obliczyć najlepszą drogę i zaprogramować forwarding. To zajmuje czas zależny od platformy, timerów i mechanizmów szybkiego wykrywania awarii.
+
+Statyczna trasa też nie jest „niezniszczalna”: przy fizycznym link down związany connected next-hop może stać się niekwalifikowany i route może zniknąć z FIB. Ale jeśli link do lokalnego routera ISP działa, a problem występuje **dalej** w jego sieci, sama statyczna trasa może wciąż być aktywna i prowadzić do blackhole.
+
+**Gotcha:** „link up” + „static active” nie dowodzi **end-to-end reachability**. To samo dotyczy dynamicznych protokołów, jeżeli błędnie ogłaszają osiągalność lub istnieje problem na warstwie aplikacji.
+
+### 6.8.5. Protokół dynamiczny dodaje własny rodzaj awarii
+
+Zamiast utrzymywania setek statycznych wpisów musisz utrzymywać:
+- sąsiedztwa i stany sesji;
+- timers i authentication;
+- polityki import/export;
+- filtrowanie prefiksów;
+- LSDB lub BGP Adj-RIB-In/Out;
+- zgodność route preference i redistribucji;
+- monitoring konwergencji oraz skalowalności RE/PFE.
+
+To jest **trade-off**, nie darmowy bonus. Jeśli nie umiesz przewidzieć zachowania statycznej route i jej next-hopa, konfiguracja BGP nie rozwiąże problemu, tylko go ukryje.
+
+### 6.8.6. Od statycznego labu do protokołów
+
+**Urządzenie: R1-vSRX — Operational Mode, odczyty przydatne także przy routingu dynamicznym**
+
+~~~junos
+show route summary
+show route protocol static
+show route protocol ospf
+show route protocol bgp
+show interfaces terse
+show system processes extensive
+~~~
+
+Jeżeli nie skonfigurowaliśmy OSPF i BGP, odpowiednie outputy mogą być puste — **jest to zamierzone**. W tym rozdziale **nie uruchamiamy protokołów dynamicznych tylko po to, by zobaczyć sąsiadów**, bo najpierw trzeba umieć odróżnić route selection, LPM i next-hop resolution.
+
+**Na pamięć:** OSPF/IS-IS to IGP link-state; BGP to path-vector.  
+**Do zrozumienia:** protokół wymienia informacje budujące RIB; nie zastępuje PFE ani polityk security.  
+**Do przećwiczenia:** wskaż w swoim HLD, gdzie static jest uzasadniona, gdzie dynamic routing ma sens i jaką awarię musi wykrywać.
+
+---
+
+## 6.9. Konfiguracja i monitorowanie podstawowych funkcji routingu [A]
+
+### 6.9.1. Nie zaczynaj od komendy — zacznij od opisu ruchu
+
+Zadanie od architekta: „Z biura A ma działać dostęp do sieci ERP `203.0.113.0/24` przez R2, a sieć serwerowa ma wiedzieć, jak odpowiedzieć do `192.0.2.0/24`. Dodatkowo sprawdź IPv6”.
+
+Jak dobry inżynier odpowiesz? Nie „ustawię route”, tylko rozbijesz wymaganie na siedem warunków:
+
+1. Czy interfejsy R1/R2 są w odpowiednim L3 kontekście?
+2. Czy connected route do transit jest aktywna?
+3. Czy R1 zna destination ERP?
+4. Czy R2 zna return path PC-A (lub ma właściwą default)?
+5. Czy next-hop IP jest poprawny?
+6. Czy ARP/ND działa w obu kierunkach?
+7. Czy ruch aplikacyjny jest dozwolony na SRX (security policy), a host firewall go przyjmuje?
+
+To jest jeden z najważniejszych wzorców troubleshootingu, który przeniesiesz na OSPF i BGP.
+
+### 6.9.2. Komendy weryfikacyjne ułożone jako łańcuch przyczynowy
+
+**Urządzenie: R1-vSRX — Operational Mode, pierwsza warstwa: interfejsy i RIB**
+
+~~~junos
+show version
+show interfaces terse
+show configuration interfaces | display set
+show route protocol direct
+show route protocol local
+show route protocol static
+show route 203.0.113.0/24 detail
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode, druga warstwa: forwarding i sąsiad**
+
+~~~junos
+show route forwarding-table destination 203.0.113.10
+show arp
+show ipv6 neighbors
+show route table inet6.0
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode, trzecia warstwa: ruch kontrolowany i SRX flow**
+
+~~~junos
+ping 198.51.100.2 source 198.51.100.1 count 5
+ping 203.0.113.10 source 192.0.2.1 count 5
+show security flow session
+show security policies
+~~~
+
+Jeżeli ping ze `source 192.0.2.1` się nie powiedzie, nie ignoruj go tylko dlatego, że ping z `198.51.100.1` działa. Pierwszy symuluje **inną sieć źródłową i return path**, chociaż nadal nie jest identyczny z ruchem z PC-A: jest generowany przez RE, z innym kontekstem security. **Test końcowy musi pochodzić z klienta.**
+
+### 6.9.3. Niektóre polecenia nie dają tego samego dowodu, choć wyglądają podobnie
+
+**`show configuration routing-options`** odpowiada „co zostało zapisane?”.  
+**`show route protocol static`** odpowiada „co rpd zna z static?”.  
+**`show route ... detail`** odpowiada „czy to active i jaki next-hop?”.  
+**`show route forwarding-table`** odpowiada „jaką forwarding instruction reprezentuje ten host/prefix?”.  
+**`show arp`** odpowiada „czy znam MAC sąsiada IPv4?”.  
+**`show security flow session`** odpowiada „co SRX wie o flows?”.  
+**`ping z PC`** odpowiada „czy klient widzi odpowiedź ICMP?”.  
+**`Test-NetConnection -Port 443`** odpowiada „czy klient otwiera TCP do aplikacji?”.
+
+Nie zastępuj ostatnich dwóch pojedynczym `show route`.
+
+### 6.9.4. Typowy błąd: zmiana jest w candidate, a operator diagnozuje active
+
+W Junos `set routing-options static ...` nie działa natychmiast. Jeśli w trybie `configure private` wprowadziłeś nową trasę, ale nie zatwierdziłeś jej, **operational `show route` nie musi nic o niej wiedzieć**. To osobna kategoria problemu niż brak next-hopa.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], przed zmianą**
+
+~~~junos
+show | compare
+commit check
+~~~
+
+Jeżeli diff pokazuje nowe `static route`, a `show route` nie, najpierw ustal, **czy commit rzeczywiście nastąpił**. Nie włączaj BGP, żeby „nauczyć” router trasy, która wciąż leży w candidate.
+
+### 6.9.5. Odczytaj szczegóły, zamiast zakładać, że `show route` zawsze wyświetla tylko active
+
+**Urządzenie: R1-vSRX — Operational Mode, weryfikacja wyboru**
+
+~~~junos
+show route table inet.0
+show route 203.0.113.0/24 extensive
+show route hidden
+show route summary
+show system commit
+~~~
+
+**Wniosek:** destination count może różnić się od routes count; zwracaj uwagę na `active`, `hidden`, next-hop, protocol source, preference i preference2. Podczas incydentu spróbuj odtworzyć **przyczynę decyzji**, a nie tylko stwierdzić „route jest”.
+
+### 6.9.6. Podstawowy runbook RIB/FIB/ARP — objaw „brak łączności”
+
+~~~mermaid
+flowchart TD
+  FAIL["PC-A nie dociera do ERP"] --> LINK{"Interfejsy up?\nConnected route obecne?"}
+  LINK -->|Nie| PHY["L1/L2/port, cabling, VLAN, unit"]
+  LINK -->|Tak| RIB{"Active route i właściwa tabela?"}
+  RIB -->|Nie| ROUTE["Static/default/instance,\nnext-hop resolve"]
+  RIB -->|Tak| FIB{"Forwarding-table i ARP/ND?"}
+  FIB -->|Nie| NBR["Link/peer/neighbor adjacency"]
+  FIB -->|Tak| FW{"SRX flow/policy i return path?"}
+  FW -->|Nie| SEC["Zones/policy/NAT/serwer"]
+  FW -->|Tak| APP["End-to-end klient TCP/aplikacja"]
+  PHY --> RIB
+  ROUTE --> FIB
+  NBR --> FW
+  SEC --> APP
+~~~
+
+**Most z Cisco:** operacyjny przebieg jest podobny do diagnostyki `show ip interface brief` → `show ip route` → `show ip cef` → `show arp` → ACL/CoPP/Firewall. W Junos trzeba jednak pamiętać o `routing-instances` i oddzielnej warstwie SRX flow.
+
+### 6.9.7. Przyporządkowanie wiedzy do ścieżki certyfikacji
+
+**JNCIA [A]**: rozumiesz connected, static, default, preference, LPM, RIB/FIB, polecenia `show` i podstawowe `routing-instances`.
+
+**JNCIS-ENT [S]**: samodzielnie konfigurujesz i troubleshootujesz floating/qualified static, trasy specjalne, next-hop resolve; przygotowujesz się do protocol-independent routing, policies i OSPF/IS-IS/BGP.
+
+**JNCIP-ENT [P]**: wykrywasz skutki konfiguracji w dużej topologii, analizujesz interplay RIB groups/FBF, policies, ECMP, BGP best-path, OSPF external i FIB; sprawdzasz rzeczywisty dataplane oraz projekt failover end-to-end.
+
+Nie twierdzimy, że szczegółowe warianty JNCIP już pojawiają się dosłownie jako pytania w JNCIA. Zamiast tego budujemy **jedną spójną drogę uczenia się**.
+
