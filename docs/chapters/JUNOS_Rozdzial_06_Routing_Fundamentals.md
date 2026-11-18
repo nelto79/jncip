@@ -226,3 +226,219 @@ Juniper [Day One Troubleshooting](https://www.juniper.net/documentation/en_US/da
 
 **Do przećwiczenia:** w labie 6.11 oddziel trzy awarie: brak static route, brak ARP po stronie next-hopa i security policy deny. Wszystkie mogą dać ping timeout, ale nie mają tej samej przyczyny.
 
+
+
+---
+
+## 6.4. Route preference — dlaczego Junos wybrał tę trasę, chociaż druga ma lepszy koszt? [A]
+
+### 6.4.1. Dwie drogi do tego samego prefiksu — tu działa preference
+
+Wyobraź sobie, że R1 zna `203.0.113.0/24` z dwóch źródeł:
+- **Static/5** przez `198.51.100.2`;
+- **OSPF/10** przez `198.51.100.6`.
+
+Dla **tego samego prefiksu w tej samej tablicy** Junos musi zdecydować, którego kandydata uznać za aktywnego. Domyślnie niższa **route preference** oznacza większe pierwszeństwo. Static z wartością 5 wygrywa więc z OSPF internal 10, zakładając że obie trasy są poprawne i kwalifikowane.
+
+Dobrze znasz pojęcie **Administrative Distance** w Cisco. Ale nie popełnij błędu „skoro liczby wyglądają podobnie, to wszystkie domyślne wartości są takie same”. Nie są.
+
+### 6.4.2. Prawdziwe wartości z dokumentacji producenta
+
+Tabelę warto znać dlatego, że wynika z niej codzienne zachowanie, np. sytuacja, w której OSPF external może przegrać z BGP, ale static ma jeszcze lepsze pierwszeństwo.
+
+| Route source | Domyślna preference Junos | Praktyczna interpretacja |
+|---|---:|---|
+| Directly connected | 0 | Połączony prefiks jest wysoko preferowany |
+| Local / connected host address | zwykle 0 | Host route do własnego adresu urządzenia |
+| Static | 5 | Często wygrywa z trasami dynamicznymi dla *tego samego prefixu* |
+| OSPF internal | 10 | OSPF intra/inter-area, w obrębie mechaniki protokołu |
+| IS-IS level 1 internal | 15 | Niżej niż OSPF internal przy porównywalnym prefixie |
+| IS-IS level 2 internal | 18 | Drugi poziom IS-IS |
+| RIP | 100 | Zwykle niżej niż OSPF/IS-IS |
+| Aggregate | 130 | Preferencja agregacji, nie automatycznie forwarding do konkretnego nexthopa |
+| OSPF external | 150 | Różna od OSPF internal |
+| BGP | 170 | **Junos ma domyślnie 170 dla BGP**, bez prostego podziału AD 20/200 Cisco |
+
+W tabeli podaję najbardziej użyteczne wartości dla Enterprise; **pełna tabela producenta** obejmuje także LSP, RSVP, LDP, system, router discovery i inne źródła. Źródło: [Understanding Route Preference Values](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/bgp/topics/concept/routing-protocols-default-route-preference-values.html).
+
+**Most z Cisco:**
+- Cisco connected = 0, static = 1, OSPF = 110, eBGP = 20, iBGP = 200 (typowe wartości IOS XE).
+- Junos direct = 0, static = 5, OSPF internal = 10, BGP = 170.
+
+**Najważniejszy gotcha:** **Junos BGP/170 nie oznacza, że eBGP jest gorszy od iBGP w wewnętrznym procesie wyboru ścieżek BGP**. To porównanie *route source* do innych protokołów przy instalacji w RIB, a nie cała logika BGP best-path. BGP nadal ma własne atrybuty (Local Preference, AS_PATH, MED itd.), które rozwiążemy w rozdziale o BGP.
+
+### 6.4.3. Preference to nie metric ani local-preference
+
+Mamy trzy różne pojęcia:
+- **Route preference** porównuje kandydatów do *tego samego prefiksu* w Junos RIB.
+- **OSPF metric/cost** wybiera drogę *wewnątrz OSPF*, zanim wynik zostanie porównany z innym source route.
+- **BGP Local Preference** jest atrybutem BGP, nie synonymem Junos route preference. Junos w szczegółowym outputcie może używać również pola `Preference2` dla tiebreakerów, a nie do tego samego celu co główna preference.
+
+Praktyczny eksperyment myślowy: do `203.0.113.0/24` dociera OSPF route cost 2 i BGP route LocalPref 500. Która wygra? **Bez dodatkowych zmian polityki globalnej preference Junos porównuje OSPF/10 z BGP/170 i zwykle aktywna będzie OSPF**, nawet jeśli BGP LocalPref jest bardzo wysoki. BGP LocalPref rozstrzyga między drogami *BGP*, nie automatycznie między BGP i OSPF.
+
+Dodatkowo dopuszczalność route ma znaczenie: nawet z preferencją 5 static route nie wygra, jeśli nie może zostać zakwalifikowana do active. **Niższa preference to nie immunitet na unresolved next-hop**.
+
+Źródło: [Route Preferences Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-protocols-route-preferences-overview.html).
+
+### 6.4.4. Weryfikacja rzeczywistego wyboru, nie tylko tabelki
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show route 203.0.113.0/24 extensive
+show route protocol static
+show route protocol ospf
+show route hidden
+~~~
+
+W laboratorium ze statycznymi trasami bez uruchomionego OSPF polecenie `show route protocol ospf` może być puste — **to prawidłowy wynik**, a nie błąd konfiguracji. Dla przykładu z konkurencją OSPF potrzebny jest oddzielny lab lub wcześniej skonfigurowane sąsiedztwo.
+
+**Ilustracja formatu, NIE rzeczywisty output:**
+
+~~~text
+203.0.113.0/24   *[Static/5]  ...
+                    > to 198.51.100.2 via ge-0/0/0.0
+                  [OSPF/10]   ...
+                    > to 198.51.100.6 ...
+~~~
+
+W rzeczywistym Junos output zależy od platformy i wersji. Sprawdź, gdzie znajduje się **gwiazdka** i jaki jest next-hop aktywnego route. Jeśli widzisz tylko jedną drogę, nie twórz w głowie nieistniejącej alternatywy.
+
+### 6.4.5. Floating static — kontrolowana droga zapasowa
+
+W Cisco używasz statycznej trasy z podwyższonym Administrative Distance, żeby pozostawała nieaktywna, gdy lepsze źródło działa. W Junos robisz to przez **`preference`**.
+
+Załóżmy, że OSPF dostarcza `203.0.113.0/24` z default preference 10. Chcesz static jako backup, aktywny dopiero gdy OSPF route zniknie.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], ilustracyjna dodatkowa route backupowa w LAB z istniejącym alternatywnym next-hopem**
+
+~~~junos
+set routing-options static route 203.0.113.0/24 next-hop 198.51.100.2
+set routing-options static route 203.0.113.0/24 preference 200
+show | compare
+~~~
+
+To nie tworzy OSPF i nie gwarantuje fizycznie drugiego uplinku. Aby scenariusz miał sens, OSPF route i obydwa next-hopy muszą **naprawdę istnieć**, a statyczna trasa mieć poprawny source i return path.
+
+**Gotcha:** floating static z wyższą preference nie zapewnia automatycznego **end-to-end failover**, jeśli primary gateway jest osiągalny L2, ale upstream blackholuje ruch. Do tego potrzebujesz świadomego mechanizmu wykrywania awarii: BFD, routing protocol, RPM/IP monitoring lub SLA tracking zależnie od platformy/release. Omówimy to dokładniej w punkcie 6.10 i rozdziale 7.
+
+### 6.4.6. Tiebreaker nie jest uniwersalnym „najniższy metric dla wszystkiego”
+
+Jeśli dwie trasy do tej samej sieci mają tę samą preference, wynik może zależeć od porządku tiebreakerów i protokołu. BGP ma własną procedurę best-path. Static route z wieloma next-hopami wymaga osobnego rozumienia `qualified-next-hop`.
+
+Dlatego **nie ucz się fałszywej reguły**: „w Junos zawsze niższy metric wygrywa po niższej preference”. To uproszczenie nie uwzględnia oddzielnych procesów routingu i właściwości kandydatów.
+
+**Na pamięć:** Static 5, OSPF internal 10, OSPF external 150, BGP 170; niższa preference wygrywa *dla tego samego prefiksu*.  
+**Do zrozumienia:** preference, metric i BGP Local Preference to różne mechanizmy.  
+**Do przećwiczenia:** przewiduj zmianę active route po zwiększeniu static preference, a następnie porównaj `show route` z FIB.
+
+---
+
+## 6.5. Longest Prefix Match — najważniejszy wyjątek od intuicji „niższa preference wygrywa” [A]
+
+### 6.5.1. Adres 203.0.113.74, trzy trasy, jedna odpowiedź
+
+Wyobraź sobie, że R1 zna:
+- `0.0.0.0/0`, static preference 5, next-hop ISP-A;
+- `203.0.113.0/24`, static preference 5, next-hop WAN-B;
+- `203.0.113.64/26`, BGP preference 170, next-hop WAN-C.
+
+Pakiet ma destination **`203.0.113.74`**. Która droga wygra?
+
+Częsta odpowiedź: „static/5, więc WAN-B”. **Błędna**, bo porównujesz prefiksy o różnej długości.
+
+Najpierw **dla każdego prefiksu** wybrano aktywną trasę. Teraz podczas forwarding FIB znajduje **najbardziej szczegółowy pasujący prefix**. `203.0.113.74` należy do `203.0.113.64/26`; jeśli trasa jest aktywna i zainstalowana, pakiet wybierze **WAN-C**, mimo route preference BGP 170. Preference nie porównuje /26 i /24 jako konkurentów „do tego samego prefiksu”.
+
+### 6.5.2. Narysujmy dwa etapy, zamiast uczyć się dwóch haseł
+
+~~~mermaid
+flowchart TD
+  C["Baza kandydatów RIB"] --> P0["0.0.0.0/0\nwybór active dla /0"]
+  C --> P24["203.0.113.0/24\nwybór active dla /24"]
+  C --> P26["203.0.113.64/26\nwybór active dla /26"]
+  P0 --> F["FIB z aktywnymi prefixami"]
+  P24 --> F
+  P26 --> F
+  D["Pakiet dest 203.0.113.74"] --> F
+  F --> LPM["Longest Prefix Match = /26"]
+  LPM --> NH["Next-hop / egress odpowiadający /26"]
+~~~
+
+**Etap A — RIB route selection:** jeśli dla **`203.0.113.0/24`** masz OSPF/10 i Static/5, wygrywa Static/5 dla /24.
+
+**Etap B — FIB LPM:** dla pakietu `203.0.113.74` /26 wygrywa nad /24, niezależnie od preference, bo **nie są to te same prefiksy**.
+
+W ten sposób możesz nauczyć się bardzo ważnej reguły bez zapamiętywania skomplikowanych algorytmów.
+
+### 6.5.3. Przypadki sprawdzające
+
+| Destination IP | Najdłuższy pasujący prefiks z przykładu | Forwarding |
+|---|---|---|
+| `203.0.113.74` | `203.0.113.64/26` | WAN-C |
+| `203.0.113.120` | `203.0.113.64/26` | WAN-C |
+| `203.0.113.130` | `203.0.113.0/24` | WAN-B |
+| `198.18.1.10` | `0.0.0.0/0` | ISP-A |
+
+`203.0.113.64/26` obejmuje adresy `203.0.113.64`–`203.0.113.127` (włącznie). To dlatego `.120` pasuje, a `.130` nie.
+
+**Gotcha:** **`0.0.0.0/0` jest również route**. Nie jest magiczną rezerwacją pierwszeństwa. To po prostu najmniej szczegółowy prefix pasujący do każdego IPv4 destination, jeżeli nie ma bardziej szczegółowego aktywnego route.
+
+### 6.5.4. Gotcha: bardziej szczegółowy discard/reject route może zablokować traffic pomimo poprawnego default
+
+Wyobraź sobie, że masz domyślną trasę do Internetu, ale również:
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit], tylko izolowany lab/test, świadomy drop do dokumentacyjnej podsieci**
+
+~~~junos
+set routing-options static route 203.0.113.64/26 discard
+show | compare
+~~~
+
+Co zrobi Junos z `203.0.113.74`? Wybierze /26 przez LPM i **odrzuci ruch**. Nie „spadnie” automatycznie do default `0.0.0.0/0`, bo specjalny route jest bardziej szczegółowy i aktywny.
+
+**Most z Cisco:** `ip route 203.0.113.64 255.255.255.192 Null0` wygrywa nad default w CEF. W Junos `discard` odrzuca bez standardowej odpowiedzi ICMP unreachable, podczas gdy `reject` generuje odpowiednią informację zwrotną zgodnie z implementacją. Czyli różnica semantyki discard vs reject jest **ważna operacyjnie**, nie tylko składniowo. Źródła: [Junos static route discard](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/discard-edit-routing-options.html), [static route statements](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/static-edit-routing-options.html).
+
+Jeśli `discard` służy np. ochronie przed routing loop w agregacji, trzeba to zaprojektować świadomie. Zbyt szeroki discard może spowodować blackhole całego site'u.
+
+### 6.5.5. Jak sprawdzić LPM na realnym Junos?
+
+**Urządzenie: R1-vSRX — Operational Mode, odczyt bez modyfikowania ruchu**
+
+~~~junos
+show route 203.0.113.74
+show route 203.0.113.64/26
+show route 203.0.113.0/24
+show route 0.0.0.0/0
+show route forwarding-table destination 203.0.113.74
+~~~
+
+Używaj zarówno polecenia wyszukującego destination, jak i odczytu konkretnych prefiksów. Wynik `show route` dla **host IP** bywa interpretowany inaczej niż dla **prefiksu**, zależnie od opcji `exact`, `longer` lub `all`. Jeśli nie jesteś pewien, odczytaj tablicę `inet.0` i sprawdź active prefix oraz FIB.
+
+**Eksperyment do przećwiczenia:** zacznij od default; dodaj /24 i zaobserwuj nowy forwarding; dodaj /26 i zaobserwuj zmianę tylko dla adresów z tej podsieci; następnie usuń /26 i sprawdź powrót do /24. W kolejnych ćwiczeniach pokażemy to na R1 i R2 bez niszczenia management.
+
+### 6.5.6. LPM i IPv6 działają analogicznie, lecz z inną rodziną tabel
+
+Dla IPv6 możesz mieć:
+- `::/0`;
+- `2001:db8::/32`;
+- `2001:db8:20::/64`;
+- `2001:db8:20::10/128`.
+
+Pakiet do `2001:db8:20::10` dopasuje /128, jeśli jest aktywny. Pamiętaj jednak, że IPv6 korzysta z ND, a nie ARP, i może wymagać innych security policies/ICMPv6.
+
+**Urządzenie: R1-vSRX — Operational Mode, read-only IPv6**
+
+~~~junos
+show route table inet6.0
+show route 2001:db8:20::10
+show route forwarding-table family inet6 destination 2001:db8:20::10
+show ipv6 neighbors
+~~~
+
+Jeśli dany release nie wspiera wariantu `family inet6` w tej dokładnej pozycji, użyj `show route forwarding-table ?` i dokumentacji modelu, zamiast powtarzać błędny wiersz. Nie nazywaj IPv6 testu PASS, jeśli host nie ma właściwej default route lub ND zawodzi.
+
+**Najważniejsza reguła całego rozdziału:**
+1. **Preference** wybiera active candidate do konkretnego prefiksu.
+2. **LPM** wybiera prefiks o największej długości dla adresu destination.
+3. **Resolved next-hop + forwarding + polityka** decydują, czy pakiet naprawdę dotrze.
+
