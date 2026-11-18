@@ -897,3 +897,221 @@ flowchart TD
 
 Nie twierdzimy, że szczegółowe warianty JNCIP już pojawiają się dosłownie jako pytania w JNCIA. Zamiast tego budujemy **jedną spójną drogę uczenia się**.
 
+
+
+---
+
+## 6.10. Static routes — warianty i troubleshooting [S]
+
+Ta część to **pomost do JNCIS-ENT**. Zwykłe `set routing-options static route ... next-hop ...` już znasz. Teraz odpowiemy na trudniejsze pytanie: **co stanie się z trasą, kiedy główny link przestanie działać, ktoś doda bardziej szczegółowy prefiks albo upstream blackholuje ruch?**
+
+### 6.10.1. Dwa next-hopy — skąd Junos wie, który jest primary?
+
+Przed sobą masz R1 połączony dwoma niezależnymi drogami do sieci ERP. Jedna idzie przez ISP-A, druga przez ISP-B. Obie prowadzą do tej samej destynacji `203.0.113.0/24`.
+
+~~~mermaid
+flowchart LR
+  R1["R1\nbiuro"] -->|"WAN-A\nnext-hop 198.51.100.2"| A["R2 / ISP-A"]
+  R1 -->|"WAN-B\nnext-hop 198.51.100.6"| B["R3 / ISP-B"]
+  A --> ERP["ERP\n203.0.113.0/24"]
+  B --> ERP
+~~~
+
+Jeśli tylko dopiszesz dwie równorzędne drogi, możesz uzyskać zachowanie inne niż oczekiwane „primary/backup”. Oficjalna dokumentacja Junipera tłumaczy, że w przypadku kilku next-hopów dla static route bez precyzyjnego ustalenia priorytetu **Junos może wybrać jeden z nich do FIB**, a nie automatycznie stosować deterministyczny primary/standby albo ECMP.
+
+Dla świadomego wyboru właściwym mechanizmem jest **`qualified-next-hop`**, który pozwala nadać każdemu next-hopowi oddzielne parametry, m.in. preference. Źródło: [Static Route Preferences and Qualified Next Hops](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html).
+
+### 6.10.2. `qualified-next-hop` — dwa progi dla jednej drogi
+
+Zakładamy **osobny** laboratorium three-router albo istniejący drugi transit link:
+- WAN-A: R1 `198.51.100.1/30` ↔ R2 `198.51.100.2/30`;
+- WAN-B: R1 `198.51.100.5/30` ↔ R3 `198.51.100.6/30`;
+- za R2/R3 dostępna jest sieć ERP.
+
+**Urządzenie: R1-EDGE — Configuration Mode [edit private], rozszerzony LAB z DWOMA rzeczywistymi next-hopami**
+
+~~~junos
+set routing-options static route 203.0.113.0/24 qualified-next-hop 198.51.100.2 preference 5
+set routing-options static route 203.0.113.0/24 qualified-next-hop 198.51.100.6 preference 25
+show | compare
+commit check
+~~~
+
+**Co tu się dzieje?** Dla tego samego prefixu preferowany jest kwalifikowany next-hop A o wartości 5, o ile jest eligible. Jeżeli przestanie być kwalifikowany, Junos może wybrać zapasowy B o preference 25. Ale to **nie oznacza**, że test aplikacji ERP automatycznie wykryje awarię gdzieś dalej niż lokalna osiągalność next-hopa.
+
+**Gotcha:** `qualified-next-hop preference 25` to nie to samo co globalna route preference 25 bez przypisania do next-hopa. Możesz ustawić globalną preference dla całej route, a następnie nadpisać ją dla konkretnych next-hopów. Nie mieszaj tych dwóch poziomów.
+
+**Urządzenie: R1-EDGE — Operational Mode, odczyt po zatwierdzeniu w oddzielnym LAB**
+
+~~~junos
+show route 203.0.113.0/24 extensive
+show route forwarding-table destination 203.0.113.10
+show interfaces terse
+show arp
+~~~
+
+Jeśli na R1 nie ma WAN-B ani interfejsu z reachability do `198.51.100.6`, **nie commituj przykładu jako testu failover**. Skonfigurowanie abstrakcyjnego backup address bez sieci nie jest prawdziwym scenariuszem redundancy.
+
+### 6.10.3. Czy static route potrafi rozpoznać awarię poza bezpośrednim sąsiadem?
+
+Odpowiedź brzmi: nie zawsze. Wyobraź sobie:
+- R1 → ISP-A działa fizycznie;
+- ISP-A potrafi odpowiedzieć na ARP i ping swojego next-hopa;
+- ale za ISP-A uszkodzony jest dalszy odcinek do ERP.
+
+Z punktu widzenia R1 **next-hop nadal jest osiągalny**, więc prosta static route może pozostać aktywna i blackholować traffic.
+
+To dlatego w realnym redundantnym WAN często łączysz static routing z mechanizmami detekcji:
+- **BFD** do odpowiedniego peer, jeśli obie platformy i usługa wspierają;
+- **RPM/IP monitoring** do testu odleglejszego punktu — ostrożnie, by nie zbudować błędnego failover na podstawie jednego ICMP;
+- **SLA tracking**, jeśli wspierany na konkretnym modelu/wydaniu;
+- dynamiczny routing (OSPF/BGP) z odpowiednimi timerami lub BFD.
+
+**Gotcha:** BFD do bezpośredniego next-hopa też nie wykrywa magicznie awarii serwera aplikacji 200 km dalej. Każdy mechanizm mierzy **określony zakres** dostępności. Źródło: [BFD for Static Routes](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/bfd-static-routes.html).
+
+### 6.10.4. `resolve` — rekursywny next-hop nie jest domyślnie tym samym co w Cisco
+
+Znasz z Cisco static route, której next-hop nie leży w directly connected subnet, ale router może ją rozwiązać dzięki innym wpisom w RIB. W Junos standardowa static route typowo oczekuje bezpośrednio rozwiązywalnego next-hopa. Gdy wskazujesz **indirect next-hop**, może być potrzebne jawne `resolve`.
+
+Przykład: R1 ma trasę IGP do `198.51.100.200/32` i chce użyć tego adresu jako pośredniego next-hopa dla `203.0.113.0/24`.
+
+**Urządzenie: R1-EDGE — Configuration Mode [edit private], przykład KONCEPCYJNY wymagający istniejącej drogi do 198.51.100.200**
+
+~~~junos
+set routing-options static route 203.0.113.0/24 next-hop 198.51.100.200
+set routing-options static route 203.0.113.0/24 resolve
+show | compare
+~~~
+
+Bez prawidłowej ścieżki do indirect next-hop przykład nie tworzy działającego forwardingu. To nie jest komenda do podstawowego labu 6.11, gdzie `198.51.100.2` jest bezpośrednim sąsiadem.
+
+**Niewygodny gotcha:** `resolve` pozwala rozstrzygnąć next-hop przez inne wpisy RIB; jeśli rozwiązywanie bazuje na nieodpowiednim default albo tworzy nieoczekiwany łańcuch zależności, routing może być błędny. Po wdrożeniu zawsze badaj **resolved next-hop i egress**, nie tylko samą obecność statycznej route.
+
+Kolejny oficjalny wyjątek: **`resolve` i `retain` nie mogą być skonfigurowane równocześnie na tej samej static route**. Wynika to z natury resolved next-hop: nie można obiecać zachowania bez rekalkulacji stanu, którego podstawą jest inna trasa. [resolve CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/resolve-edit-routing-options.html), [retain](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/retain-edit-routing-options.html).
+
+### 6.10.5. `discard` i `reject` — czy nadawca ma się dowiedzieć o odrzuceniu?
+
+Czasem potrzebujemy specjalnej trasy, która **świadomie nie kieruje ruchu dalej** — na przykład bezpieczny aggregate blackhole do ochrony przed pętlami.
+
+**Urządzenie: R1-EDGE — Configuration Mode [edit private], izolowany lab, świadomy blackhole**
+
+~~~junos
+set routing-options static route 198.18.0.0/15 discard
+show | compare
+~~~
+
+**`discard`** — pakiety pasujące do trasy są odrzucane bez typowego ICMP unreachable.  
+**`reject`** — pakiety są odrzucane, a system wysyła odpowiedni komunikat ICMP/ICMPv6 unreachable, z zastrzeżeniem ograniczeń platformy i filtrowania.
+
+**Urządzenie: R1-EDGE — Configuration Mode [edit private], alternatywa do osobnego eksperymentu, NIE łącz równocześnie z discard dla tego samego prefiksu**
+
+~~~junos
+delete routing-options static route 198.18.0.0/15 discard
+set routing-options static route 198.18.0.0/15 reject
+show | compare
+~~~
+
+**Most z Cisco:** droga Null0 przypomina discard (bez analogicznej gwarancji sposobu generowania ICMP na wszystkich platformach). W Junos odróżnij **routing-options static reject** od **routing policy action reject**, ponieważ to dwa zupełnie różne zastosowania słowa „reject”: pierwsze odrzuca **pakiety dopasowane do route**, drugie odrzuca **kandydata na trasę** w procesie polityki.
+
+**Gotcha w praktyce:** bardziej szczegółowy `discard /26` wygra przez LPM z default /0, nawet jeśli default ma świetną preference. Wyjaśniliśmy to w 6.5; wróć tam, jeśli intuicja mówi „ale static powinien przejść defaultem”.
+
+Źródła: [discard statement](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/discard-edit-routing-options.html), [Static Route Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/static-edit-routing-options.html).
+
+### 6.10.6. `no-readvertise` — czego **nie** zrobi sama static route?
+
+Wyobraź sobie sieć z OSPF, która eksportuje wybrane trasy statyczne. Chcesz zachować techniczną trasę lokalnie, ale **nigdy nie rozgłaszać jej do innych routerów**.
+
+**Urządzenie: R1-EDGE — Configuration Mode [edit private], tylko przy świadomym projekcie redystrybucji**
+
+~~~junos
+set routing-options static route 198.18.0.0/15 discard
+set routing-options static route 198.18.0.0/15 no-readvertise
+show | compare
+~~~
+
+**Gotcha:** standardowe trasy statyczne **nie zaczynają same z siebie rozgłaszać się przez OSPF lub BGP**. Do tego zwykle potrzebna jest odpowiednia eksportowa routing policy. `no-readvertise` wpływa na kwalifikację tej statycznej trasy do readvertisement; **nie jest poleceniem „wyłącz cały BGP”**. To częsty błąd przy migracji Cisco route-map/redistribution do Junos.
+
+Z drugiej strony `no-readvertise` nie oznacza, że route zostanie usunięta z lokalnej RIB/FIB. Nadal może działać lokalnie.
+
+Źródło: [readvertise/no-readvertise](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/readvertise-edit-routing-options.html).
+
+### 6.10.7. `retain` — czy trasa może przeżyć restart `rpd`?
+
+W niektórych szczególnych sytuacjach chcesz zachować static route w forwarding table, nawet gdy proces routingu `rpd` zostaje zatrzymany. Junos posiada **`retain`**. Nie należy jednak interpretować tego jako „gwarantowanego dostępu po awarii zasilania”.
+
+**Urządzenie: R1-EDGE — Configuration Mode [edit private], pokaz mechanizmu, NIE stosować bez analizy platformy**
+
+~~~junos
+set routing-options static route 198.18.0.0/15 discard
+set routing-options static route 198.18.0.0/15 retain
+show | compare
+~~~
+
+Według dokumentacji `retain` dotyczy zachowania informacji w forwarding table podczas pewnych zdarzeń restartu `rpd`/routingu. To **nie** jest mechanizm, który utrzyma fizyczny port up po odłączeniu światłowodu ani nie zastępuje GRES/NSR. Jego dokładna semantyka zależy od platformy, a użycie jest eksperckie.
+
+**Uwaga bezpieczeństwa:** wpis `discard` to trasa blackhole do dokumentacyjnego zakresu; w produkcji z innymi prefiksami mógłby spowodować nieplanowany outage. Pozostaw go wyłącznie w odizolowanym ćwiczeniu.
+
+### 6.10.8. `passive` — pozwól trasie pozostać nawet, gdy next-hop jest nieosiągalny?
+
+Dokumentacja Junos opisuje także `passive` dla statycznych tras. Może utrzymywać wpis route w RIB nawet wtedy, gdy next-hop jest niedostępny, a skutkiem może być **odrzucanie ruchu** do celu.
+
+To zachowanie stoi w sprzeczności z intuicją „trasa jest active, więc na pewno zadziała”. Używaj tego typu ustawień wyłącznie do konkretnych, zrozumianych scenariuszy. Nie dodajemy `passive` do produkcyjnego runbooka „żeby trasa nie znikała”, bo możesz maskować rzeczywisty problem reachability.
+
+**Urządzenie: R1-EDGE — Configuration Mode [edit private], koncepcyjny przykład, nie stosuj na produkcji**
+
+~~~junos
+set routing-options static route 203.0.113.0/24 next-hop 198.51.100.2
+set routing-options static route 203.0.113.0/24 passive
+show | compare
+~~~
+
+**Pytanie:** czy po utracie `198.51.100.2` klient ERP na pewno odzyska łączność, bo trasa nadal widnieje w table? **Nie.** Route visibility i realne forwarding reachability są odrębne.
+
+### 6.10.9. `next-table` — kiedy forwarding wchodzi do kolejnej tablicy
+
+Junos wspiera specjalny next-hop typu **`next-table`**. Taki route może kierować lookup do innej tablicy routingu. To już nie jest zwykła static route do adresu sąsiada.
+
+**Gotcha:** przy źle zaprojektowanym `next-table` możesz zbudować nieoczekiwane forwarding loop między tablicami albo przekierować ruch do niewłaściwego tenant context. Nie uczę tutaj gotowej konfiguracji inter-VRF leaking bez pełnego projektu, security enforcement i testów — szczegóły należą do rozdziału 7 o RIB groups i FBF.
+
+Dla JNCIS zapamiętaj tylko, że **next-hop nie musi zawsze oznaczać adresu IPv4**, może być także specjalnym działaniem (`discard`, `reject`, `next-table` itd.), ale **każdy ma inne skutki**.
+
+### 6.10.10. Static route troubleshooting — pięć pytań, zanim użyjesz `delete`
+
+**Scenariusz:** static `203.0.113.0/24` nie pojawia się jako active. Zacznij od pięciu pytań:
+
+1. Czy konfiguruje się ją w `inet.0`, `inet6.0` czy `NAME.inet.0`?
+2. Czy istnieje i jest aktywna **connected route do next-hopa** albo poprawna recursive resolution?
+3. Czy dla tego samego prefiksu istnieje lepsza route preference?
+4. Czy route jest hidden i jaki jest jej **reason**?
+5. Czy nawet aktywna route ma prawidłowy ARP/ND i allowed SRX flow?
+
+**Urządzenie: R1-vSRX — Operational Mode, diagnostyka static**
+
+~~~junos
+show configuration routing-options static | display set
+show route 203.0.113.0/24 extensive
+show route hidden
+show route forwarding-table destination 203.0.113.10
+show route 198.51.100.2
+show arp
+show security flow session
+~~~
+
+**Czego nie robisz:** nie dodajesz losowych statycznych tras do Internetu, nie wykonujesz `clear route` ani `restart routing` bez wskazania problemu, nie zmieniasz całej preference łącząc od razu z backup path.
+
+### 6.10.11. Jedna tabela, pięć wariantów static route — po wykładzie ma już sens
+
+| Wariant | Co zmienia | Najczęstszy błąd |
+|---|---|---|
+| `next-hop` | Wskazuje sąsiada | Adres niedostępny w kontekście RIB |
+| `preference` | Pierwszeństwo route dla danego prefixu | Mylenie z LPM lub OSPF cost |
+| `qualified-next-hop` | Parametry indywidualnych next-hopów | Zakładanie niezawodnego failover poza peer |
+| `resolve` | Umożliwia indirect next-hop resolution | Nieoczekiwane powiązanie z inną route |
+| `discard/reject` | Specjalne działania forwarding | Przypadkowy blackhole przez LPM |
+| `no-readvertise` | Ogranicza kwalifikację do eksportu | Przekonanie, że statyczne route domyślnie same się ogłaszają |
+| `retain/passive` | Specjalne zachowania retencji/osiągalności | Używanie jako substytutu zdrowego routingu |
+
+**Na pamięć:** qualified preference, `resolve`, `discard`, `reject`, `no-readvertise` i ograniczenie resolve+retain.  
+**Do zrozumienia:** wymiana jednej trasy na drugą jest tylko wtedy poprawna, gdy spełnione są warunki routing, next-hop, L2 i end-to-end service.  
+**Do przećwiczenia:** osobno test `qualified-next-hop` w rozszerzonym labie, `discard` w izolacji oraz celowo niekwalifikowany next-hop. Żaden z tych eksperymentów nie wymaga dotykania produkcyjnego WAN.
+
