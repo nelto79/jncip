@@ -442,3 +442,255 @@ Jeśli dany release nie wspiera wariantu `family inet6` w tej dokładnej pozycji
 2. **LPM** wybiera prefiks o największej długości dla adresu destination.
 3. **Resolved next-hop + forwarding + polityka** decydują, czy pakiet naprawdę dotrze.
 
+
+
+---
+
+## 6.6. Routing instances — dlaczego jeden switch może mieć kilka niezależnych map drogowych? [A]
+
+### 6.6.1. Jedno urządzenie, dwóch klientów, ten sam zakres IP
+
+Wyobraź sobie kampus obsługujący dwie firmy połączone wspólną infrastrukturą dystrybucyjną. Obie używają podsieci `10.10.10.0/24`. Jak jedna tablica miałaby wiedzieć, czy pakiet `10.10.10.40` należy wysłać do biura klienta A, czy do OT klienta B?
+
+Jedna globalna `inet.0` nie rozwiąże tego bez dodatkowego kontekstu. Junos pozwala utworzyć kilka **routing instances**, które utrzymują osobne tablice i niezależne decyzje.
+
+**Analogia:** masz dwa identyczne adresy ulicy, ale w dwóch miastach. Sam napis „ulica Leśna 10” nie wystarczy — musisz znać miasto. Routing instance jest właśnie takim *kontekstem miasta*.
+
+**Most z Cisco:** najbliżej jest Ci do **VRF-Lite** na Catalyst 9500 lub ISR oraz do `ip vrf forwarding`. Jednak w Junos pojęcie **routing instance** jest szersze niż jeden typ VRF: może mieć typ `virtual-router`, `vrf` (w kontekście usług VPN), `forwarding`, `virtual-switch`, `evpn` i inne zależnie od platformy. Nie zakładaj, że każdy typ wymaga tego samego zestawu parametrów.
+
+### 6.6.2. `virtual-router` to rozsądny przykład do nauki podstaw
+
+W prostym enterprise VRF-Lite możemy użyć `instance-type virtual-router` i przypisać do niej logiczny interfejs. Nie jest to jeszcze MPLS L3VPN; tutaj nie potrzebujemy automatycznie `route-distinguisher` ani `vrf-target`.
+
+W labie dodatkowym mamy osobny port `ge-0/0/2.0` i sieć `198.18.30.0/24`, **nieużywaną w podstawowej topologii 6.11**. Jest to przykład osobny, którego nie należy doklejać do aktywnej konfiguracji produkcyjnej.
+
+**Urządzenie: LAB-R3-vSRX — Configuration Mode [edit private], dodatkowy izolowany eksperyment virtual-router**
+
+~~~junos
+set interfaces ge-0/0/2 unit 0 family inet address 198.18.30.1/24
+set routing-instances LAB-IOT instance-type virtual-router
+set routing-instances LAB-IOT interface ge-0/0/2.0
+show | compare
+commit check
+~~~
+
+**Co chcemy osiągnąć?** Po commit połączona sieć `198.18.30.0/24` powinna znaleźć się w **`LAB-IOT.inet.0`**, a nie w globalnej `inet.0`. Jeżeli urządzenie jest SRX, przypisanie interfejsu do instancji routingu nie zastępuje konfiguracji **security zone**, policy i host-inbound. Na EX/QFX interfejs może być IRB z odpowiednim VLAN.
+
+**Urządzenie: LAB-R3-vSRX — Operational Mode, po świadomym zatwierdzeniu osobnego LAB**
+
+~~~junos
+show route table LAB-IOT.inet.0
+show route table inet.0
+show configuration routing-instances LAB-IOT | display set
+show interfaces ge-0/0/2 terse
+~~~
+
+**Podchwytliwe pytanie:** czy samo `set routing-instances LAB-IOT instance-type virtual-router` wystarczy, by pojawiły się trasy do konkretnych interfejsów? **Nie** — trzeba przypisać interfejsy/protokoły/trasy w odpowiednim kontekście. Podobnie jak w Cisco tworzenie pustej VRF nie przenosi do niej wszystkich portów.
+
+Źródło: [Virtual Routing Instances on EX](https://www.juniper.net/documentation/us/en/software/junos/multicast-l2/topics/topic-map/virtual-routing-instances.html), [Routing Instances Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-instances-overview.html).
+
+### 6.6.3. Static route w virtual-router nie powinna „przypadkiem” trafić do global
+
+Załóżmy, że LAB-IOT ma własną bramę `198.18.30.254`. Chcemy default **tylko w tej instancji**, bez dotykania globalnej `inet.0`.
+
+**Urządzenie: LAB-R3-vSRX — Configuration Mode [edit private], wyłącznie gdy next-hop 198.18.30.254 faktycznie istnieje**
+
+~~~junos
+set routing-instances LAB-IOT routing-options static route 0.0.0.0/0 next-hop 198.18.30.254
+show | compare
+commit check
+~~~
+
+**Urządzenie: LAB-R3-vSRX — Operational Mode, test właściwej tabeli**
+
+~~~junos
+show route table LAB-IOT.inet.0
+show route table inet.0
+ping 198.18.30.254 routing-instance LAB-IOT count 5
+~~~
+
+Jeżeli w labie nie ma hosta/bramy `198.18.30.254`, **nie zaliczaj ping jako PASS**. Co więcej, sama aktywna default route w instancji nie daje automatycznie łączności z globalną siecią — do tego potrzebujesz jawnej drogi i odpowiedniego routingu po stronie następnego urządzenia.
+
+**Gotcha:** w Cisco łatwo zapomnieć `vrf` w extended ping. W Junos równie łatwo wykonać `ping` w niewłaściwej instancji. Błędna próba z `inet.0` nie dowodzi awarii VRF.
+
+### 6.6.4. `virtual-router` vs `vrf` vs `forwarding` — nie są synonimami
+
+**Virtual-router** daje niezależny kontekst routingu, odpowiedni np. dla prostej izolacji Enterprise.
+
+**VRF** w terminologii Junos jest również **konkretnym instance-type** często związanym z usługami VPN i wymaganiami RD/import/export, a nie jedynie potocznym synonimem każdej izolowanej tablicy.
+
+**Forwarding instance** ma zastosowania specjalne, m.in. Filter-Based Forwarding. Nie budujemy tu standardowej tablicy klienta jak przy `virtual-router`.
+
+**No-forwarding** może służyć do utrzymywania informacji routingu bez klasycznego przekazywania transit w danej instancji — znów inny model.
+
+**Most z Cisco:** VRF-Lite, MPLS L3VPN i PBR/route-map mogą dotyczyć izolacji i kierowania ruchu, ale na Junos realizuje się je **różnymi konstrukcjami**. Złożone route leaking, RIB groups, FBF i VPN omawiamy w rozdziale 7 oraz kolejnych.
+
+### 6.6.5. Dlaczego niezależna instancja nie oznacza automatycznego firewall segmentation?
+
+Dwie routing instances mogą odizolować **wybór tras**, ale nie zastępują security policy/NAC/firewall rules. Na SRX przepływ jest rozstrzygany również przez strefy i sesje. Na EX instancje nie zapewniają samoczynnie tego samego zestawu zabezpieczeń co firewall.
+
+Przy projektowaniu sieci produkcyjnej rozdziel:
+1. Routing table separation.
+2. Inter-VRF communication / route leaking.
+3. Security enforcement.
+4. Management access / observability.
+
+**Szczególnie ważny gotcha:** `system management-instance` i `mgmt_junos` są **specjalnym mechanizmem zarządzania**. Nie traktuj `mgmt_junos` jak dowolnej virtual-router, którą przeniesiesz do innego context jednym poleceniem. Zmiana management routing może jednocześnie odciąć SSH, TACACS+, NTP i syslog — w rozdziale 4 opisaliśmy dlaczego.
+
+~~~mermaid
+flowchart TB
+  R["Jedno urządzenie Junos"] --> G["Global: inet.0 / inet6.0"]
+  R --> A["LAB-IOT: LAB-IOT.inet.0"]
+  R --> B["CUSTOMER-B: CUSTOMER-B.inet.0"]
+  R --> M["Opcjonalne OOB: mgmt_junos.inet.0"]
+  A -. "Brak automatycznego leaking" .-> G
+  B -. "Brak automatycznego leaking" .-> A
+~~~
+
+**Na pamięć:** `routing-instances NAME instance-type virtual-router`, `interface`, `routing-options`, `show route table NAME.inet.0`.  
+**Do zrozumienia:** routing instance jest kontekstem decyzji, a nie samym ACL.  
+**Do przećwiczenia:** utwórz osobną tabelę na dodatkowym portcie w odseparowanym labie i pokaż, że jej trasy nie pojawiły się automatycznie w `inet.0`.
+
+---
+
+## 6.7. Connected, static i default routes — trzy rodzaje wiedzy o drodze [A]
+
+### 6.7.1. Connected route nie jest poleceniem `ip route`
+
+Na Cisco, gdy przypisujesz `10.10.10.1/24` do interfejsu L3, system tworzy connected `10.10.10.0/24` i local host route `10.10.10.1/32`. Junos ma analogiczny mechanizm, lecz konfigurujesz **`interfaces ... unit ... family inet address`**.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB IPv4**
+
+~~~junos
+set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24
+show | compare
+commit check
+~~~
+
+Po prawidłowym commit, gdy logical interface spełnia warunki aktywności, powinna pojawić się:
+- trasa bezpośredniej sieci `192.0.2.0/24` z source `Direct/0`;
+- trasa lokalnego adresu interfejsu `192.0.2.1/32` z `Local/0`.
+
+**Gotcha:** `192.0.2.1/32` local nie jest dynamiczną trasą, którą Junos „otrzymał z sieci”. To lokalny adres hosta routera. Za to destination do `192.0.2.10` może pasować do connected /24 i wymagać ARP.
+
+**Urządzenie: R1-vSRX — Operational Mode, po commit i aktywacji portu**
+
+~~~junos
+show interfaces ge-0/0/1 terse
+show route protocol direct
+show route protocol local
+show route 192.0.2.0/24
+show route 192.0.2.1/32
+show arp
+~~~
+
+Zwróć uwagę, że **interfejs administracyjnie down** może uniemożliwić pojawienie się normalnej aktywnej connected route. Sam adres zapisany w config nie gwarantuje działania.
+
+### 6.7.2. Static route to świadome polecenie administratora
+
+Chcemy osiągnąć sieć `203.0.113.0/24` za sąsiednim R2 o adresie `198.51.100.2`.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], prosty IPv4 static**
+
+~~~junos
+set routing-options static route 203.0.113.0/24 next-hop 198.51.100.2
+show | compare
+commit check
+~~~
+
+Odpowiednik ideowy Cisco:
+
+**Urządzenie: CISCO-R1 — Cisco IOS XE Global Configuration Mode, porównanie składni**
+
+~~~cisco
+ip route 203.0.113.0 255.255.255.0 198.51.100.2
+~~~
+
+Na Junos konfiguracja trafia do candidate; na typowym Cisco IOS XE polecenie konfiguracji może wpłynąć na running state od razu. To różnica sposobu zarządzania, nie działania IP forwarding.
+
+**Gotcha:** static route do next-hop, który nie jest osiągalny jako kwalifikowany next-hop, może nie pojawić się jako active. Junos nie musi od razu powiedzieć „syntax error”; składnia IP jest poprawna, ale logiczna droga może być nieosiągalna. [Configure Static Routes](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/config_static-routes.html).
+
+### 6.7.3. Default route to route do wszystkiego — gdy nie znam nic bardziej szczegółowego
+
+Wyobraź sobie niewielki oddział, który ma tylko jedno wyjście WAN. Nie musi znać tysiąca prefiksów centrali. Wystarczy default `0.0.0.0/0` do R1.
+
+**Urządzenie: R2-vSRX — Configuration Mode [edit private], IPv4 default przez R1**
+
+~~~junos
+set routing-options static route 0.0.0.0/0 next-hop 198.51.100.1
+show | compare
+commit check
+~~~
+
+**Co nie wynika z tego polecenia?** Że R1 zna sieć docelową, że R1 jest Internet gateway albo że R2 będzie miał ruch NATowany. Default route to tylko **instrukcja next-hop** dla prefiksów, które nie mają bardziej szczegółowej trasy. Nie generuje automatycznie security policies ani NAT.
+
+### 6.7.4. Brak default u R1, default u R2 — poprawny i często spotykany projekt
+
+W labie R1 pełni rolę „provider side” i ma statyczną drogę **do konkretnej sieci R2**. R2 pełni rolę „branch” i ma default **do R1**. To asymetria konfiguracji routingu, ale **nie problem asymetrycznego forwardingu**, ponieważ obie strony nadal mają poprawne trasy do siebie.
+
+**R1:** `203.0.113.0/24 via 198.51.100.2`.  
+**R2:** `0.0.0.0/0 via 198.51.100.1`.
+
+Pamiętaj, że R2 posiada także własną connected `203.0.113.0/24` i transit `198.51.100.0/30` — dla takich destinations LPM preferuje connected, nie default.
+
+**Urządzenie: R2-vSRX — Operational Mode, oczekiwane konsekwencje**
+
+~~~junos
+show route 0.0.0.0/0
+show route 192.0.2.10
+show route 203.0.113.0/24
+~~~
+
+### 6.7.5. Dual-stack: static IPv6 to nie dodatkowa opcja na IPv4 route
+
+Na Junos IPv6 unicast static route konfigurujesz w odpowiedniej RIB, typowo przez **`routing-options rib inet6.0 static`**. To jest ważna różnica składni względem zwykłego IPv4 `routing-options static`.
+
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], interfejs i IPv6 static do sieci R2**
+
+~~~junos
+set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:12::1/64
+set routing-options rib inet6.0 static route 2001:db8:20::/64 next-hop 2001:db8:12::2
+show | compare
+commit check
+~~~
+
+**Urządzenie: R2-vSRX — Configuration Mode [edit private], interfejs i IPv6 default do R1**
+
+~~~junos
+set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:12::2/64
+set routing-options rib inet6.0 static route ::/0 next-hop 2001:db8:12::1
+show | compare
+commit check
+~~~
+
+**Most z Cisco:** `ipv6 route 2001:db8:20::/64 2001:db8:12::2` działa na podobnej zasadzie; w Junos jawnie wskazujesz `rib inet6.0`. [Juniper official IPv4/IPv6 static examples](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/config_static-routes.html).
+
+**Gotcha:** ruch IPv6 wymaga także poprawnej **ND (Neighbor Discovery)** i IPv6 security policy. Nie zakładaj, że działający IPv4 ARP/ping dowodzi IPv6 connectivity.
+
+**Urządzenie: R1-vSRX — Operational Mode, po konfiguracji IPv6**
+
+~~~junos
+show route table inet6.0
+show ipv6 neighbors
+ping 2001:db8:12::2 count 5
+~~~
+
+### 6.7.6. Weryfikacja static route — co dokładnie sprawdzać?
+
+**Urządzenie: R1-vSRX — Operational Mode, po commit**
+
+~~~junos
+show configuration routing-options | display set
+show route protocol static
+show route 203.0.113.0/24 detail
+show route forwarding-table destination 203.0.113.10
+show interfaces ge-0/0/0 terse
+show arp
+~~~
+
+**Przewidywanie wyniku:** jeśli interfejs transit działa i next-hop jest prawidłowy, powinna pojawić się active static route. Ale nie oznacza to jeszcze, że SRX security policy przepuszcza PC-A → PC-B. Stąd dodatkowe `show security flow session` i test z klienta w labie 6.11.
+
+**Na pamięć:** IPv4 static `routing-options static route`, IPv6 static `routing-options rib inet6.0 static route`; default `0.0.0.0/0` i `::/0`.  
+**Do zrozumienia:** connected/local są skutkiem aktywnego adresu interfejsu, static — intencją administratora, default — najkrótszym dopasowaniem.  
+**Do przećwiczenia:** wyłącz port tranzytowy i porównaj status connected, static, FIB oraz sąsiadów.
+
