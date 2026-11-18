@@ -1786,3 +1786,159 @@ W pliku `VERIFY.md` wymagaj dla każdego ćwiczenia:
 
 **Dopóki nie ma realnego odczytu EVE, nie nadawaj testowi PASS.**
 
+
+
+---
+
+## 7.EXT. Warsztat projektowy — jak wykorzystać te mechanizmy przy budowie nowego site'u Enterprise?
+
+### 7.EXT.1. Nie dobieraj technologii, zanim nie rozpoznasz wymagania
+
+Wyobraź sobie warsztaty HLD dla nowego biura na 800 użytkowników. Architekt pokazuje dwa uplinki, cztery sieci VLAN, jedno połączenie VPN do centrali i żądanie „rozłóżmy traffic między łączami”.
+
+Żeby nie zaprojektować rozwiązania, które dobrze wygląda wyłącznie w prezentacji, zadaj pytania:
+- Czy wymagane jest **load sharing**, czy wyłącznie **redundancy/failover**?
+- Czy drugi ISP musi obsługiwać specyficzny ruch, np. backup/M365/guest, czy dowolny ruch?
+- Czy mają pozostać **stałe source IP** i symetryczny egress dla stateful firewalla?
+- Czy oba łącza mają to samo SLA, latency, QoS i przepustowość?
+- Czy policy musi działać dla IPv6?
+- Czy urządzenie wybrane w BOM jest **EX/QFX/MX/SRX** i na którym release ma wspierany FBF, RIB group i hash?
+- Czy po awarii ISP-B ruch powinien **automatycznie wrócić na A**, czy zostać zablokowany z powodów polityki bezpieczeństwa?
+
+Rozdział 1 omawiał portfolio access/distribution/core/security/WAN. Tutaj wiesz już, że **wybór feature musi być poparty macierzą model/release i możliwościami PFE**, nie tylko napisem „Junos” na pudełku.
+
+### 7.EXT.2. Trzy architektury mogą wyglądać podobnie na diagramie, ale działają inaczej
+
+**Wariant A — zwykły default plus backup:** jedna preferowana default via ISP-A, druga z wyższą route preference via ISP-B. To jest prosty failover, a nie active/active load balancing. Musisz zadbać o wykrywanie awarii poza lokalnym next-hop.
+
+**Wariant B — ECMP:** dwie równorzędne drogi do tego samego destination. Jeżeli źródło tras i platforma wspierają multipath, a odpowiednia forwarding policy instaluje kilka next-hopów, ruch może być dzielony przez hash. Ale **jeden duży flow** może pozostać na jednym łączu.
+
+**Wariant C — FBF:** filtr klasyfikuje źródło/protokół/DSCP i kieruje pakiety do odrębnego routing context, np. guest na ISP-B, office na ISP-A. Nie jest to automatyczny load balancing i wymaga starannie zaprojektowanej obsługi utraty ISP-B, policy/NAT i return path.
+
+W praktyce te warianty mogą się łączyć, ale każda kolejna warstwa komplikuje troubleshooting.
+
+~~~mermaid
+flowchart TD
+  GOAL["HLD: dwa WAN"] --> Q{"Co chcemy osiągnąć?"}
+  Q -->|Primary/backup| FLOAT["Floating static / dynamic protocol\nplus failure detection"]
+  Q -->|Wiele równorzędnych flows| ECMP["ECMP + forwarding-table policy\nhash fields + test wielu flows"]
+  Q -->|Konkretny rodzaj/source ruchu| FBF["FBF + forwarding instance\nRIB group + security path"]
+  FLOAT --> POST["Pre/post: oba kierunki ruchu\nweryfikacja klienta"]
+  ECMP --> POST
+  FBF --> POST
+~~~
+
+### 7.EXT.3. FBF bez failover planu może obniżyć dostępność
+
+Często pojawia się na spotkaniach architektonicznych zdanie: „Nie chcemy, żeby aplikacje backupowe zapychały WAN-A. Przekierujmy je przez WAN-B”. Brzmi sensownie. A co się stanie, gdy WAN-B przestanie działać, ale jego interfejs nadal będzie fizycznie `up`?
+
+Jeśli FBF instance ma tylko default via B, ruch backupowy będzie próbował tam wychodzić. **RIB group z connected routes nie tworzy automatycznie health-check do zdalnej aplikacji.** Może być potrzebny BFD, routing dynamiczny, mechanizm RPM/monitorowania i dodatkowa fallback route w kontekście FBF, zależnie od release oraz ryzyka.
+
+Zanim zatwierdzisz projekt, odpowiedz:
+- czy awaria WAN-B ma powodować **failover** na WAN-A, czy świadome **fail-closed**?
+- czy w obu stanach ruch nie omija inspekcji?
+- czy operator B musi mieć osobny source NAT publiczny?
+- czy klient akceptuje przerwę sesji po failover?
+
+**Most z Cisco:** dokładnie taki sam problem może wystąpić z PBR route-map bez poprawnego tracking. Reguła „przekieruj wybrane pakiety” nie zapewnia automatycznie obsługi wszystkich awarii.
+
+### 7.EXT.4. Nie traktuj aggregate jako zastępstwa pełnej dokumentacji reachability
+
+Załóżmy, że w nowym kampusie masz:
+- Building-A: `10.60.10.0/24`;
+- Building-B: `10.60.20.0/24`;
+- przyszłą rezerwację pod Building-C: `10.60.30.0/24`;
+- summary `10.60.0.0/16`.
+
+Dzięki aggregate możesz reklamować /16, ale jeżeli Building-C **jeszcze nie istnieje**, pakiet do `10.60.30.20` prawdopodobnie trafi w aggregate reject. To jest poprawny, przewidywalny efekt. Nie przesuwaj ticketu do „server team” bez sprawdzenia, czy subnet naprawdę został wdrożony jako contributor.
+
+Przy HLD i change tracking przechowuj:
+- wszystkie podsieci składowe;
+- ich rzeczywistą lokalizację i rolę;
+- next-hop / routing source;
+- status ogłoszenia summary;
+- impact po utracie jednego contributor;
+- politykę drop dla brakujących podprefiksów.
+
+### 7.EXT.5. Bezpieczeństwo danych i szczególne pułapki przy kopiowaniu konfiguracji
+
+RIB groups i FBF mogą dotknąć **izolacji klientów**, dlatego powinny być przeglądane razem z zespołem Security/Architecture. Jeśli skopiujesz do `FBF-ALT.inet.0` wszystkie connected, możesz ujawnić w tej tablicy także subnets management/OT. Samo widzenie route nie zawsze daje pełną komunikację, ale zmienia możliwość rozwiązywania next-hop i warunki późniejszego forwardingu.
+
+**Najlepsza praktyka:** na poziomie blueprintu nie traktuj „routing-table leaking” jako wyłącznie ćwiczenia z syntax. To **zmiana modelu trust boundaries**, którą trzeba pokazać na schemacie i zatwierdzić.
+
+---
+
+## 7.FIELD. Mapa poleceń do pracy w incydencie — już po pełnej lekcji
+
+| Gdy pytasz... | Odczyt Junos | Co może zmylić |
+|---|---|---|
+| Czy summary naprawdę istnieje? | `show route 10.60.0.0/16 extensive` | Nie każda skonfigurowana aggregate jest active |
+| Jakie trasy stanowią contributors? | `show route table inet.0`, specific longer routes | Contributor musi być aktywny, bardziej szczegółowy |
+| Czy generated ma forwarding next-hop? | `show route 10.70.0.0/16 extensive` | Obie rodziny mogą pokazywać `Aggregate/130` |
+| Dlaczego prefix wygląda na niemożliwy? | `show route martians`, `show route hidden` | Martian ≠ firewall packet filter |
+| Co wie global? | `show route table inet.0` | FBF może korzystać z innej RIB |
+| Co wie FBF? | `show route table FBF-ALT.inet.0` | Default bez connected resolution to za mało |
+| Czy RIB group działa? | `show configuration routing-options rib-groups` | Sama definicja bez attachment nie działa |
+| Jakie są connected w secondary? | `show route table FBF-ALT.inet.0` | Wsparcie i route-types zależą od platformy |
+| Czy FBF filter jest przypięty? | `show configuration interfaces ge-0/0/1` | Filter bez ingress attachment nie ma wpływu |
+| Czy pozostałe pakiety są przyjęte? | `show configuration firewall family inet filter CH07-PBR` | Brak końcowego `accept` może dropować |
+| Czy FIB zna ECMP? | `show route forwarding-table destination IP` | Multiple candidates w RIB ≠ multi-next-hop w PFE |
+| Czy ECMP rzeczywiście dzieli ruch? | Capture/counters na obu egress | Jedno ICMP flow to zły test |
+| Czy SRX policy przepuszcza? | `show security flow session`, `show security policies` | Stateless accept ≠ stateful permit |
+| Czy po rollbacku działa klient? | Ping/TCP z dwóch odrębnych PC | Ping z RE nie zastępuje testu end-to-end |
+
+---
+
+## 7.SOURCES. Weryfikacja w dokumentacji producenta i pochodzenie pytań
+
+**Oficjalne źródła Juniper/HPE:**
+
+1. [Route Aggregation](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/config-route-aggregation.html) — contributing routes, aggregate default reject, summary export.
+2. [Conditionally Generated Routes](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/concept/policy-generated-routes.html) — generated next-hop based on primary contributor.
+3. [Aggregate/Generated Preference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/preference-edit-routing-options.html) — default 130.
+4. [Martian Address Recognition](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/recognize-martian-addr-routing.html) i [show route martians](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-martians.html) — permitted/disallowed scopes i format exact/orlonger.
+5. [Routing Instances Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-instances-overview.html) — virtual-router, forwarding, vrf i inne typy.
+6. [RIB Groups CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/rib-groups-edit-routing-options.html), [import-rib](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/import-rib-edit-routing-options.html), [interface-routes](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/interface-routes-edit-routing-options.html) — primary/secondary, attachment, EX limitations.
+7. [Juniper Introduction to RIB Groups, Technical Note](https://www.juniper.net/documentation/us/en/software/nce/rg-understanding-tn/rg-understanding-tn.pdf) — import/export model oraz wykorzystanie przy FBF.
+8. [Per-Flow Load Balancing](https://www.juniper.net/documentation/us/en/software/junos/sampling-forwarding-monitoring/topics/concept/policy-configuring-per-flow-load-balancing.html), [Per-Packet Load Balancing](https://www.juniper.net/documentation/us/en/software/junos/sampling-forwarding-monitoring/topics/concept/policy-configuring-per-packet-load-balancing.html) — nazwy opcji a realny per-flow hash.
+9. [hash-key](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/hash-key-edit-forwarding-options.html) — fields do hashing i ograniczenia PFE.
+10. [Filter-Based Forwarding — konfiguracja](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/example/filter-based-forwarding-example.html), [FBF Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-option-filter-based-forwarding-overview.html), [FBF by source](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/example/firewall-filter-option-filter-based-forwarding-example.html).
+11. [FBF limitations on ACX](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/filter-based-forwarding-acx-series.html) — niedozwolone kombinacje term actions i IPv6 L4 restrictions, jako **platform-specific przykład**, nie ogólna zasada dla wszystkich.
+12. [Understanding FBF on EX](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/filter-based-forwarding-ex-series.html) oraz [Feature Explorer](https://apps.juniper.net/feature-explorer/).
+13. [Advanced Policy-Based Routing for SRX](https://www.juniper.net/documentation/us/en/software/junos/application-identification/topics/topic-map/security-application-advanced-policy-based-routing.html) — osobna ścieżka przy określonych family/release.
+14. [show route forwarding-table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html) — ograniczenia interpretacji FIB i next-hop.
+15. [show route advertising-protocol](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-advertising-protocol.html) — rozróżnienie RIB route i rzeczywistego protokolarnego export.
+
+**Rzeczywiście opublikowane pytania/dyskusje Juniper Community:**
+- [Aggregate VS Generate routes](https://community.juniper.net/discussion/aggregate-vs-generate-routes) — autentyczne pytanie o podobieństwa, pref 130 i identyczną etykietę Aggregate.
+- [Aggregate Routes vs Generated Routes](https://community.juniper.net/discussion/aggregate-routes-vs-generated-routes?hlmlt=VT) — analiza domyślnego next-hop i struktury output.
+- [Why is the default route in the default Martian table?](https://community.juniper.net/discussion/why-is-the-default-route-in-the-default-martian-table) — autentyczna wątpliwość o `0.0.0.0/0 exact allow` i `0/8 orlonger disallow`.
+- [FBF on SRX](https://community.juniper.net/discussion/filter-based-forwarding-on-srx) — inspiracja do jawnego oznaczania platform-specific flow caveats; nie traktowana jako gwarancja wspierania na każdym obrazie vSRX.
+
+**Klasyfikacja pochodzenia:** źródłowe pytania Community wskazano wyżej; pozostałe narracje i wszystkie fault injections są **autorskimi konstrukcjami dydaktycznymi na podstawie dokumentacji producenta**. Nie cytujemy poufnych materiałów ani exam dumpów. Dokumentacja i Feature Explorer mają pierwszeństwo nad niezweryfikowaną odpowiedzią z forum.
+
+**Media:** wszystkie schematy Mermaid są oryginalne. Nie wykorzystano zewnętrznych zdjęć routerów tylko dla ozdoby, bo w rozdziale o tablicach routingu i kierunku pakietów własne diagramy są bardziej precyzyjne. Nie należy deklarować istnienia lokalnych JPG/PNG, których nie dodano do repo.
+
+**Ograniczenie laboratoryjne:** nie wykonano testu na realnym EVE-NG, nie pobrano żadnych obrazów Junos i nie potwierdzono na konkretnym vSRX wsparcia FBF, ECMP policy ani RIB group. Dla EX/QFX/MX, SRX/VS, Junos OS Evolved i odmiennych PFE mogą występować różnice. Wszystkie konfiguracje wymagają odpowiedniej walidacji i weryfikacji runtime.
+
+---
+
+## 7.END. Epilog — wiesz już, że Junos ma więcej niż jedną mapę drogową
+
+Wracamy do porannego incydentu w nowym biurze. R1 ma dwie drogi WAN, operator B obsługuje specjalny ruch, a partner dostaje summary `10.60.0.0/16`. Teraz zamiast ogólnego „na routerze jest trasa” potrafisz zapytać:
+
+- **Czy to static, aggregate czy generated?** Czy potrzebny jest contributor? Co robi route, gdy destination nie ma specific?
+- **Czy prefix jest martian?** Czy rozumiem exact/orlonger i allow/disallow?
+- **Która routing instance odpowiada za ten pakiet?** Czy został przekierowany przez FBF?
+- **Czy RIB group udostępniła potrzebne connected do secondary?** Czy next-hop jest rozwiązywany?
+- **Czy FIB ma jeden czy kilka realnych next-hopów?** Czy używany jest per-flow hash?
+- **Czy stateful security, NAT i return path zgadzają się z projektem?**
+- **Jakim testem z klienta i upstreamu udowodnię rzeczywistą drogę?**
+
+To poziom **JNCIS-ENT**: nie tylko umiesz skonfigurować polecenie, ale **potrafisz przewidzieć skutek jego interakcji z innymi mechanizmami**.
+
+W rozdziale 8 przejdziemy głębiej do routing policy i firewall filters: term evaluation, default actions, import vs export, match criteria, termination i uRPF. Tam nauczysz się sterować tym, **które route i pakiety są dopuszczone**, a nie tylko którą tablicę wykorzystują.
+
+**Blueprint: 7.1–7.8 [S].**  
+**Status:** wykład i specyfikacja LAB opracowane; **LAB PLANNED / NOT RUNTIME VALIDATED**.
+
