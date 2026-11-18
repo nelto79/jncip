@@ -939,3 +939,225 @@ Każdy wyjątek PBR/FBF jest lokalną regułą, którą trzeba uwzględnić przy
 **Do zrozumienia:** FBF zmienia **tablicę**; nie uruchamia samodzielnie NAT, security policy ani default route.  
 **Do przećwiczenia:** dwa źródła do tego samego destination → dwa różne egress, potwierdzone capture na dwóch gatewayach.
 
+
+
+---
+
+## 7.7. Konfiguracja, monitoring i troubleshooting: aggregate, generated, load balancing i FBF [S]
+
+### 7.7.1. „Po zmianie routingu jedno VLAN działa, a drugie nie” — jaki jest dobry pierwszy ruch?
+
+Wyobraź sobie incydent w kampusie. W nocy ktoś wdrożył FBF dla podsieci gościnnej. Rano Service Desk zgłasza: „VPN dla kontrahentów działa, ale ERP w biurze nie odpowiada, choć globalna `inet.0` ma route”. Operator uruchamia `show route` i stwierdza: „W tablicy jest default, więc winne jest FW”.
+
+Właśnie tu wchodzi wiedza z tego rozdziału. Możliwe przyczyny:
+- filtr FBF został przypięty **nie na tym interfejsie**;
+- pakiet trafił do **innej routing instance** niż globalna;
+- w tej instancji istnieje default, ale nie ma **connected next-hop**;
+- stateless filter nie ma końcowego `then accept`, więc odrzuca niezaznaczony ruch;
+- ruch po FBF wybiera egress WAN-B, ale na SRX nie ma policy z właściwego to-zone;
+- return path przechodzi innym firewall;
+- aggregate /16 z `reject` zatrzymuje nieistniejący podprefiks;
+- `show route forwarding-table` nie pokazuje wszystkich ścieżek, które założyłeś na podstawie RIB.
+
+**Nie szukamy jednej cudownej komendy. Szukamy miejsca, w którym zmieniono decyzję pakietu.**
+
+### 7.7.2. Pięć warstw śledzenia jednego pakietu
+
+~~~mermaid
+flowchart TD
+  PC["Klient zgłasza błąd"] --> ING["1. Ingress / source / VLAN\nshow interfaces, LLDP"]
+  ING --> CLASS["2. Stateless FBF filter\ni właściwa routing-instance"]
+  CLASS --> RIB["3. RIB / active route / aggregate"]
+  RIB --> NH["4. Forwarding-table i\nconnected next-hop/ARP"]
+  NH --> SEC["5. SRX policy / stateful flow /\nreturn path"]
+  SEC --> CLIENT["Dowód z hosta i testu usługi"]
+~~~
+
+**Ważne:** kolejność to **model wyjaśnienia**, nie literalny pipeline dla każdego PFE. SRX flow processing, filter stage i NAT mogą mieć szczególne uwarunkowania. Właśnie dlatego w produkcji potrzebujesz dokumentacji wydania i testu, zamiast zakładać, że wszystkie modele zachowują się identycznie.
+
+### 7.7.3. Zbierz najpierw aktywną konfigurację i kontekst ingress
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode, read-only first response**
+
+~~~junos
+show version
+show interfaces terse
+show interfaces descriptions
+show configuration interfaces ge-0/0/1 | display set
+show configuration firewall family inet filter CH07-PBR | display set
+show configuration routing-instances FBF-ALT | display set
+show system commit
+~~~
+
+Pytasz: który interface otrzymał pakiet? Czy input filter działa **na tym logical unit i dla właściwej family**? Czy match source jest prawidłowy? Czy zmianę naprawdę zatwierdzono?
+
+**Gotcha #18:** administrator może widzieć poprawną definicję firewall filter, ale jeśli nie jest podpięta do odpowiedniej family input, **nie klasyfikuje ruchu klienta**. Tak samo routing policy wpisana w `policy-options` nie działa, jeśli nie ma odniesienia w odpowiednim protokole/forwarding table.
+
+### 7.7.4. Teraz sprawdź dwie RIB i next-hop
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode, diagnostyka tablic**
+
+~~~junos
+show route table inet.0
+show route table FBF-ALT.inet.0
+show route table FBF-ALT.inet.0 0.0.0.0/0
+show route table FBF-ALT.inet.0 198.51.100.4/30
+show route hidden
+show arp
+~~~
+
+Jeśli w `FBF-ALT.inet.0` brakuje connected do WAN-B, przejdź do RIB group i jej przypięcia:
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode, read-only RIB group**
+
+~~~junos
+show configuration routing-options rib-groups | display set
+show configuration routing-options interface-routes | display set
+show configuration policy-options policy-statement RG-ONLY-WAN-B | display set
+~~~
+
+Jeżeli opcjonalna import-policy nie jest skonfigurowana, ostatnie polecenie może nic nie zwrócić — to **normalny wynik**. Nie diagnozuj przez przypadek „missing policy” jako awarii, jeśli projekt dopuszcza import connected bez filtra.
+
+### 7.7.5. Rozdziel RIB i FIB oraz routing od security
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode, FIB/flow**
+
+~~~junos
+show route forwarding-table destination 203.0.113.10
+show route 203.0.113.10
+show security policies
+show security flow session
+~~~
+
+**Szczególny gotcha:** `show route forwarding-table destination 203.0.113.10` bez wskazania kontekstu może dać **widok inny niż faktyczne FBF lookup**, bo musisz zbadać właściwą forwarding table/instance i możliwości CLI platformy. Nie dowodź działania FBF samym odczytem global FIB.
+
+Dowód ostateczny to najlepiej **rzeczywiste pakiety** na obu upstream gatewayach. W labie użyj krótkiego `tcpdump`; w produkcji przy fizycznym EX/QFX/MX dobierz bezpieczny analyzer/telemetrię zgodnie z prawami klienta i obciążeniem.
+
+### 7.7.6. Trouble ticket A — aggregate reklamu przyciąga ruch, którego nie ma
+
+**Objaw:** partner BGP otrzymał summary `10.60.0.0/16`. Może dotrzeć do `10.60.10.25`, ale `10.60.99.25` nie odpowiada.
+
+**Błędny wniosek:** skoro BGP ogłosił /16, wszystkie 256 możliwych podsieci /24 muszą być fizycznie dostępne.
+
+**Wyjaśnienie:** aggregate wymaga co najmniej jednego contributor. Dla adresów bez bardziej szczegółowej route domyślny `reject` na aggregate jest legalną i często pożądaną obroną przed routing loop.
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode**
+
+~~~junos
+show route 10.60.0.0/16 extensive
+show route 10.60.10.0/24
+show route 10.60.99.0/24
+show route forwarding-table destination 10.60.99.25
+~~~
+
+**Rozwiązanie:** albo uzupełnij rzeczywistą reachability do brakującego subnet, albo **nie ogłaszaj tak szerokiego summary**, jeśli HLD wymaga komunikacji do wszystkich części /16. Nie usuwaj na ślepo reject, bo możesz stworzyć pętlę przez default.
+
+### 7.7.7. Trouble ticket B — po dodaniu FBF cała sieć OFFICE straciła dostęp
+
+**Objaw:** filtrowałeś source `192.0.2.10/32`, a pozostałe komputery także straciły Internet.
+
+**Hipoteza:** brak jawnego końcowego `term NORMAL then accept` i pakiety, których nie dopasowano do SPECIAL, zostały odrzucone przez domyślną akcję filtra.
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode, odczyt**
+
+~~~junos
+show configuration firewall family inet filter CH07-PBR | display set
+show configuration interfaces ge-0/0/1 | display set
+show firewall
+~~~
+
+**Rozwiązanie:** przywróć ostatnią dobrą konfigurację przez `commit confirmed` timer/rollback albo dodaj bezpieczny końcowy term — po dokładnym porównaniu diff. **Nie zakładaj**, że `then routing-instance` ma też ukryte `accept rest`.
+
+### 7.7.8. Trouble ticket C — ECMP jest w RIB, ale 98% traffic idzie WAN-A
+
+**Objaw:** dwie ścieżki mają ten sam koszt, obie interfaces są up, lecz z telemetrii wynika silna nierównowaga.
+
+**Hipotezy:** jeden elephant flow, hash tylko po L3, niesymetryczna liczba niezależnych flow, nierówny capacity, FBF przenoszący niektóre flows poza global route, albo w FIB jest tylko jeden next-hop.
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode**
+
+~~~junos
+show route 203.0.113.10/32 extensive
+show route forwarding-table destination 203.0.113.10
+show configuration routing-options forwarding-table | display set
+show configuration policy-options policy-statement CH07-ECMP | display set
+~~~
+
+**Rozwiązanie:** udowodnij multipath eligibility i faktyczną dystrybucję **wielu flows**, a nie oceniaj hash na podstawie jednego `ping`. Nie włączaj packet spray na produkcji bez analizy reorder.
+
+### 7.7.9. Trouble ticket D — martian trasa nie pojawia się po BGP import
+
+**Objaw:** peer reklamuje `127.22.0.0/16`, router nie instaluje go jako zwykłej active route.
+
+**Pytanie:** czy samo użycie innej BGP preference rozwiąże problem? Nie. Jeśli prefix jest objęty martian rule, nie zachowuje się jak zwykły kandydat routingu.
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode**
+
+~~~junos
+show route martians
+show route hidden
+show route protocol bgp
+~~~
+
+**Ważne:** `show route protocol bgp` będzie puste, jeśli nie masz BGP lab. Nie twórz pozornego incydentu z pustego output. Na rzeczywistym peer wykorzystaj odpowiednie receive-protocol i policy diagnostics.
+
+### 7.7.10. Trouble ticket E — generated route została active, ale pakiety idą do nieoczekiwanego WAN
+
+**Objaw:** generated `10.70.0.0/16` działa, lecz jej next-hop wskazuje ISP-A, a operator myślał, że wybierze ISP-B.
+
+**Przyczyna możliwa:** generated route przejmuje next-hop od **primary contributing route**. Wybór primary contributors zależy od preferencji i reguł, a nie od Twojej intencji „drugi podprefix powinien być primary”.
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode**
+
+~~~junos
+show route 10.70.0.0/16 extensive
+show route table inet.0 10.70.0.0/16 longer
+show configuration routing-options generate | display set
+show route forwarding-table destination 10.70.99.25
+~~~
+
+**Rozwiązanie:** jeśli celem jest bezpieczne podsumowanie, rozważ aggregate/reject; jeśli celem jest conditional forwarding, dobierz contributors/policy i świadomie zweryfikuj next-hop. Nie zamieniaj `aggregate` na `generate` tylko dlatego, że nazwy podobnie brzmią.
+
+### 7.7.11. Change workflow dla FBF/RIB group — jak zrobić to bez P1?
+
+Przygotowując change na EX/MX/SRX, najpierw zrób read-only snapshot:
+- istniejących interface assignments i routing instances;
+- aktywnych routing policies, forwarding-table export i firewall filters;
+- istniejących connected / static / dynamic routes;
+- security zones, sessions i NAT (na SRX);
+- bieżącego traffic i obciążenia uplinków;
+- testu aplikacji z dwóch klientów o różnych źródłach.
+
+Następnie:
+1. utwórz docelową forwarding table i sprawdź resolution;
+2. jeśli niezbędne, dodaj RIB group z **jak najmniejszym zakresem**;
+3. dopiero potem przypnij FBF filter do wejścia;
+4. wykonaj `show | compare` i `commit check` **przed** `commit confirmed`;
+5. po aktywacji nie uruchamiaj ponownie `commit check` w czasie pending timer;
+6. wykonaj odrębne testy ruchu zwykłego i przekierowanego;
+7. potwierdź commit dopiero, gdy obie grupy klientów i monitoring są zgodne z baseline.
+
+**Gotcha #19:** nawet jeśli PC-A korzystający z FBF działa, **PC-B korzystający z normalnego routingu może być uszkodzony**. Test jednego hosta nie wystarczy do zamknięcia change.
+
+### 7.7.12. Case study: Security pyta, dlaczego guest Wi-Fi omija centralny firewall
+
+W projekcie nowej lokalizacji masz WLAN corporate i guest. Po dołożeniu FBF tylko część guest traffic idzie przez firewall. Analizując to, nie możesz mówić „Wi-Fi działa” na podstawie ping do AP lub WLC.
+
+Sprawdź **rzeczywisty source IP / VLAN / IRB**, bo firewall filter może dopasowywać się do adresacji NATowanej wcześniej, a nie do tego, co myślałeś. Zobacz, **na którym fizycznym/logical ingress filtr został przypięty**. Sprawdź forwarding instance oraz **czy nie istnieje bardziej szczegółowy route w FBF RIB**, która zmienia zamierzony WAN-B.
+
+**Most z Cisco:** tak samo PBR route-map na SVI może działać inaczej niż statyczna default, a polityka i NAT na bramie mogą przetwarzać ruch w innym miejscu niż wydawało się w HLD. Tu nie chodzi o „komendy Junos są dziwne”, tylko o świadome zaprojektowanie punktu kontroli ruchu.
+
+### 7.7.13. Worknotes i RCA — napisz, dlaczego, nie tylko że
+
+Po teście do ServiceNow nie wpisuj tylko „configured PBR, traffic OK”. W dobrym podsumowaniu znajdują się:
+- dokładny affected source subnet i destination;
+- rola interfejsu i source of truth topologii;
+- active RIB/FIB w normalnym oraz FBF context;
+- zastosowany match i expected/actual action;
+- read-only counters/flow i dowód ze zdalnego endpoint;
+- zdarzenie fault i test recovery;
+- wynik nieobjętych polityką hostów;
+- czas, software release, numer change i brak pozostawionego pending commit.
+
+**Zasada Tier 3:** nie przejmujemy kontroli nad ruchem wyłącznie deklaracją w config. **Udowadniamy, gdzie pakiety rzeczywiście wyszły.**
+
