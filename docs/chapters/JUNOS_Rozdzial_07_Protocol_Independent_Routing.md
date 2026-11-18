@@ -302,3 +302,265 @@ set routing-options martians 240.0.0.0/4 orlonger allow
 **Do zrozumienia:** martian route ≠ firewall filter ≠ RFC1918 bogon.  
 **Do przećwiczenia:** przeczytaj wynik `show route martians` i wyjaśnij, dlaczego `0.0.0.0/0` jest dozwolona, ale `127.2.0.0/16` jest specjalna.
 
+
+
+---
+
+## 7.3. Routing instances — rozwinięcie konfiguracji i diagnostyki [S]
+
+### 7.3.1. Routing instance to oddzielna mapa dróg. A FBF to przekazanie paczki do innego dyspozytora.
+
+Rozdział 6 nauczył nas, że tablice `inet.0` i `LAB-IOT.inet.0` nie są jednym wielkim katalogiem tras. Każda ma osobny wybór active route, własny lookup i własną ścieżkę rozwiązywania next-hop.
+
+Wyobraź sobie wielkie centrum dystrybucyjne z dwoma dyspozytorami:
+- dyspozytor A prowadzi standardowy transport przez operatora A;
+- dyspozytor B ma kontrakt na transport specjalny przez operatora B.
+
+Kurier przywozi paczkę i na wejściu ktoś stempluje ją „obsłuż u dyspozytora B”. To właśnie intuicja **Filter-Based Forwarding**: najpierw klasyfikujesz pakiet, potem wybierasz **inną tablicę**, w której znajduje się trasa przez właściwego operatora.
+
+Żeby jednak dyspozytor B umiał znaleźć **swoją lokalną bramę**, musi mieć wiedzę, gdzie znajduje się jego next-hop. Tą wiedzą zajmiemy się w 7.4: **RIB groups**.
+
+### 7.3.2. Cztery rodzaje routing instances, które łatwo pomylić
+
+W Junos istnieje wiele `instance-type`. Najważniejsze dla tego rozdziału:
+
+**`virtual-router`:** niezależna instancja routingowa, z własnymi interfejsami i protokołami. Bliska Cisco VRF-Lite. Jeśli chcesz zrobić osobną sieć routowaną dla OT, to jest naturalny punkt startowy.
+
+**`vrf`:** konkretny typ instancji często wykorzystywany w L3VPN/PE, z route distinguisher, route targets i eksportem/importem tras. **Nie** jest słowem wymiennym z każdym Junos virtual-router.
+
+**`forwarding`:** specjalna instancja do wyboru ścieżki przekazywania, popularna przy FBF/PBR. Często nie przypisujesz do niej klasycznego fizycznego ingress interface; pakiety są **kierowane tam przez firewall filter action**. Jest osobnym kontekstem forwarding, ale nie projektuj jej jak pełnego tenant VRF z wszystkimi funkcjami dowolnego protokołu.
+
+**`no-forwarding`:** stosowana, gdy potrzebujesz odrębnego kontekstu informacji routingowej, ale nie standardowego forwarding dataplane. Nie będzie automatycznym zamiennikiem FBF.
+
+Źródło: [Routing Instances Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-instances-overview.html).
+
+### 7.3.3. FBF-ALT: routing instance, której nie przypiszemy zwykłym `interface`
+
+W głównym labie 7.8 chcemy, aby standardowy ruch miał default przez operatora A, a pakiety od wybranego klienta przez operatora B. Dla uproszczenia:
+- R1 → operator A: `198.51.100.2` przez `ge-0/0/0`;
+- R1 → operator B: `198.51.100.6` przez `ge-0/0/2`.
+
+Przygotujemy specjalną forwarding instance:
+
+**Urządzenie: LAB-R1-vSRX — Configuration Mode [edit private], izolowany lab, po zweryfikowaniu wersji i NIC**
+
+~~~junos
+set routing-instances FBF-ALT instance-type forwarding
+set routing-instances FBF-ALT routing-options static route 0.0.0.0/0 next-hop 198.51.100.6
+show | compare
+commit check
+~~~
+
+Na tym etapie **nie ma jeszcze FBF filter**. Nie twierdź, że klient wysyła ruch przez B. Stworzyliśmy tylko alternatywną **tabelę decyzyjną**. Dopiero wejściowy filter w 7.6 skieruje wybrane pakiety do `FBF-ALT.inet.0`.
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode, po aktywacji na nowym LAB**
+
+~~~junos
+show route table FBF-ALT.inet.0
+show configuration routing-instances FBF-ALT | display set
+show route table inet.0
+~~~
+
+**Pytanie instruktora:** czy `FBF-ALT.inet.0` musi od razu zawierać connected route do `198.51.100.4/30`, w której leży next-hop `198.51.100.6`? **Nie.** Samo utworzenie forwarding instance i statycznej default nie musi skopiować do niej połączonych tras z `inet.0`. To kluczowy brakujący element, który naprawimy RIB group.
+
+### 7.3.4. Problem next-hop resolution — tabela wie dokąd, ale nie wie, jak tam dojść
+
+Jeśli forwarding instance zna:
+- `0.0.0.0/0 → 198.51.100.6`,
+
+ale nie ma:
+- `198.51.100.4/30 → ge-0/0/2.0`,
+
+to nie ma pełnej instrukcji egress do lokalnego next-hop. To trochę jak dyspozytor wiedzący „oddaj do przewoźnika B”, lecz nieznający jego rampy załadunkowej.
+
+**Gotcha #7:** obecność default w forwarding instance **nie dowodzi**, że jej next-hop jest poprawnie rozwiązany. Kiedy zwykły `inet.0` ma connected do ISP-B, nie oznacza to automatycznie, że drugi kontekst również go widzi. Przy rozwiązywaniu tej pułapki często potrzebujesz **`rib-group` dla interface routes**. Oficjalny [FBF Example](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/example/filter-based-forwarding-example.html) pokazuje dokładnie ten związek.
+
+### 7.3.5. Czy forwarding instance musi mieć swój interfejs L3?
+
+W typowym przykładzie FBF **nie przypisujesz wejściowego interfejsu do FBF-ALT**. Zostaje on w podstawowym kontekście, a stateless filter na jego **ingress** wybiera dla określonego ruchu alternatywną tablicę. Egress next-hop może być przez interfejs należący do głównej RIB, dlatego przekazywanie connected interface routes do FBF tabeli ma sens.
+
+W przeciwieństwie do tego w `virtual-router`/VRF zwykle świadomie przypisujesz interfejsy do instancji, aby każdy ruch z tej sieci korzystał z jej tabeli domyślnie.
+
+~~~mermaid
+flowchart TD
+  P["Pakiet z ge-0/0/1.0"] --> FILTER{"Input firewall filter\nmatch source"}
+  FILTER -->|"192.0.2.10/32"| ALT["FBF-ALT.inet.0\n0/0 via B"]
+  FILTER -->|"pozostałe źródła"| BASE["inet.0\n0/0 via A"]
+  ALT --> RESOLVE["Czy FBF-ALT zna connected\n198.51.100.4/30?"]
+  RESOLVE -->|"tak"| B["ge-0/0/2 → operator B"]
+  RESOLVE -->|"nie"| BAD["unresolved next-hop"]
+  BASE --> A["ge-0/0/0 → operator A"]
+~~~
+
+### 7.3.6. Routing context a security zone: uważaj na SRX
+
+Na SRX możesz jednocześnie mieć:
+- routing instance: **wybór trasy**;
+- firewall filter: **stateless classification**;
+- security zones/policies: **stateful permit/deny**;
+- NAT: **zmiana adresacji**.
+
+To nie są cztery warianty jednej reguły. Stworzenie FBF nie zwalnia z security policy. Jeżeli testujesz FBF na vSRX, weryfikuj **czy dana platforma/wersja obsługuje konkretny typ PBR/FBF i jego interakcję z flow/NAT**. Nie przenoś bez testu przykładu z MX/QFX na SRX.
+
+**Most z Cisco:** PBR route-map na L3 Catalyst i PBR na firewallu stateful nie muszą zachowywać się identycznie z powodu NAT/state/zone classification. Podobnie Junos. [FBF Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-option-filter-based-forwarding-overview.html).
+
+### 7.3.7. Diagnoza „routing-instance istnieje, ale ruch nie idzie”
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode, dwie tabele i ścieżka do ISP-B**
+
+~~~junos
+show configuration routing-instances FBF-ALT | display set
+show route table FBF-ALT.inet.0
+show route table inet.0
+show route 198.51.100.6
+show arp
+show security flow session
+~~~
+
+Najpierw sprawdzasz, czy route jest w odpowiedniej table i czy ma resolved next-hop. Dopiero potem filter, policy i host traffic. Jeżeli route jest hidden, **nie proponuj jeszcze globalnego restartu routingu**.
+
+**Na pamięć:** `virtual-router` oddziela routing interfejsów, `forwarding` jest specjalną instancją do FBF.  
+**Do zrozumienia:** klasyfikacja pakietu wybiera tablicę; same tablice nie przekazują sobie informacji automatycznie.  
+**Do przećwiczenia:** stwórz `FBF-ALT.inet.0` bez RIB group, zobacz stan default i next-hop, potem uzupełnij interface routes.
+
+---
+
+## 7.4. RIB groups — precyzyjne udostępnianie tras do wielu tabel [S]
+
+### 7.4.1. Trzy różne sposoby na „route leaking”, tylko jeden omawiamy teraz
+
+Architekt mówi: „Chcę, żeby FBF-ALT wiedziała, że 198.51.100.4/30 jest bezpośrednio podłączona do R1”. Junior proponuje: „Skopiujmy całe `inet.0` do tej tabeli”. To mało precyzyjne i potencjalnie niebezpieczne.
+
+W zależności od celu możesz:
+1. użyć **RIB group** przy imporcie wybranych tras (np. connected);
+2. użyć statycznych tras/odpowiedniej instancji i ręcznego route leaking;
+3. użyć polityk import/export, instance-import, VPN mechanisms lub FBF, zależnie od architektury.
+
+W tym rozdziale skupiamy się na **RIB group**. To nie jest automatyczna dwukierunkowa „synchronizacja wszystkich tabel” i nie należy traktować jej jak zwykłej kopii pliku.
+
+### 7.4.2. Dwie tablice, jedno źródło trasy
+
+Wyobraź sobie dwie tablice magazynowe. Pierwsza jest główna i przechowuje informacje z konkretnego źródła. Decydujesz, że część z nich będzie równocześnie widoczna w drugiej. **Pierwsza tabela pozostaje primary**, a druga otrzymuje dodatkową kopię przy procesie importu tras.
+
+W Junos:
+- **`rib-groups NAME import-rib [ PRIMARY SECONDARY ]`** określa zestaw tabel;
+- **pierwsza RIB na liście jest primary**;
+- kolejne to secondary;
+- musisz **przypiąć RIB group do źródła informacji**, np. `routing-options interface-routes rib-group inet NAME` dla IPv4 direct/interface routes;
+- opcjonalna **import-policy** ogranicza, które routes faktycznie trafią do secondary.
+
+Nie jest to to samo co routing-policy `export` do BGP neighbor. Tutaj słowo „import” oznacza **umieszczenie informacji z procesu routingu w RIB**, nie otrzymanie dowolnego pakietu od sąsiada.
+
+Źródła: [Introduction to RIB Groups — Juniper Technical Note](https://www.juniper.net/documentation/us/en/software/nce/rg-understanding-tn/rg-understanding-tn.pdf), [rib-groups CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/rib-groups-edit-routing-options.html), [import-rib](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/import-rib-edit-routing-options.html).
+
+### 7.4.3. Konfiguracja: udostępniamy connected routes do FBF-ALT
+
+W naszym labie primary IPv4 RIB to `inet.0`, a secondary `FBF-ALT.inet.0`.
+
+**Urządzenie: LAB-R1-vSRX — Configuration Mode [edit private], wyłącznie izolowany LAB**
+
+~~~junos
+set routing-options rib-groups COPY-DIRECT import-rib [ inet.0 FBF-ALT.inet.0 ]
+set routing-options interface-routes rib-group inet COPY-DIRECT
+show | compare
+commit check
+~~~
+
+Dwa wiersze mają różne zadania:
+- pierwszy **definiuje** RIB group i jej kolejność;
+- drugi **wiąże** ją z IPv4 **interface routes**.
+
+**Gotcha #8:** samo stworzenie `rib-groups COPY-DIRECT` nie powoduje przenoszenia wszystkich tras. Bez przypisania do appropriate routing source grupa może pozostawać niewykorzystana.
+
+**Gotcha #9:** kolejność **`inet.0` jako pierwsza** ma znaczenie. Przenoszenie primary na losową secondary nie jest kosmetyczne — niektóre konfiguracje naruszają warunki family/primary route i nie będą działać.
+
+### 7.4.4. Dlaczego kopiujemy connected, a nie od razu cały Internet?
+
+Do rozwiązania next-hopa `198.51.100.6` potrzebujemy przede wszystkim informacji:
+- `198.51.100.4/30` jest connected;
+- egress = `ge-0/0/2.0`.
+
+Nie potrzebujemy na początek:
+- setek tras BGP;
+- osobistych host routes do interfejsów management;
+- informacji o wszystkich VPN;
+- dynamicznych routes z innych tenantów.
+
+**RIB group jest mechanizmem o potencjalnie szerokim skutku.** Może zmienić dostępność prefiksów w innych instancjach, a tym samym semantykę izolacji i security. Dlatego w produkcji stosuj świadomy zakres oraz import-policy, gdy nie możesz bezpiecznie udostępnić wszystkich interface routes.
+
+### 7.4.5. Import-policy — gdy chcesz kopiować tylko jeden uplink
+
+Przykład wyjaśnia **sam pomysł polityki**. Uwaga: matching candidate routes i obsługa import-policy do RIB group mogą być zależne od platformy; test musi pokazać, że wybrana implementacja rzeczywiście skopiowała oczekiwany prefix.
+
+Chcemy udostępnić tylko `198.51.100.4/30`, nie całe `inet.0`. Potrzebujemy routing policy, która akceptuje właściwy route i odrzuca pozostałe secondary imports.
+
+**Urządzenie: LAB-R1-vSRX — Configuration Mode [edit private], OPCJONALNY eksperyment z ograniczeniem leaking**
+
+~~~junos
+set policy-options policy-statement RG-ONLY-WAN-B term ALLOW from route-filter 198.51.100.4/30 exact
+set policy-options policy-statement RG-ONLY-WAN-B term ALLOW then accept
+set policy-options policy-statement RG-ONLY-WAN-B term OTHER then reject
+set routing-options rib-groups COPY-DIRECT import-policy RG-ONLY-WAN-B
+show | compare
+commit check
+~~~
+
+**Szczególny gotcha:** import-policy przy RIB group **nie może bezmyślnie wyeliminować primary routes**, od których zależy podstawowy forwarding. Dokumentacja Junipera opisuje, jak i gdzie działa filtr importu, a różne platformy mają dodatkowe ograniczenia. W produkcji nie stosuj tej policy bez weryfikacji, czy normalny `inet.0` pozostał nietknięty. W labie najpierw porównaj oba RIB i test klienta, dopiero uznaj eksperyment za poprawny.
+
+### 7.4.6. Jak weryfikować RIB group?
+
+**Urządzenie: LAB-R1-vSRX — Operational Mode, read-only porównanie przed/po**
+
+~~~junos
+show configuration routing-options rib-groups | display set
+show configuration routing-options interface-routes | display set
+show route table inet.0
+show route table FBF-ALT.inet.0
+show route table FBF-ALT.inet.0 198.51.100.4/30
+show route table FBF-ALT.inet.0 198.51.100.6
+~~~
+
+**Przewidywany rezultat:** po przypięciu `COPY-DIRECT` tabela `FBF-ALT.inet.0` powinna mieć potrzebną informację o sieci connected do operatora B, umożliwiając rozwiązanie next-hopa dla swojej default route. **Nie oznacza to**, że policja FBF jest aktywna, że SRX akceptuje sesje ani że provider B ma drogę zwrotną.
+
+### 7.4.7. Gotcha platformowy: RIB group na EX nie zawsze kopiuje to, co kopiuje na MX/vSRX
+
+CLI Reference zawiera istotną uwagę: **na niektórych EX Series RIB groups pomiędzy tablicami mogą być ograniczone do tras dynamicznych**. W praktyce może to uniemożliwić kopiowanie konkretnego rodzaju routes tak samo jak na MX.
+
+W tej części **nie obiecujemy jednolitego efektu na wszystkich EX/QFX/MX/SRX**. Zawsze sprawdzaj [Feature Explorer](https://apps.juniper.net/feature-explorer/) i dokumentację danego modelu. Nasz lab planujemy na **vSRX**, a i tam trzeba potwierdzić działanie w konkretnym release.
+
+Źródło: [import-rib](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/import-rib-edit-routing-options.html) — uwaga o EX Series.
+
+### 7.4.8. Gotcha z prawdziwej Technical Note: route w secondary nie jest niezależną kopią
+
+Jeżeli primary route zostaje usunięta, odpowiednia secondary route importowana przez RIB group może także zostać usunięta. **RIB group nie tworzy dwóch autonomicznych źródeł prawdy**, tylko pozwala temu samemu procesowi wprowadzać odpowiednie routes do kilku tablic.
+
+To praktycznie oznacza, że jeśli `ge-0/0/2` straci connected `198.51.100.4/30`, **FBF-ALT** może utracić resolution next-hopa, nawet jeśli jej statyczna default route pozostaje zapisana w config. Nie „naprawisz” takiej awarii dopisaniem kolejnej kopii do secondary bez odtworzenia rzeczywistego next-hopa.
+
+### 7.4.9. RIB group vs normalny route leaking do security tenantów
+
+Jeśli klient IoT musi rozmawiać z jedną usługą management, nie kopiuj wszystkich tras `inet.0` do jego virtual-router. Łatwo wtedy nieumyślnie umożliwić komunikację wbrew HLD.
+
+Wybierz:
+- **co ma być osiągalne** (konkretne prefiksy);
+- **w którą stronę**;
+- **jak zostanie rozstrzygnięta droga powrotna**;
+- **co z kontrolą ruchu** (firewall filter, SRX security policy, ACL/NAC);
+- **jak zweryfikujesz, że nie ma niepożądanego leaking**.
+
+To rozróżnienie ma ogromne znaczenie w produkcyjnej infrastrukturze typu Campus LAN/OT.
+
+### 7.4.10. Mini-egzamin podczas wykładu
+
+**Pytanie 1.** Utworzyłeś `rib-groups COPY-DIRECT import-rib [ inet.0 FBF-ALT.inet.0 ]`, ale w secondary nic się nie zmieniło. Co sprawdzasz najpierw?  
+**Odpowiedź:** czy grupa została **przypięta do źródła importu**, np. `interface-routes rib-group inet COPY-DIRECT`; czy w ogóle jest aktywna connected route; czy platforma wspiera dany typ route i czy import-policy jej nie wyklucza.
+
+**Pytanie 2.** W `FBF-ALT.inet.0` widzisz default via `198.51.100.6`, lecz brak connected do jego /30. Co oznacza to dla dataplane?  
+**Odpowiedź:** nie możesz zakładać rozwiązania next-hop. Najpierw napraw interface route visibility, potem sprawdź FIB i forwarding.
+
+**Pytanie 3.** Czy RIB group sama ogłasza route do OSPF/BGP sąsiada?  
+**Odpowiedź:** nie. Zmiana tego, **w jakiej tablicy występuje route**, nie jest automatycznie ogłoszeniem na sesji protokołu; export policy/protocol config to osobna decyzja.
+
+**Na pamięć:** `import-rib [ PRIMARY SECONDARY ]` i przypięcie do właściwego routing source.  
+**Do zrozumienia:** RIB group to import do kilku tabel, nie pełny bi-directional VRF bridge.  
+**Do przećwiczenia:** porównaj connected routes w `inet.0` i `FBF-ALT.inet.0` oraz rozwiązywanie `198.51.100.6` przed i po RIB group.
+
