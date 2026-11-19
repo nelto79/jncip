@@ -1540,3 +1540,70 @@ Najlepszą częścią ćwiczenia nie jest to, że potrafisz wpisać \`set routin
 
 To już nie jest „więcej komend routingu”. To jest świadome projektowanie **punktów podejmowania decyzji w Junos**.
 
+
+---
+
+## Warsztat projektowy. Jak wykorzystać tę wiedzę przy budowaniu prawdziwego oddziału Enterprise?
+
+Wyobraź sobie spotkanie HLD z architektem, bezpieczeństwem i dostawcą łączy. Ktoś pokazuje slajd „dual-WAN + guest traffic via backup + summary routes” i oczekuje, że zamienisz go na konkretną decyzję techniczną. Po tym rozdziale nie powinieneś odpowiadać: „Da się, Junos ma FBF”. Powinieneś zapytać, **jakie zachowanie musi być gwarantowane, a jakie jest tylko preferencją**.
+
+Jeśli wymaganie brzmi „cały oddział ma mieć internet, a w razie awarii głównego operatora automatycznie przełączyć się na backup”, najważniejsze będą **detekcja awarii, route preference i kontrola drogi powrotnej**. Być może nawet nie potrzebujesz FBF. Dwie równorzędne static defaults bez monitorowania realnej osiągalności aplikacji nie są pełną strategią HA, bo sam link up nie oznacza działającego upstreama.
+
+Jeśli wymaganie brzmi „ruch guest Wi-Fi ma zawsze przejść przez centralny firewall”, trzeba zdecydować, **gdzie fizycznie i logicznie klasyfikujesz ruch**: na EX/QFX, IRB, routerze WAN, czy na SRX. Czy widzisz prawdziwy source IP gościa przed NAT? Czy filter jest na właściwym logical unit? Czy provider B zna return path? Czy ruch nie może ominąć centralnego firewalla przez bardziej szczegółową trasę albo inną routing instance? Jeśli te pytania pozostają bez odpowiedzi, sama konfiguracja FBF nie spełnia wymagań bezpieczeństwa.
+
+Jeśli wymaganie brzmi „zredukujmy ilość tras wymienianych z operatorem”, warto rozważyć **aggregate**, ale zadać trudniejsze pytanie: co stanie się, kiedy aktywna zostanie tylko jedna contributing /24? Czy nadal chcemy reklamować całe /16, wiedząc, że niektóre fragmenty będą trafiały do reject? To wybór między uproszczeniem informacji routingu a precyzją reachability. Generated route jest innym narzędziem i nie powinno zastępować aggregate tylko dlatego, że obie mogą wyglądać w RIB jak \`[Aggregate/130]\`.
+
+Jeżeli klient oczekuje „sumy łącz 1 Gb/s + 1 Gb/s dla jednego transferu”, nie obiecuj takiego rezultatu na podstawie ECMP. Per-flow hashing zwykle pozwoli rozkładać **wiele niezależnych przepływów**, a nie złoży pojedynczego flow TCP w 2 Gb/s. Zanim zaprojektujesz dwa WAN-y jako aktywne, zapytaj o profile ruchu, NAT/statefulness, asymetrię, przepustowość poszczególnych łączy, SLA operatorów i możliwości obserwacji rzeczywistych flows.
+
+Wreszcie, wybór sprzętu. To, że dany model ma Junos, nie oznacza automatycznie identycznego FBF, ECMP hash-key i RIB groups. Przy EX/QFX liczą się możliwości konkretnego ASIC i Junos release. Przy MX — dostępne PFE i warianty forwarding. Przy SRX/vSRX — security flow, NAT i obsługiwany typ PBR/APBR. Zanim taki projekt trafi do BOM, trzeba sprawdzić Feature Explorer, hardware platform guide i sugerowany release JTAC dla konkretnego SKU. **Nie wymyślaj w ofercie jednej „wersji Junosa dla całej rodziny” ani nie zaznaczaj feature jako supported na podstawie samego przykładu z innej platformy.**
+
+To są właśnie informacje, których często brakuje w kursach egzaminacyjnych. Na egzaminie pytanie może brzmieć: „Co robi RIB group?”. W pracy pytanie od architekta brzmi: „Czy klient z sieci OT może przypadkiem uzyskać route do management, gdy udostępnimy interface routes do forwarding instance?”. Dobra odpowiedź wymaga nie tylko składni, lecz świadomego określenia **zakresu informacji**, która przechodzi pomiędzy tablicami.
+
+---
+
+## Epilog. Nie ma jednej mapy dla wszystkich pakietów
+
+Wracamy do pierwszego telefonu z NOC. Dwa uplinki są zielone, ale jeden użytkownik nie działa. Wtedy łatwo powiedzieć: „Problem z routingiem”, i stracić godzinę na czytanie \`show route\`.
+
+Teraz jesteśmy dużo bardziej precyzyjni. **Static route** opisuje świadomie zadaną drogę. **Aggregate** może stworzyć summary z domyślnym reject next-hop, jeśli są odpowiedni contributors. **Generated** może stworzyć warunkową trasę, która odziedziczy next-hop. **Martians** opisują, jakie informacje routingu mogą być problematyczne niezależnie od BGP import. **Routing instances** dają osobne tablice, a **RIB groups** udostępniają im potrzebne informacje, np. do next-hop resolution. **ECMP i forwarding-table export** wpływają na to, które równorzędne next-hopy trafią do FIB. **FBF** pozwala wybrać tablicę na podstawie pakietu — bez magicznego zmieniania wszystkich tras w \`inet.0\`.
+
+To nie jest lista funkcji do wykucia. To kolejne decyzje w historii jednego pakietu.
+
+Warto zakończyć rozdział kilkoma pytaniami. Nie musisz zapamiętać całych outputów, ale powinieneś umieć je rozstrzygnąć z CLI.
+
+**Pytanie pierwsze.** R1 ma aktywne 10.60.20.0/24, ale WAN-A nie działa. Czy 10.60.0.0/16 aggregate może nadal być aktywny? **Tak**, jeśli istnieje choć jeden kwalifikujący się contributor i nie ma dodatkowych ograniczeń. Nie wynika z tego, że wszystkie podsieci wewnątrz /16 są osiągalne.
+
+**Pytanie drugie.** Dlaczego \`show route protocol aggregate\` pokazuje 10.70.0.0/16, chociaż skonfigurowałeś \`generate\`? Ponieważ w Junos typ wyświetlany w RIB i jego domyślna preference dla aggregate/generated mogą być podobne. Rozróżnij je po konfiguracji i next-hop.
+
+**Pytanie trzecie.** \`FBF-ALT.inet.0\` ma skonfigurowaną default przez 198.51.100.6. Czy na pewno przekazuje ruch? **Nie**: sprawdź, czy w tym kontekście istnieje droga do samego next-hopa, czy jest aktywna, a potem czy pakiet został skierowany do tej tabeli przez ingress filter.
+
+**Pytanie czwarte.** Dlaczego po usunięciu \`NORMAL then accept\` nie działa PC-B, mimo że zwykła globalna default jest nadal aktywna? Bo stateless input filter może odrzucić pakiet niedopasowany do żadnego termu, zanim zwykła droga będzie dla niego użyteczna.
+
+**Pytanie piąte.** W FIB widzisz dwa next-hopy, ale jeden transfer TCP korzysta z WAN-A. Czy ECMP jest uszkodzony? **Niekoniecznie**: per-flow hashing może przypisać cały przepływ do jednego next-hopa. Rozkład trzeba badać na większej liczbie niezależnych flows.
+
+**Pytanie szóste.** Czy FBF zastępuje security policy na vSRX? **Nie**. To odrębny wybór kontekstu routingu; stateful flow, strefy, NAT i droga powrotna muszą być poprawne niezależnie od FBF.
+
+Jeśli potrafisz wyjaśnić te sytuacje bez patrzenia do ściągi, jesteś gotowy na następny rozdział. Tam spotkamy bardziej rozbudowane polityki import/export i firewall filters, ale nie będą już wyglądały jak obce narzędzie. Znasz bowiem najważniejszy fundament: **oddzielasz informację o trasach, wybór forwarding table i los konkretnego pakietu.**
+
+---
+
+## Źródła, archiwum i granice weryfikacji
+
+Ta wersja została przebudowana z oryginalnego rozdziału 7 na podstawie [Unified Blueprint](../JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md), z uwzględnieniem poprzednich ustaleń stylistycznych projektu. Poprzednia wersja pozostaje w archiwum: [JUNOS_Rozdzial_07_Protocol_Independent_Routing_v1_ARCHIVE.md](JUNOS_Rozdzial_07_Protocol_Independent_Routing_v1_ARCHIVE.md). Zachowano pełny zakres **7.1–7.8**: static/aggregate/generated, martians, routing instances, RIB groups, load balancing, FBF, troubleshooting i laboratorium. Przywrócono też kontekst operatorski greenfield, ale nie zamieniono go w osobny katalog sprzętowy.
+
+Najważniejsze materiały producenta użyte do sprawdzenia faktów technicznych:
+
+1. [Route Aggregation](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/config-route-aggregation.html) i [Generated Routes](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/concept/policy-generated-routes.html): contributors, aktywność i semantyka next-hop.
+2. [Static Routes / Qualified Next Hop](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html): kwalifikacja statycznych tras.
+3. [Martian Addresses](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/recognize-martian-addr-routing.html) i [show route martians CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-martians.html): prefix rules i allowed/disallowed.
+4. [Routing Instances](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-instances-overview.html): oddzielne konteksty tablic.
+5. [RIB Groups](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/rib-groups-edit-routing-options.html), [import-rib](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/import-rib-edit-routing-options.html) i [interface-routes](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/interface-routes-edit-routing-options.html): primary/secondary i udostępnianie tras.
+6. [Per-Flow Load Balancing](https://www.juniper.net/documentation/us/en/software/junos/sampling-forwarding-monitoring/topics/concept/policy-configuring-per-flow-load-balancing.html): historyczne \`load-balance per-packet\` i rzeczywiste per-flow zachowanie.
+7. [Filter-Based Forwarding Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-option-filter-based-forwarding-overview.html) i [przykład konfiguracji FBF](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/example/filter-based-forwarding-example.html): forwarding instance, match filter, RIB group.
+8. [Advanced PBR on SRX](https://www.juniper.net/documentation/us/en/software/junos/application-identification/topics/topic-map/security-application-advanced-policy-based-routing.html): ostrzeżenie przed bezrefleksyjnym przenoszeniem przykładów MX/EX na flow-based SRX.
+
+Wszystkie diagramy Mermaid są autorskie; nie pobierano cudzych ilustracji. Linki do Juniper mogą przekierowywać do dokumentacji HPE po zmianach organizacyjnych. Przykłady CLI nie są podpisane jako \`RUNTIME VALIDATED\`, ponieważ nie wykonano ich na konkretnym urządzeniu. Dla różnych rodzin PFE i wersji Junos należy zweryfikować wsparcie FBF, import RIB groups, sposób hashowania ECMP, kolejność przetwarzania SRX i format wyjść diagnostycznych.
+
+**Mapa pokrycia blueprintu:** 7.1 static/aggregate/generated; 7.2 martians; 7.3 routing instances; 7.4 RIB groups; 7.5 load balancing; 7.6 FBF; 7.7 konfiguracja, monitoring i troubleshooting; 7.8 laboratorium. Wyróżnienia egzaminacyjne są wplecione w przebieg lekcji, a nie tworzą osobnej listy ściągawek.
+
+*Ostatnia rada z warsztatu: jeśli nowa funkcja Junos wydaje się trudna, nie zaczynaj od wkuwania hierarchii \`set\`. Narysuj drogę jednego pakietu, wypisz tablicę, z której wykonuje lookup, i wskaż, skąd ta tablica dostała informację o next-hopie. Wtedy komendy zaczną wynikać z rozwiązania problemu.*
