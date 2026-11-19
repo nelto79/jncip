@@ -106,7 +106,7 @@ Ping do adresu samego SRX jest **host-bound** i może wymagać `host-inbound-tra
 
 ~~~junos
 show interfaces terse
-show route 203.0.113.10
+show route 198.51.100.10
 show arp
 show security flow session summary
 ~~~
@@ -165,8 +165,8 @@ show route protocol static
 **Urządzenie: R1-vSRX — Operational Mode, szczegóły i ukryte trasy**
 
 ~~~junos
-show route 203.0.113.0/24 detail
-show route 203.0.113.0/24 extensive
+show route 198.51.100.0/24 detail
+show route 198.51.100.0/24 extensive
 show route hidden
 show route summary
 ~~~
@@ -219,18 +219,18 @@ flowchart TB
 
 ### 6.3.2. Gotcha: `show route` jest prawidłowe, ale ARP nie istnieje
 
-R1 ma aktywną static route przez `198.51.100.2`. Interfejs do R2 jest `up` i connected `198.51.100.0/30` pozostaje w RIB. R2 jednak nie odpowiada na ARP. Co się stanie?
+R1 ma aktywną static route przez `10.12.0.2`. Interfejs do R2 jest `up` i connected `10.12.0.0/30` pozostaje w RIB. R2 jednak nie odpowiada na ARP. Co się stanie?
 
 **Routingowa osiągalność next-hopa** nie jest tym samym co **rozwiązanie MAC na L2**. Static może pozostać active, choć brak sąsiada uniemożliwia realny forwarding. Zatem brak ARP **nie musi** automatycznie tworzyć hidden route.
 
 **Urządzenie: R1-vSRX — Operational Mode, rozdzielenie czterech dowodów**
 
 ~~~junos
-show route 203.0.113.0/24 detail
-show route forwarding-table destination 203.0.113.10
+show route 198.51.100.0/24 detail
+show route forwarding-table destination 198.51.100.10
 show interfaces ge-0/0/0 terse
 show arp
-ping 198.51.100.2 count 5
+ping 10.12.0.2 source 10.12.0.1 count 5
 ~~~
 
 **Interpretuj w kolejności:** active RIB → forwarding entry → interfejs fizyczny → ARP/ND → SRX security session. To różne mechanizmy, mimo wspólnego symptomu „ping failed”.
@@ -366,7 +366,7 @@ Dlatego **nie ucz się fałszywej reguły**: „w Junos zawsze niższy metric wy
 
 Wyobraź sobie, że R1 zna:
 - `0.0.0.0/0`, static preference 5, next-hop ISP-A;
-- `203.0.113.0/24`, static preference 5, next-hop WAN-B;
+- `198.51.100.0/24`, static preference 5, next-hop WAN-B;
 - `203.0.113.64/26`, BGP preference 170, next-hop WAN-C.
 
 Pakiet ma destination **`203.0.113.74`**. Która droga wygra?
@@ -380,7 +380,7 @@ Najpierw **dla każdego prefiksu** wybrano aktywną trasę. Teraz podczas forwar
 ~~~mermaid
 flowchart TD
   C["Baza kandydatów RIB"] --> P0["0.0.0.0/0\nwybór active dla /0"]
-  C --> P24["203.0.113.0/24\nwybór active dla /24"]
+  C --> P24["198.51.100.0/24\nwybór active dla /24"]
   C --> P26["203.0.113.64/26\nwybór active dla /26"]
   P0 --> F["FIB z aktywnymi prefixami"]
   P24 --> F
@@ -390,7 +390,7 @@ flowchart TD
   LPM --> NH["Next-hop / egress odpowiadający /26"]
 ~~~
 
-**Etap A — RIB route selection:** jeśli dla **`203.0.113.0/24`** masz OSPF/10 i Static/5, wygrywa Static/5 dla /24.
+**Etap A — RIB route selection:** jeśli dla **`198.51.100.0/24`** masz OSPF/10 i Static/5, wygrywa Static/5 dla /24.
 
 **Etap B — FIB LPM:** dla pakietu `203.0.113.74` /26 wygrywa nad /24, niezależnie od preference, bo **nie są to te same prefiksy**.
 
@@ -402,7 +402,7 @@ W ten sposób możesz nauczyć się bardzo ważnej reguły bez zapamiętywania s
 |---|---|---|
 | `203.0.113.74` | `203.0.113.64/26` | WAN-C |
 | `203.0.113.120` | `203.0.113.64/26` | WAN-C |
-| `203.0.113.130` | `203.0.113.0/24` | WAN-B |
+| `203.0.113.130` | `198.51.100.0/24` | WAN-B |
 | `198.18.1.10` | `0.0.0.0/0` | ISP-A |
 
 `203.0.113.64/26` obejmuje adresy `203.0.113.64`–`203.0.113.127` (włącznie). To dlatego `.120` pasuje, a `.130` nie.
@@ -433,7 +433,7 @@ Jeśli `discard` służy np. ochronie przed routing loop w agregacji, trzeba to 
 ~~~junos
 show route 203.0.113.74
 show route 203.0.113.64/26
-show route 203.0.113.0/24
+show route 198.51.100.0/24
 show route 0.0.0.0/0
 show route forwarding-table destination 203.0.113.74
 ~~~
@@ -447,17 +447,17 @@ Używaj zarówno polecenia wyszukującego destination, jak i odczytu konkretnych
 Dla IPv6 możesz mieć:
 - `::/0`;
 - `2001:db8::/32`;
-- `2001:db8:20::/64`;
-- `2001:db8:20::10/128`.
+- `2001:db8:4::/64`;
+- `2001:db8:4::10/128`.
 
-Pakiet do `2001:db8:20::10` dopasuje /128, jeśli jest aktywny. Pamiętaj jednak, że IPv6 korzysta z ND, a nie ARP, i może wymagać innych security policies/ICMPv6.
+Pakiet do `2001:db8:4::10` dopasuje /128, jeśli jest aktywny. Pamiętaj jednak, że IPv6 korzysta z ND, a nie ARP, i może wymagać innych security policies/ICMPv6.
 
 **Urządzenie: R1-vSRX — Operational Mode, read-only IPv6**
 
 ~~~junos
 show route table inet6.0
-show route 2001:db8:20::10
-show route forwarding-table family inet6 destination 2001:db8:20::10
+show route 2001:db8:4::10
+show route forwarding-table family inet6 destination 2001:db8:4::10
 show ipv6 neighbors
 ~~~
 
@@ -476,7 +476,7 @@ Jeśli dany release nie wspiera wariantu `family inet6` w tej dokładnej pozycji
 
 ### 6.6.1. Jedno urządzenie, dwóch klientów, ten sam zakres IP
 
-Wyobraź sobie kampus obsługujący dwie firmy połączone wspólną infrastrukturą dystrybucyjną. Obie używają podsieci `10.10.10.0/24`. Jak jedna tablica miałaby wiedzieć, czy pakiet `10.10.10.40` należy wysłać do biura klienta A, czy do OT klienta B?
+**To odrębne ćwiczenie logicznego VRF, a nie sieć podłączona do naszego DIAMOND.** Wyobraź sobie kampus obsługujący dwie firmy połączone wspólną infrastrukturą dystrybucyjną. Obie używają podsieci `10.10.10.0/24`. Jak jedna tablica miałaby wiedzieć, czy pakiet `10.10.10.40` należy wysłać do biura klienta A, czy do OT klienta B?
 
 Jedna globalna `inet.0` nie rozwiąże tego bez dodatkowego kontekstu. Junos pozwala utworzyć kilka **routing instances**, które utrzymują osobne tablice i niezależne decyzje.
 
@@ -583,7 +583,7 @@ flowchart TB
 
 ### 6.7.1. Connected route nie jest poleceniem `ip route`
 
-Na Cisco, gdy przypisujesz `10.10.10.1/24` do interfejsu L3, system tworzy connected `10.10.10.0/24` i local host route `10.10.10.1/32`. Junos ma analogiczny mechanizm, lecz konfigurujesz **`interfaces ... unit ... family inet address`**.
+Na Cisco, gdy przypisujesz `192.0.2.1/24` do interfejsu L3 R1, system tworzy connected `192.0.2.0/24` i local host route `10.10.10.1/32`. Junos ma analogiczny mechanizm, lecz konfigurujesz **`interfaces ... unit ... family inet address`**.
 
 **Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB IPv4**
 
@@ -659,29 +659,31 @@ show route 198.51.100.0/24 exact
 show route forwarding-table destination 198.51.100.10
 ~~~
 
-### 6.7.5. Dual-stack: static IPv6 to nie dodatkowa opcja na IPv4 route
+### 6.7.5. Dual-stack: static IPv6 do LAN-B przez R2, nie przez nowy WAN
 
 Na Junos IPv6 unicast static route konfigurujesz w odpowiedniej RIB, typowo przez **`routing-options rib inet6.0 static`**. To jest ważna różnica składni względem zwykłego IPv4 `routing-options static`.
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], interfejs i IPv6 static do sieci R2**
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], dual-stack na istniejącym odcinku do R2**
 
 ~~~junos
 set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:12::1/64
-set routing-options rib inet6.0 static route 2001:db8:20::/64 next-hop 2001:db8:12::2
+set routing-options rib inet6.0 static route 2001:db8:4::/64 next-hop 2001:db8:12::2
 show | compare
 commit check
 ~~~
 
-**Urządzenie: R2-vSRX — Configuration Mode [edit private], interfejs i IPv6 default do R1**
+**Urządzenie: R2-vSRX — Configuration Mode [edit private], IPv6 relay do R4 (LAN-B)**
 
 ~~~junos
 set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:12::2/64
-set routing-options rib inet6.0 static route ::/0 next-hop 2001:db8:12::1
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:24::1/64
+set routing-options rib inet6.0 static route 2001:db8:4::/64 next-hop 2001:db8:24::2
+set routing-options rib inet6.0 static route 2001:db8:1::/64 next-hop 2001:db8:12::1
 show | compare
 commit check
 ~~~
 
-**Most z Cisco:** `ipv6 route 2001:db8:20::/64 2001:db8:12::2` działa na podobnej zasadzie; w Junos jawnie wskazujesz `rib inet6.0`. [Juniper official IPv4/IPv6 static examples](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/config_static-routes.html).
+**Most z Cisco:** `ipv6 route 2001:db8:4::/64 2001:db8:12::2` na R1 działa na podobnej zasadzie; w Junos jawnie wskazujesz `rib inet6.0`. [Juniper official IPv4/IPv6 static examples](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/config_static-routes.html).
 
 **Gotcha:** ruch IPv6 wymaga także poprawnej **ND (Neighbor Discovery)** i IPv6 security policy. Nie zakładaj, że działający IPv4 ARP/ping dowodzi IPv6 connectivity.
 
@@ -700,8 +702,8 @@ ping 2001:db8:12::2 count 5
 ~~~junos
 show configuration routing-options | display set
 show route protocol static
-show route 203.0.113.0/24 detail
-show route forwarding-table destination 203.0.113.10
+show route 198.51.100.0/24 detail
+show route forwarding-table destination 198.51.100.10
 show interfaces ge-0/0/0 terse
 show arp
 ~~~
@@ -796,7 +798,7 @@ Jeżeli nie skonfigurowaliśmy OSPF i BGP, odpowiednie outputy mogą być puste 
 
 ### 6.9.1. Nie zaczynaj od komendy — zacznij od opisu ruchu
 
-Zadanie od architekta: „Z biura A ma działać dostęp do sieci ERP `203.0.113.0/24` przez R2, a sieć serwerowa ma wiedzieć, jak odpowiedzieć do `192.0.2.0/24`. Dodatkowo sprawdź IPv6”.
+Zadanie od architekta: „Z biura A ma działać dostęp do sieci ERP `198.51.100.0/24` przez R2, a sieć serwerowa ma wiedzieć, jak odpowiedzieć do `192.0.2.0/24`. Dodatkowo sprawdź IPv6”.
 
 Jak dobry inżynier odpowiesz? Nie „ustawię route”, tylko rozbijesz wymaganie na siedem warunków:
 
@@ -821,13 +823,13 @@ show configuration interfaces | display set
 show route protocol direct
 show route protocol local
 show route protocol static
-show route 203.0.113.0/24 detail
+show route 198.51.100.0/24 detail
 ~~~
 
 **Urządzenie: R1-vSRX — Operational Mode, druga warstwa: forwarding i sąsiad**
 
 ~~~junos
-show route forwarding-table destination 203.0.113.10
+show route forwarding-table destination 198.51.100.10
 show arp
 show ipv6 neighbors
 show route table inet6.0
@@ -836,13 +838,13 @@ show route table inet6.0
 **Urządzenie: R1-vSRX — Operational Mode, trzecia warstwa: ruch kontrolowany i SRX flow**
 
 ~~~junos
-ping 198.51.100.2 source 198.51.100.1 count 5
-ping 203.0.113.10 source 192.0.2.1 count 5
+ping 10.12.0.2 source 10.12.0.1 count 5
+ping 198.51.100.10 source 192.0.2.1 count 5
 show security flow session
 show security policies
 ~~~
 
-Jeżeli ping ze `source 192.0.2.1` się nie powiedzie, nie ignoruj go tylko dlatego, że ping z `198.51.100.1` działa. Pierwszy symuluje **inną sieć źródłową i return path**, chociaż nadal nie jest identyczny z ruchem z PC-A: jest generowany przez RE, z innym kontekstem security. **Test końcowy musi pochodzić z klienta.**
+Jeżeli ping ze `source 192.0.2.1` się nie powiedzie, nie ignoruj go tylko dlatego, że ping z `10.12.0.1` działa. Pierwszy symuluje **inną sieć źródłową i return path**, chociaż nadal nie jest identyczny z ruchem z PC-A: jest generowany przez RE, z innym kontekstem security. **Test końcowy musi pochodzić z klienta.**
 
 ### 6.9.3. Niektóre polecenia nie dają tego samego dowodu, choć wyglądają podobnie
 
@@ -876,7 +878,7 @@ Jeżeli diff pokazuje nowe `static route`, a `show route` nie, najpierw ustal, *
 
 ~~~junos
 show route table inet.0
-show route 203.0.113.0/24 extensive
+show route 198.51.100.0/24 extensive
 show route hidden
 show route summary
 show system commit
@@ -980,17 +982,17 @@ To dlatego w realnym redundantnym WAN często łączysz static routing z mechani
 
 Znasz z Cisco static route, której next-hop nie leży w directly connected subnet, ale router może ją rozwiązać dzięki innym wpisom w RIB. W Junos standardowa static route typowo oczekuje bezpośrednio rozwiązywalnego next-hopa. Gdy wskazujesz **indirect next-hop**, może być potrzebne jawne `resolve`.
 
-Przykład: R1 ma trasę IGP do `198.51.100.200/32` i chce użyć tego adresu jako pośredniego next-hopa dla `203.0.113.0/24`.
+Przykład: R1 ma trasę IGP do `198.51.100.200/32` i chce użyć tego adresu jako pośredniego next-hopa dla `198.51.100.0/24`.
 
-**Urządzenie: R1-EDGE — Configuration Mode [edit private], przykład KONCEPCYJNY wymagający istniejącej drogi do 198.51.100.200**
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], przykład KONCEPCYJNY wymagający istniejącej drogi do 198.51.100.200**
 
 ~~~junos
-set routing-options static route 203.0.113.0/24 next-hop 198.51.100.200
-set routing-options static route 203.0.113.0/24 resolve
+set routing-options static route 198.51.100.0/24 next-hop 198.51.100.200
+set routing-options static route 198.51.100.0/24 resolve
 show | compare
 ~~~
 
-Bez prawidłowej ścieżki do indirect next-hop przykład nie tworzy działającego forwardingu. To nie jest komenda do podstawowego labu 6.11, gdzie `198.51.100.2` jest bezpośrednim sąsiadem.
+Bez prawidłowej ścieżki do indirect next-hop przykład nie tworzy działającego forwardingu. To nie jest komenda do podstawowego labu 6.11, gdzie `10.12.0.2` jest bezpośrednim sąsiadem.
 
 **Niewygodny gotcha:** `resolve` pozwala rozstrzygnąć next-hop przez inne wpisy RIB; jeśli rozwiązywanie bazuje na nieodpowiednim default albo tworzy nieoczekiwany łańcuch zależności, routing może być błędny. Po wdrożeniu zawsze badaj **resolved next-hop i egress**, nie tylko samą obecność statycznej route.
 
@@ -1000,7 +1002,7 @@ Kolejny oficjalny wyjątek: **`resolve` i `retain` nie mogą być skonfigurowane
 
 Czasem potrzebujemy specjalnej trasy, która **świadomie nie kieruje ruchu dalej** — na przykład bezpieczny aggregate blackhole do ochrony przed pętlami.
 
-**Urządzenie: R1-EDGE — Configuration Mode [edit private], izolowany lab, świadomy blackhole**
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany lab, świadomy blackhole**
 
 ~~~junos
 set routing-options static route 198.18.0.0/15 discard
@@ -1010,7 +1012,7 @@ show | compare
 **`discard`** — pakiety pasujące do trasy są odrzucane bez typowego ICMP unreachable.  
 **`reject`** — pakiety są odrzucane, a system wysyła odpowiedni komunikat ICMP/ICMPv6 unreachable, z zastrzeżeniem ograniczeń platformy i filtrowania.
 
-**Urządzenie: R1-EDGE — Configuration Mode [edit private], alternatywa do osobnego eksperymentu, NIE łącz równocześnie z discard dla tego samego prefiksu**
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], alternatywa do osobnego eksperymentu, NIE łącz równocześnie z discard dla tego samego prefiksu**
 
 ~~~junos
 delete routing-options static route 198.18.0.0/15 discard
@@ -1028,7 +1030,7 @@ show | compare
 
 Wyobraź sobie sieć z OSPF, która eksportuje wybrane trasy statyczne. Chcesz zachować techniczną trasę lokalnie, ale **nigdy nie rozgłaszać jej do innych routerów**.
 
-**Urządzenie: R1-EDGE — Configuration Mode [edit private], tylko przy świadomym projekcie redystrybucji**
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], tylko przy świadomym projekcie redystrybucji**
 
 ~~~junos
 set routing-options static route 198.18.0.0/15 discard
@@ -1046,7 +1048,7 @@ Z drugiej strony `no-readvertise` nie oznacza, że route zostanie usunięta z lo
 
 W niektórych szczególnych sytuacjach chcesz zachować static route w forwarding table, nawet gdy proces routingu `rpd` zostaje zatrzymany. Junos posiada **`retain`**. Nie należy jednak interpretować tego jako „gwarantowanego dostępu po awarii zasilania”.
 
-**Urządzenie: R1-EDGE — Configuration Mode [edit private], pokaz mechanizmu, NIE stosować bez analizy platformy**
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], pokaz mechanizmu, NIE stosować bez analizy platformy**
 
 ~~~junos
 set routing-options static route 198.18.0.0/15 discard
@@ -1064,15 +1066,15 @@ Dokumentacja Junos opisuje także `passive` dla statycznych tras. Może utrzymyw
 
 To zachowanie stoi w sprzeczności z intuicją „trasa jest active, więc na pewno zadziała”. Używaj tego typu ustawień wyłącznie do konkretnych, zrozumianych scenariuszy. Nie dodajemy `passive` do produkcyjnego runbooka „żeby trasa nie znikała”, bo możesz maskować rzeczywisty problem reachability.
 
-**Urządzenie: R1-EDGE — Configuration Mode [edit private], koncepcyjny przykład, nie stosuj na produkcji**
+**Urządzenie: R1-vSRX — Configuration Mode [edit private], koncepcyjny przykład, nie stosuj na produkcji**
 
 ~~~junos
-set routing-options static route 203.0.113.0/24 next-hop 198.51.100.2
-set routing-options static route 203.0.113.0/24 passive
+set routing-options static route 198.51.100.0/24 next-hop 10.12.0.2
+set routing-options static route 198.51.100.0/24 passive
 show | compare
 ~~~
 
-**Pytanie:** czy po utracie `198.51.100.2` klient ERP na pewno odzyska łączność, bo trasa nadal widnieje w table? **Nie.** Route visibility i realne forwarding reachability są odrębne.
+**Pytanie:** czy po utracie `10.12.0.2` klient ERP na pewno odzyska łączność, bo trasa nadal widnieje w table? **Nie.** Route visibility i realne forwarding reachability są odrębne.
 
 ### 6.10.9. `next-table` — kiedy forwarding wchodzi do kolejnej tablicy
 
@@ -1084,7 +1086,7 @@ Dla JNCIS zapamiętaj tylko, że **next-hop nie musi zawsze oznaczać adresu IPv
 
 ### 6.10.10. Static route troubleshooting — pięć pytań, zanim użyjesz `delete`
 
-**Scenariusz:** static `203.0.113.0/24` nie pojawia się jako active. Zacznij od pięciu pytań:
+**Scenariusz:** static `198.51.100.0/24` nie pojawia się jako active. Zacznij od pięciu pytań:
 
 1. Czy konfiguruje się ją w `inet.0`, `inet6.0` czy `NAME.inet.0`?
 2. Czy istnieje i jest aktywna **connected route do next-hopa** albo poprawna recursive resolution?
@@ -1096,10 +1098,10 @@ Dla JNCIS zapamiętaj tylko, że **next-hop nie musi zawsze oznaczać adresu IPv
 
 ~~~junos
 show configuration routing-options static | display set
-show route 203.0.113.0/24 extensive
+show route 198.51.100.0/24 extensive
 show route hidden
-show route forwarding-table destination 203.0.113.10
-show route 198.51.100.2
+show route forwarding-table destination 198.51.100.10
+show route 10.12.0.2
 show arp
 show security flow session
 ~~~
@@ -1581,7 +1583,7 @@ R1 ma:
 
 Operator wskazuje static/5 jako drogę preferowaną. **Co jest błędne?** Porównał preference tras do **różnych prefiksów**. Najdłuższy matching prefix to `198.18.0.0/15`, więc jeśli jest aktywny i zainstalowany, wygrywa nad default. Preference/AD **nie porównuje** dwóch różnych długości prefixu jako tego samego kandydata.
 
-**Urządzenie: R1-EDGE — Operational Mode, odczyt na urządzeniu z taką konfiguracją**
+**Urządzenie: R1-vSRX — Operational Mode, odczyt na urządzeniu z taką konfiguracją**
 
 ~~~junos
 show route 198.18.0.0/15
@@ -1597,53 +1599,53 @@ R1 ma connected uplink i static route via ISP-A. `show route` jest poprawny. Pin
 
 **Jaka jest lepsza hipoteza?** Pakiet może nie otrzymać lokalnej informacji **MAC do next-hopa**, choć route jest aktywna na poziomie RIB. Trzeba potwierdzić stan uplinku, ARP i peer. Usunięcie/re-add static nic nie da, jeśli fizyczny peer lub VLAN jest niedostępny.
 
-**Urządzenie: R1-EDGE — Operational Mode, minimalny dowód**
+**Urządzenie: R1-vSRX — Operational Mode, minimalny dowód**
 
 ~~~junos
 show interfaces ge-0/0/0 extensive
 show arp
-show route forwarding-table destination 203.0.113.10
-ping 198.51.100.2 source 198.51.100.1 count 5
+show route forwarding-table destination 198.51.100.10
+ping 10.12.0.2 source 10.12.0.1 count 5
 ~~~
 
 **Most z Cisco:** analogy `show ip cef adjacency` i `show arp` przy `show ip route`. Pamiętaj, że brak ARP nie musi od razu usunąć RIB entry.
 
 ### 6.CASE.3. „W tabeli mam /24, ale pojedynczy host nie działa”
 
-Wszystkie hosty `203.0.113.0/24` są dostępne, oprócz `203.0.113.10`. Administrator widzi aktywną /24 i prosi o reset application server.
+Wszystkie hosty `198.51.100.0/24` są dostępne, oprócz `198.51.100.10`. Administrator widzi aktywną /24 i prosi o reset application server.
 
 **Co może być przyczyną?** Bardziej szczegółowa **/32 route do `discard`**, oddzielna polityka, problem ARP jednego hosta, ACL na serwerze. Nie trzeba od razu wymieniać całego WAN.
 
-**Urządzenie: R1-EDGE — Operational Mode**
+**Urządzenie: R1-vSRX — Operational Mode**
 
 ~~~junos
-show route 203.0.113.10/32 exact
-show route 203.0.113.0/24
-show route forwarding-table destination 203.0.113.10
+show route 198.51.100.10/32 exact
+show route 198.51.100.0/24
+show route forwarding-table destination 198.51.100.10
 show arp
 ~~~
 
-**Pytanie:** czy `show route 203.0.113.0/24` potwierdza, że pod tą siecią nie istnieją bardziej szczegółowe prefiksy? **Nie.** Właśnie dlatego odczytujesz także route do hosta i FIB. W razie wątpliwości o dokładny wariant `exact` potwierdź składnię przez CLI `?` lub źródło producenta.
+**Pytanie:** czy `show route 198.51.100.0/24` potwierdza, że pod tą siecią nie istnieją bardziej szczegółowe prefiksy? **Nie.** Właśnie dlatego odczytujesz także route do hosta i FIB. W razie wątpliwości o dokładny wariant `exact` potwierdź składnię przez CLI `?` lub źródło producenta.
 
 ### 6.CASE.4. „Zmieniłem preference static na 200, ale ruch wciąż tędy idzie”
 
-Masz tylko static do `203.0.113.0/24`. Zmieniasz preference z 5 na 200, licząc na to, że Junos zacznie korzystać z ISP-B.
+Masz tylko static do `198.51.100.0/24`. Zmieniasz preference z 5 na 200, licząc na to, że Junos zacznie korzystać z ISP-B.
 
 **Dlaczego tak się nie stało?** Preference nie tworzy alternatywnej drogi. Jeśli nie istnieje **kwalifikowany route do tego samego prefiksu z niższą preference**, static/200 może nadal być aktywny. Stworzenie backup route wymaga rzeczywistego alternatywnego next-hopa, zwykle także odpowiednich mechanizmów failover.
 
-**Urządzenie: R1-EDGE — Operational Mode**
+**Urządzenie: R1-vSRX — Operational Mode**
 
 ~~~junos
-show route 203.0.113.0/24 extensive
+show route 198.51.100.0/24 extensive
 show route hidden
-show route forwarding-table destination 203.0.113.10
+show route forwarding-table destination 198.51.100.10
 ~~~
 
 **Wniosek:** preference to **ranking dostępnych kandydatów**, a nie interfejsowy przełącznik primary/secondary.
 
 ### 6.CASE.5. „Trasa jest w `CAMPUS-IOT.inet.0`, a z global WAN nie widzę urządzenia”
 
-Inżynier sprawdza `show route table CAMPUS-IOT.inet.0` — jest `10.10.10.0/24`. Z global `inet.0` próbuje ping hosta i dostaje timeout.
+**Uwaga: to celowo odrębny przykład nakładającej się adresacji w VRF, nie dodatkowy LAN w naszym DIAMOND.** Inżynier sprawdza `show route table CAMPUS-IOT.inet.0` — jest `10.10.10.0/24`. Z global `inet.0` próbuje ping hosta i dostaje timeout.
 
 **Prawidłowa diagnoza:** nie zakładaj automatycznego route leaking z routing instance do global. Sprawdź, do jakiej instance należy ingress interface, jak wykonano ping, czy istnieje interconnect/route leaking i czy firewall przepuszcza ruch.
 
@@ -1660,17 +1662,17 @@ ping 10.10.10.10 routing-instance CAMPUS-IOT count 5
 
 ### 6.CASE.6. „Odpowiedź z serwera wychodzi innym routerem, a SRX gubi TCP”
 
-W środowisku redundantnym R1 obsługuje request klienta, ale serwer odsyła reply przez R3. Routing wygląda „poprawnie” na każdym urządzeniu osobno, a stan sesji SRX nie zgadza się.
+W naszym DIAMOND request PC-A może popłynąć **R1→R3→R4**, podczas gdy R4 wciąż preferuje **R2** w drodze powrotnej. Na trasach statycznych i firewallach stateful jest to realny powód asymetrii i potencjalnego problemu z sesją. Routing wygląda „poprawnie” na każdym urządzeniu osobno, a stan sesji SRX nie zgadza się.
 
 **Hipoteza:** asymetryczny routing + stateful firewall flow processing. Nie naprawisz tego przez zmianę preference na chybił trafił. Narysuj **obie strony pięciokrotki sesji**, wskaż ingress/egress i miejsce NAT. Potem rozważ, czy projekt wymaga symetrii lub odpowiednio wspieranego mechanizmu pracy w HA.
 
 **Urządzenie: R1-vSRX — Operational Mode, stan SRX**
 
 ~~~junos
-show route 203.0.113.10
+show route 198.51.100.10
 show security flow session
 show security policies
-show route forwarding-table destination 203.0.113.10
+show route forwarding-table destination 198.51.100.10
 ~~~
 
 **Most z Cisco:** HSRP/VRRP i redundantne trasy nie rozwiązują automatycznie problemu asymetrii przez firewall stateful.
@@ -1684,16 +1686,16 @@ Nie. Zmienione **source IP** może powodować brak return route, inny ACL albo s
 **Urządzenie: R1-vSRX — Operational Mode, różne source IP**
 
 ~~~junos
-ping 203.0.113.10 count 5
-ping 203.0.113.10 source 192.0.2.1 count 5
-show route 203.0.113.10
+ping 198.51.100.10 count 5
+ping 198.51.100.10 source 192.0.2.1 count 5
+show route 198.51.100.10
 ~~~
 
-**Urządzenie: PC-A-LINUX — Linux shell, test z prawdziwej sieci źródłowej**
+**PC-A — konsola VPCS, test z rzeczywistego hosta kanonicznego DIAMOND**
 
-~~~bash
-ip route get 203.0.113.10
-ping -c 5 203.0.113.10
+~~~text
+show ip
+ping 198.51.100.10
 ~~~
 
 Pamiętaj o rozróżnieniu **ruchu z RE** i **transit PC-A** w procesie SRX.
