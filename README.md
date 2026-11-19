@@ -12,11 +12,11 @@ Własny podręcznik i repozytorium laboratoriów do nauki **JNCIA-Junos (JN0-106
 6. [Rozdział 5 — Operational Monitoring and Maintenance: show/monitor, interfejsy, narzędzia sieciowe, upgrade, reboot, recovery i diagnostyka](docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md)
 7. **[Kanoniczna topologia DIAMOND — 4×vSRX, 2×VPCS, CIDR i loopbacki](labs/reference-diamond-4vsrx-2vpcs/README.md)** oraz [prompt dla Codexa: wdrożenie EVE-NG na GCP](labs/reference-diamond-4vsrx-2vpcs/CODEX_GCP_EVE_NG_PROMPT.md)
 8. [Lab rozdziału 2 — 4×vSRX i 2×VPCS](labs/ch02-four-vsrx/README.md)
-13. [Lab rozdziału 3 — Shared/Private Candidate, Load, Commit Confirmed](labs/ch03-cli-change-management/README.md)
-9. [Lab rozdziału 4 — pełny onboarding Junos z bezpiecznym recovery](labs/ch04-initial-config/README.md)
-10. [Lab rozdziału 5 — 2×vSRX: interface fault, missing route i policy deny](labs/ch05-operational-monitoring/README.md)
-11. [Instrukcje dla Codexa](AGENTS.md)
-12. [Źródła modeli, wersji Junos i ograniczeń BOM — research 2026-11-16](docs/research/CH01_ENTERPRISE_PORTFOLIO_ZRODLA_2026-11-16.md)
+9. [Lab rozdziału 3 — Shared/Private Candidate, Load, Commit Confirmed](labs/ch03-cli-change-management/README.md)
+10. [Lab rozdziału 4 — pełny onboarding Junos z bezpiecznym recovery](labs/ch04-initial-config/README.md)
+11. [Lab rozdziału 5 — 2×vSRX: interface fault, missing route i policy deny](labs/ch05-operational-monitoring/README.md)
+12. [Instrukcje dla Codexa](AGENTS.md)
+13. [Źródła modeli, wersji Junos i ograniczeń BOM — research 2026-11-16](docs/research/CH01_ENTERPRISE_PORTFOLIO_ZRODLA_2026-11-16.md)
 
 ## Projekt — zasady
 
