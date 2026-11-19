@@ -1583,3 +1583,135 @@ commit
 ~~~
 
 Widzisz już, dlaczego w pierwszej lekcji rozdzieliliśmy routing policy, stateless firewall filter i SRX security policy. W czwartym fault injection BGP w ogóle nie było powodem niedostępności. Właśnie taka diagnostyka chroni cię przed zmianami, które wyglądają aktywnie, ale nie dotykają miejsca prawdziwej awarii.
+
+### Faza 7 — zamykamy laboratorium bez zostawiania przypadkowych zmian
+
+Zanim zakończymy ćwiczenie, spójrz na R1 i R2 jak na urządzenia, które przejmiesz po innym inżynierze. Chcesz dostać informację, co zmieniono, co działa, jakie testowe obiekty pozostały i jak wrócić do stanu początkowego. Nie zostawiaj na R1 sztucznej trasy `static discard` tylko dlatego, że „już nam nie przeszkadza”. Nie zostawiaj filtra próbnego na porcie, jeśli nie miał być częścią docelowego baseline labu.
+
+Najbezpieczniej użyć **izolowanego snapshotu środowiska sprzed ćwiczenia**, jeśli EVE-NG i twoja metoda zarządzania wirtualnymi dyskami rzeczywiście pozwalają odtworzyć właściwy stan. Nie utożsamiaj jednak „restart labu” z automatycznym rollback Junos — konfiguracja może zostać zachowana na dysku maszyny.
+
+Jeżeli nie masz snapshotu, wykonaj selektywny cleanup. Poniższe polecenia są przeznaczone **wyłącznie do węzłów, na których sam utworzyłeś te obiekty w tym labie**. Nie kasuj istniejących stref, interfejsów ani innych referencji o identycznych nazwach w cudzym środowisku. Najpierw porównaj configuration i zweryfikuj, czy obiekt nie jest używany gdzie indziej.
+
+**R1-vSRX — Configuration Mode, usunięcie testowych obiektów filtrujących i BGP**
+
+~~~junos
+delete routing-options static route 198.51.100.0/24
+delete interfaces ge-0/0/2 unit 0 family inet filter input LAN-IN
+delete firewall family inet filter LAN-IN
+delete protocols bgp group TO-R2
+delete policy-options policy-statement EXPORT-R1
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+**R2-vSRX — Configuration Mode, usunięcie ćwiczeniowej polityki import i BGP**
+
+~~~junos
+delete protocols bgp group TO-R1
+delete policy-options policy-statement IMPORT-R1
+delete policy-options policy-statement EXPORT-R2
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+Jeśli chcesz przywrócić również stan **sprzed Fazy 1**, a obie maszyny są rzeczywiście świeżymi, odrębnymi instancjami bez współdzielonych obiektów, możesz następnie **po osobnym review** usuwać dodane adresy interfejsów, ASN, reguły `LAB-LAN-OUT` / `LAB-WAN-IN` oraz strefy LAN/WAN. Nie podaję tutaj jednego masowego `delete security`, ponieważ takie polecenie byłoby zbyt łatwe do niewłaściwego użycia na urządzeniu z niepustym baseline. Jeśli w labie istniały inne obiekty, poprawnym sposobem powrotu jest precyzyjny rollback do zapisanego stanu, a nie zgadywanie.
+
+Po cleanup sprawdź różnice, pozostałe konfiguracje i testy adekwatne do docelowego stanu. Pamiętaj, że po usunięciu BGP **end-to-end PC-A ↔ PC-B nie powinien już działać z powodu tego eBGP**; test końcowy musi uwzględniać, *jaki stan chcieliśmy przywrócić*. Po pozytywnym post-check potwierdź oczekujące commity.
+
+**R1-vSRX — Configuration Mode, potwierdzenie cleanup po PASS**
+
+~~~junos
+commit
+~~~
+
+**R2-vSRX — Configuration Mode, potwierdzenie cleanup po PASS**
+
+~~~junos
+commit
+~~~
+
+### Co właściwie udowodniliśmy?
+
+W pierwszej awarii usunęliśmy tylko reklamę BGP, nie lokalną trasę direct. W drugiej dopuściliśmy eksport po jednej stronie, ale odrzuciliśmy import po drugiej. W trzeciej routing był dobry, lecz pakiet dostał `discard` w stateless filter. W czwartej nawet przy dobrym routingu i dopuszczającym stateless filter stanowa polityka SRX zabroniła nowej sesji.
+
+Cztery awarie, cztery miejsca, cztery różne naprawy. Właśnie dlatego nie warto myśleć o całym rozdziale jak o katalogu filtrów.
+
+Jeśli wykonasz lab na prawdziwym obrazie vSRX, uzupełnij plik laboratorium o wersję Junos, mapowanie NIC, wyniki `show route`, `advertising-protocol`, `receive-protocol hidden`, liczniki filtra i stan sesji. Dopiero na podstawie tych dowodów można oznaczyć konkretne testy **RUNTIME VALIDATED**. Dziś status pozostaje **PLANNED**.
+
+---
+
+## Finał. Incydent, którego teraz nie powinieneś już diagnozować na ślepo
+
+Jest 16:40. NOC wraca do ciebie z niemal tym samym zgłoszeniem, od którego zaczęliśmy. „Oddział nie łączy się z ERP. BGP jest zielony. W czym problem?”
+
+Dawniej być może otworzyłbyś `show configuration protocols bgp` i zaczął szukać nieprawidłowej linijki. Teraz masz inną metodę.
+
+Pytasz: **czy problem dotyczy informacji o trasie czy konkretnego pakietu?** Jeżeli R1 w ogóle nie zna celu, analizujesz jego tablice i protokół przyjmujący trasy. Jeśli R1 zna cel, ale R2 nie zna drogi do oddziału, patrzysz na export na R1 i import na R2. Jeśli obie strony mają poprawne trasy, przechodzisz do RIB/FIB, reverse path, stateless filters i — na SRX — security zones oraz sessions. Nie zakładasz, że ping routera do routera oznacza sukces host-to-host.
+
+Można to narysować jako jedną drogę rozumowania:
+
+```mermaid
+flowchart TD
+    S["Użytkownik: aplikacja nie działa"] --> A{"Czy lokalne hosty<br/>mają poprawną adresację i bramę?"}
+    A -->|nie| H["Napraw endpoint / LAN"]
+    A -->|tak| R{"Czy router ma aktywną trasę<br/>do celu i prawidłowy next hop?"}
+    R -->|nie| C["Sprawdź received, import,<br/>RIB i best-path"]
+    R -->|tak| B{"Czy druga strona zna<br/>drogę powrotną?"}
+    B -->|nie| E["Sprawdź export,<br/>BGP advertisements i import"]
+    B -->|tak| F{"Czy pakiet przechodzi<br/>przez filter/uRPF?"}
+    F -->|nie| D["Dopasuj term, interface,<br/>family, liczniki i reverse path"]
+    F -->|tak| X{"SRX: czy nowa sesja<br/>jest dozwolona?"}
+    X -->|nie| Y["Sprawdź zones, security policy,<br/>host-inbound dla ruchu do routera"]
+    X -->|tak| Z["Sprawdź NAT, endpoint,<br/>return traffic i dalszy path"]
+```
+
+*Rysunek 8.10. Tekst alternatywny: drzewo diagnostyczne prowadzi od adresacji hosta przez RIB/next-hop, trasę powrotną, import/export, stateless filter/uRPF i politykę SRX do dalszych przyczyn. Diagram jest mapą pytań, nie ścisłą, sprzętową kolejnością wykonywania operacji.*
+
+### Kilka krótkich pytań, które powinny przychodzić ci do głowy automatycznie
+
+**R1 ma aktywne 10.10.10.0/24, ale nie reklamuje go do R2. Czy BGP `Established` potwierdza prawidłową export policy?** Nie. Stan sesji potwierdza relację protokołu, a lista `advertising-protocol` odpowiada na pytanie o konkretną reklamę.
+
+**R2 pokazuje trasę w `receive-protocol ... hidden`. Czy można założyć, że znalazła się w FIB?** Nie. Hidden oznacza, że nie jest normalną aktywną trasą do forwardingu. Ustal przyczynę, a nie tylko sam fakt ukrycia.
+
+**Polityka ma pierwszy term `then accept`, a dalej drugi z `then reject`. Czy drugi może odebrać decyzję pierwszemu dla tej samej trasy?** Nie w zwykłym łańcuchu: `accept` kończy ocenę. Gdy chcesz kontynuować, potrzebujesz świadomie wybranego `next term` lub `next policy`.
+
+**W filtrze firewall pierwszy term ma tylko `then count`. Czy pakiet przejdzie automatycznie do drugiego?** Nie zakładaj tego. W zwykłym stateless filter pasujący term z samym `count` może zakończyć się implicit accept. Zawsze sprawdzaj semantykę action i zamierzony przepływ.
+
+**OSPF import `then reject` nie usuwa trasy wewnętrznej. Czy oznacza to błąd systemu?** Niekoniecznie. Junos ogranicza filtrowanie nonexternal OSPF routes w import policy, a zachowanie wynika z zasad link-state. Podobne ograniczenia trzeba znać także w nowoczesnym IS-IS.
+
+**Dwa ISP, strict uRPF i asymetryczny routing. Czy drop na ISP-B zawsze oznacza spoofing?** Nie. Reverse path może wskazywać ISP-A mimo legalnego przyjścia przez ISP-B. Wymaga to analizy topologii, a nie bezwarunkowego wyłączenia ochrony.
+
+**R1 ma poprawną route i filtr `LAN-IN` przepuszcza źródło użytkownika, ale TCP nadal nie działa przez vSRX. Czy export policy pomoże?** Nie wtedy, gdy problem jest w security policy SRX, nowej sesji, NAT, host firewall lub return traffic. Zacznij od dowodu miejsca odrzucenia.
+
+### Gdzie kończy się rozdział 8, a zaczynają następne?
+
+W rozdziale 9 wykorzystamy tę wiedzę do OSPF: zobaczymy, dlaczego LSU/LSA i LSDB narzucają pewne ograniczenia politykom. W rozdziale 10 rozbudujemy scenariusz IS-IS o Level 1/2 i redystrybucję. W rozdziale 11 powrócimy do BGP — best-path, attributes, communities, next-hop, multipath i scenariuszy wielooperatorskich — z dużo większą liczbą ruchomych elementów. W rozdziale 16 poznamy osobne mechanizmy bezpieczeństwa Layer 2, a w 20 zobaczymy, jak firewall filters wspierają CoS.
+
+Ważne jest jednak to, czego nie zamierzamy już robić: **uczyć się każdej nowej funkcji bez pytania, co dokładnie przetwarza i na którym etapie**. Gdy wiesz, czy router ocenia trasę, pakiet czy stan sesji, połowa kłopotów diagnostycznych staje się po prostu logicznym zadaniem.
+
+---
+
+## Źródła i granice weryfikacji
+
+Dokument powstał na podstawie pierwotnego rozdziału 8 i zunifikowanego blueprintu w tym repozytorium, ale jego narracja, kolejność wyjaśnień, przykłady i diagramy zostały przebudowane. Wersja poprzednia pozostaje w pliku `JUNOS_Rozdzial_08_Routing_Policy_and_Firewall_Filters_Agent.md`, aby można było porównać oba sposoby prowadzenia lekcji. Nie pochodzą stamtąd wyniki urządzeń — **nie wykonano testów runtime**.
+
+Najistotniejsze źródła Juniper użyte podczas redakcji (odsyłacze do dokumentacji producenta, a nie bank pytań egzaminacyjnych):
+
+1. [Understanding Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-overview.html) oraz [Default Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-actions-defaults.html) — protokół i kierunek decydują o zachowaniu domyślnym.
+2. [How a Routing Policy Is Evaluated](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-evaluation-method.html) i [Routing Policy Chain](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-chain-evaluation-method.html) — termy, kontynuacja, terminalne actions.
+3. [Route Filter / Walkup](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/walkup-route-filter-policy-option-overview.html) — najbardziej szczegółowy wzorzec w jednym termie i opcjonalne walkup.
+4. [Firewall Filter Components](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-components.html) — implicit discard na końcu filtra, implicit accept w dopasowanym termie bez akcji terminalnej.
+5. [Understanding Unicast RPF](https://www.juniper.net/documentation/us/en/software/junos/security-services/topics/topic-map/interfaces-configuring-unicast-rpf.html) — strict/loose, platformowe warianty i konsekwencje asymetrii.
+6. [OSPF Routing Policy](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-routing-policy.html) — ograniczenia import dla nonexternal routes.
+7. [IS-IS import CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/import-edit-protocols-isis.html) i [IS-IS route prioritization](https://www.juniper.net/documentation/us/en/software/junos/is-is/topics/example/example-configuring-routing-policy-to-prioritize-isis-routes.html) — wsparcie import i niuanse tras wewnętrznych.
+8. [Basic BGP Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/basic-routing-policies.html) — BGP import/export i hidden routes.
+9. [Understanding Routing Policy Tests](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-testing-routing-policies.html) — `test policy` nie zastępuje rzeczywistej reklamy BGP.
+10. [SRX Security Policies](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html) i [Security Zones](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/topic-map/security-zone-configuration.html) — stateful flow, strefy, ruch do samego urządzenia.
+
+Nie kopiowano cudzych ilustracji; wszystkie diagramy Mermaid w tym rozdziale są autorskie. Warianty CLI wymagają sprawdzenia na konkretnej wersji i modelu. Gdy czytasz ten rozdział jako materiał do certyfikacji, odróżniaj **mechanizm potwierdzony dokumentacją** od **scenariusza laboratoryjnego, którego wynik jest dopiero przewidywany**.
+
+**Pokrycie rozdziału 8 blueprintu:** 8.1 default policies; 8.2 import/export; 8.3 routing policy flow; 8.4 wpływ na RIB; 8.5 policy statements i terms; 8.6 match criteria/actions; 8.7 koncepcja firewall filters; 8.8 ich budowa; 8.9 przetwarzanie pakietów; 8.10 uRPF; 8.11 konfiguracja/monitoring/change; 8.12 policy w OSPF/IS-IS/BGP; 8.13 zaawansowane IGP/BGP; 8.14 [LAB] BGP i filtrowanie. Struktura służy nauczeniu pełnej sekwencji, nie tylko odhaczeniu tematów.
+
+*Ostatnia myśl:* kiedy następnym razem usłyszysz „BGP jest zielony, ale aplikacja nie działa”, nie pytaj od razu, jaką komendę wpisać. Zapytaj, **czy mamy problem z opowieścią o drodze, z samą drogą, czy z przesyłką, która próbuje nią przejść**. Potem dobierz narzędzie do odpowiedzi.
