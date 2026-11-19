@@ -438,3 +438,115 @@ flowchart TD
 W tym momencie drugi dyspozytor w naszej analogii ma już mapę do bramy operatora B. Ale nadal żaden klient nie został mu przypisany. **Routing instances i RIB groups przygotowują alternatywną drogę; dopiero FBF zdecyduje, który pakiet ją wykorzysta.**
 
 *Źródła: [RIB Groups CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/rib-groups-edit-routing-options.html), [import-rib CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/import-rib-edit-routing-options.html), [interface-routes CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/interface-routes-edit-routing-options.html), [Przykład FBF z RIB group](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/example/filter-based-forwarding-example.html).*
+
+---
+
+## 7.5. Load balancing — dlaczego dwa dobre uplinki nie muszą oznaczać połowy ruchu na każdym [S]
+
+### Wiemy już, jak wybierać inną tabelę. Ale co, jeśli chcemy używać obu łączy do jednej usługi?
+
+W biurze kończy się wdrożenie. WAN-A i WAN-B działają, aplikacja odpowiada z obu stron, a administrator pokazuje w \`show route\` dwie równorzędne drogi do 203.0.113.10. Tymczasem na grafie obciążenia WAN-A ma 90%, a WAN-B prawie nic. Kierownik pyta: „Skoro są dwie drogi, dlaczego płacimy za dwie, a korzystamy praktycznie z jednej?”
+
+Pierwsza pułapka polega na założeniu, że **wiele next-hopów w RIB = zrównoważone pakiety na kablu**. RIB jest opisem możliwych tras i wyboru routingu. Forwarding table musi jeszcze otrzymać odpowiednie next-hopy i platforma musi zastosować właściwy algorytm podziału ruchu. Nawet gdy oba next-hopy są w FIB, jeden duży przepływ TCP nie musi być dzielony po 50% między dwa łącza.
+
+Znamy tę sytuację z Cisco CEF: equal-cost multipath (ECMP) i hashing. Ale warto ją zbudować w głowie od podstaw. Router nie chce bez potrzeby wysyłać kolejnych pakietów *jednego* połączenia na przemian przez dwa różne uplinki, ponieważ różne opóźnienia i kolejki mogą powodować **packet reordering**. To nie tylko problem estetyki statystyk. TCP może wtedy gorzej wykorzystywać łącze, a mechanizmy stateful security i NAT mogą mieć dodatkowe wymagania co do symetrii.
+
+Dlatego wiele implementacji zamiast „każdy kolejny pakiet inną drogą” wykorzystuje **per-flow hashing**: dla danych pól nagłówka oblicza wartość i przypisuje przepływ do konkretnego next-hopa. Dwa niezależne połączenia mogą trafić różnymi drogami, ale pojedyncze połączenie może pozostać całe na jednym uplinku.
+
+### RIB versus FIB — ten sam problem, który poznaliśmy przy aggregate, tylko z innej strony
+
+Wyobraź sobie dwa wiersze na ekranie. W RIB do 203.0.113.10/32 widać dwa równorzędne next-hopy. W forwarding table zobaczysz tylko jeden. Czy to musi oznaczać awarię? Niekoniecznie. Domyślne zachowanie instalacji multipath w Junos zależy od platformy, typu trasy i ustawień. Często trzeba jawnie włączyć odpowiednią politykę **forwarding-table export**, żeby FIB korzystała ze wszystkich kwalifikujących się next-hopów.
+
+To właśnie dlatego nie zaczniemy od konfigurowania \`load-balance\`. Najpierw sprawdzimy, czy **naprawdę** mamy dwie poprawne drogi. Drugie łącze \`up/up\` nie oznacza, że trasa jest równokosztowa. Przy innej preference albo niewykonalnym next-hop nie ma ECMP, nawet jeśli na dashboardzie są dwa zielone porty.
+
+Załóżmy, że upstream A i B mają odizolowany testowy loopback 203.0.113.10/32, a R1 zna oba next-hopy. Wystarczająco prosty przykład, by rozpoznać ECMP bez BGP, IS-IS czy OSPF.
+
+**R1-vSRX — Configuration Mode [edit], dwa statyczne next-hopy do tego samego testowego celu**
+
+~~~junos
+set routing-options static route 203.0.113.10/32 next-hop 198.51.100.2
+set routing-options static route 203.0.113.10/32 next-hop 198.51.100.6
+~~~
+
+Nie zapominaj, że to dwie wartości \`next-hop\` dla jednej trasy static; komendy nie są dwoma niezależnymi prefiksami. Działanie wymaga rzeczywiście aktywnych obu transitów i zdolności rozwiązania obu next-hopów.
+
+**R1-vSRX — Operational Mode, zanim zaczniemy zmieniać forwarding**
+
+~~~junos
+show route 203.0.113.10/32 exact extensive
+show route forwarding-table destination 203.0.113.10
+show interfaces terse
+show arp no-resolve
+~~~
+
+Pierwsze polecenie odpowiada, czy obie kandydatury istnieją i kwalifikują się jako multipath. Drugie pokazuje, co jest faktycznie widoczne w forwarding. Trzecie i czwarte sprawdzają, czy nasze łącza nie są tylko wirtualnym założeniem w konfiguracji.
+
+### Dziwna nazwa, która może zepsuć rozumienie: load-balance per-packet
+
+Teraz zobaczysz w Junos polecenie **\`then load-balance per-packet\`**. To jedna z najbardziej zdradliwych nazw w całym rozdziale. Kiedy ktoś przychodzi z Cisco, często rozumie ją literalnie: „pakiet pierwszy A, drugi B, trzeci A”. W typowych zastosowaniach Junos ta opcja **włącza per-flow load balancing w forwarding**, a nie naiwne naprzemienne wysyłanie każdego kolejnego pakietu. Dokładna implementacja i dostępne tryby zależą od platformy i wydania; są też produkty oraz warianty, które wspierają prawdziwe rozdzielanie per-packet.
+
+Co ważne, nie ma tu sprzeczności w dokumentacji: Juniper opisuje **konfigurację per-flow** i pokazuje, że historyczna akcja CLI nazywa się \`per-packet\`. Właśnie dlatego nie wolno tłumaczyć składni bez wyjaśnienia mechanizmu.
+
+**R1-vSRX — Configuration Mode [edit], osobny eksperyment ECMP na wspieranym obrazie**
+
+~~~junos
+set policy-options policy-statement ECMP-TO-SERVICE term ONE-SERVICE from route-filter 203.0.113.10/32 exact
+set policy-options policy-statement ECMP-TO-SERVICE term ONE-SERVICE then load-balance per-packet
+set policy-options policy-statement ECMP-TO-SERVICE term ONE-SERVICE then accept
+set policy-options policy-statement ECMP-TO-SERVICE term REST then accept
+set routing-options forwarding-table export ECMP-TO-SERVICE
+~~~
+
+Ta policy robi coś zupełnie innego niż eksport do BGP. Mamy ją pod \`routing-options forwarding-table export\`, a nie pod \`protocols bgp export\`. **Dotyczy instalacji tras w FIB**, nie reklamowania prefiksów sąsiadowi. Dla jednego prefixu chcemy pozwolić na multipath. Pozostałe trasy przepuszczamy przez końcowy term, aby eksperyment nie zablokował normalnego forwardingu.
+
+Jeśli urządzenie miało już forwarding-table export policy, **nie wolno jej bezmyślnie zastąpić**. W produkcji trzeba przeanalizować i połączyć istniejące reguły. W naszym izolowanym labie wymagamy braku takiej konfiguracji w baseline.
+
+**R1-vSRX — Operational Mode, po bezpiecznym commit na izolowanym labie**
+
+~~~junos
+show configuration routing-options forwarding-table | display set
+show configuration policy-options policy-statement ECMP-TO-SERVICE | display set
+show route 203.0.113.10/32 exact extensive
+show route forwarding-table destination 203.0.113.10
+~~~
+
+Oczekujemy, że dla kwalifikującej się trasy FIB będzie mogła używać obu next-hopów. Ale sama obecność policy to nadal tylko konfiguracja. Jeśli \`show route ... extensive\` nie pokazuje rzeczywistej równorzędności, nie próbuj naprawiać problemu przez wpisanie tego samego \`load-balance\` po raz drugi.
+
+### Jeden ping nie jest testem load balancingu
+
+Wyobraź sobie, że wysyłasz z PC-A dwadzieścia echo requests. Wszystkie idą przez WAN-A. Czy ECMP nie działa? Niekoniecznie. Jeśli hash dla tych pakietów pozostaje taki sam, kolejny pakiet trafi do tego samego next-hopa. **Jeden flow nie reprezentuje rozkładu wielu flows**.
+
+A gdy z PC-A uruchomisz dziesięć niezależnych sesji do tej samej usługi, też nie ma gwarancji dokładnego 50/50. Zależy, czy hashing bierze pod uwagę L3 i L4, jak platforma obsługuje ICMP, ile jest strumieni, jak równomierne są ich rozmiary i czy różne next-hopy mają identyczną wagę. Jest wiele powodów, dla których wartości Mb/s nie będą sobie równe, nawet jeśli liczba przypisanych flows rozkłada się sensownie.
+
+~~~mermaid
+flowchart TD
+  F["Wiele niezależnych flows<br/>do tego samego celu"] --> H["Hash: pola L3 / L4<br/>zależnie od PFE"]
+  H --> A["Wynik A → WAN-A"]
+  H --> B["Wynik B → WAN-B"]
+  A --> I["Flow 1 może w całości<br/>korzystać z WAN-A"]
+  B --> J["Flow 2 może w całości<br/>korzystać z WAN-B"]
+~~~
+
+*Rysunek 7.6 (autorski). Tekst alternatywny: różne przepływy są przypisywane do next-hopów na podstawie hasha, a niekoniecznie przez naprzemienny wybór dla każdego pakietu. To uogólnienie; algorytm i pola zależą od platformy.*
+
+Na niektórych modelach można zmienić hash fields, np. uwzględniać porty L4. Nie dodam jednej uniwersalnej komendy \`hash-key\` do bazowego labu, ponieważ obsługa i składnia znacznie różnią się na MX/QFX/EX i vSRX. Najpierw sprawdź dokumentację konkretnego PFE; źle dobrana zmiana może wpłynąć na zachowanie innych usług, a nie tylko naszego testu.
+
+### Load balancing nie jest ani failoverem, ani LAG
+
+W projekcie greenfield klient często używa słów „redundancja”, „balancing” i „aggregation” zamiennie. To trzy różne cele.
+
+**Failover**: jeżeli WAN-A przestanie działać, chcemy przejść na WAN-B. Można osiągnąć to przez preferencje tras, tracking/BFD lub routing dynamiczny, zależnie od projektu. Nie wymaga równoczesnego używania obu łączy.
+
+**ECMP**: router ma wiele równorzędnych, kwalifikujących się next-hopów i może podzielić ruch pomiędzy nie. Nie oznacza to, że pojedyncza sesja TCP wykorzysta sumę ich przepustowości.
+
+**LAG**: kilka interfejsów fizycznych tworzy logiczne połączenie L2/L3 z odpowiednim mechanizmem agregacji. Typowy hash w LAG także nie oznacza „jeden przepływ TCP podzielony równomiernie na wszystkie porty”, a przy wielu operatorach WAN zwykle nie budujesz jednego LAG przez niezależne domeny usługowe.
+
+**Most z Cisco:** ECMP w CEF, \`port-channel\` i backup static route mają analogiczne cele, lecz inny punkt konfiguracji. Na Junos w tym rozdziale skupiamy się na **równorzędnych trasach oraz ich instalacji do FIB**, a nie na fizycznym LAG.
+
+### Mini-incydent: „98% ruchu idzie przez WAN-A”
+
+Kiedy patrzysz na liczniki uplinku i widzisz ogromną nierównowagę, pytaj w tej kolejności: czy FIB ma dwa next-hopy? Czy ruch ma wiele niezależnych flows? Czy wszystkie flows mają takie same source/destination, a hash używa tylko L3? Czy jeden elephant flow dominuje całkowity ruch? Czy część ruchu nie została wcześniej skierowana przez FBF do innej tablicy?
+
+Nie poprawiaj \`hash-key\` tylko dlatego, że jeden iperf pokazał 90/10. Najpierw sprawdź **co jest rozkładane**: pakiety, przepływy czy po prostu ilość bajtów. Dla jednego dużego połączenia 100/0 może być prawidłowym zachowaniem per-flow ECMP.
+
+*Źródła: [Configuring Per-Flow Load Balancing](https://www.juniper.net/documentation/us/en/software/junos/sampling-forwarding-monitoring/topics/concept/policy-configuring-per-flow-load-balancing.html), [Configuring Per-Packet Load Balancing](https://www.juniper.net/documentation/us/en/software/junos/sampling-forwarding-monitoring/topics/concept/policy-configuring-per-packet-load-balancing.html), [load-balance CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/load-balance-edit-policy-options-policy-statement-then.html), [Understanding Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-overview.html).*
