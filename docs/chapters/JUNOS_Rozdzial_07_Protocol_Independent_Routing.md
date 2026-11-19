@@ -101,7 +101,7 @@ A co z 10.60.99.25? To adres, który mieści się w podsumowaniu /16, ale nie je
 ~~~mermaid
 flowchart TD
   P["Pakiet do sieci 10.60.x.x"] --> L{"Najbardziej szczegółowa trasa?"}
-  L -->|10.60.10.10| A["10.60.10.0/24 → UP-A"]
+  L -->|10.60.10.10| A["10.60.10.0/24 → R2"]
   L -->|10.60.20.10| B["10.60.20.0/24 → R3"]
   L -->|10.60.99.25| S["10.60.0.0/16 → reject"]
   S --> X["Brak realnego /24: pakiet nie idzie do ISP"]
@@ -144,14 +144,14 @@ set routing-options static route 10.70.10.0/24 next-hop 10.12.0.2
 set routing-options generate route 10.70.0.0/16
 ~~~
 
-Tutaj również istnieje contributor. Ale **generated route może przejąć next-hop od primary contributing route**. W naszej prostej sieci będzie nim droga do 10.70.10.0/24 przez 10.12.0.2. Zatem pakiet do 10.70.99.25, choć nie ma własnej /24, może zostać wysłany do UP-A. Tam upstream może go odrzucić. Sam ping nie wystarczy, żeby powiedzieć, czy R1 wysłał pakiet: trzeba zobaczyć forwarding table albo ruch na interfejsie UP-A.
+Tutaj również istnieje contributor. Ale **generated route może przejąć next-hop od primary contributing route**. W naszej prostej sieci będzie nim droga do 10.70.10.0/24 przez 10.12.0.2. Zatem pakiet do 10.70.99.25, choć nie ma własnej /24, może zostać wysłany do R2. Tam upstream może go odrzucić. Sam ping nie wystarczy, żeby powiedzieć, czy R1 wysłał pakiet: trzeba zobaczyć forwarding table albo ruch na interfejsie R2.
 
 ~~~mermaid
 flowchart LR
-  C["Aktywny contributor<br/>10.70.10.0/24 via UP-A"] --> G["Generated<br/>10.70.0.0/16"]
+  C["Aktywny contributor<br/>10.70.10.0/24 via R2"] --> G["Generated<br/>10.70.0.0/16"]
   G --> N["Next-hop z primary contributor<br/>10.12.0.2"]
   P["Pakiet do 10.70.99.25"] --> G
-  N --> W["WAN-A: pakiet może wyjść<br/>mimo braku hosta 10.70.99.25"]
+  N --> W["R2 (górny transit): pakiet może wyjść<br/>mimo braku hosta 10.70.99.25"]
 ~~~
 
 *Rysunek 7.3 (autorski). Tekst alternatywny: generated /16 powstaje na podstawie aktywnego, bardziej szczegółowego contributora i może odziedziczyć jego next-hop. W przeciwieństwie do aggregate reject kieruje pakiety do wyjścia.*
@@ -172,7 +172,7 @@ Ostatnie polecenie może wydawać się dziwne: dlaczego przy \`generate\` sprawd
 
 To też oznacza, że **martian, static, aggregate i generated nie są czterema równoważnymi sposobami filtrowania routingu**. Najpierw zdecyduj, czy potrzebujesz realnej stałej trasy, warunkowego bezpiecznego summary czy warunkowej trasy przekazującej ruch dalej.
 
-Przed przejściem dalej przeanalizuj trzy cele: 10.60.10.10, 10.60.99.25 i 10.70.99.25. Pierwszy wybierze konkretną /24; drugi może trafić w aggregate reject; trzeci może opuścić R1 przez WAN-A dzięki generated. Wszystkie trzy zachowania mogą być jednocześnie poprawne.
+Przed przejściem dalej przeanalizuj trzy cele: 10.60.10.10, 10.60.99.25 i 10.70.99.25. Pierwszy wybierze konkretną /24; drugi może trafić w aggregate reject; trzeci może opuścić R1 przez R2 (górny transit) dzięki generated. Wszystkie trzy zachowania mogą być jednocześnie poprawne.
 
 *Źródła techniczne: [Juniper — Configuring Route Aggregation](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/config-route-aggregation.html), [Understanding Conditionally Generated Routes](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/concept/policy-generated-routes.html), [Static Route Preferences](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html), [Route Aggregation CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/aggregate-edit-routing-options.html).*
 
@@ -266,13 +266,11 @@ Tym sposobem masz już trzy różne odpowiedzi na trzy problemy. **Aggregate** m
 
 ### Z jedną tablicą wszystko jest proste, dopóki firma nie chce dwóch zasad
 
-Wracamy do naszego biura. Dwie firmy operatorskie, dwa tranzyty R2 oraz R3. Kierownik IT zgłasza wymaganie: „Komputery zwykłych pracowników mają korzystać z WAN-A, ale wybrane stanowisko laboratoryjne PC-A powinno zawsze wychodzić przez P2P-13 / R3, bo tam jest dodatkowa kontrola lub prywatna usługa”. Cel nadal jest identyczny: **198.51.100.10**. Chodzi o różnicę w drodze, nie w adresie docelowym.
+Wracamy do naszego DIAMOND. R1 ma dwa istniejące wyjścia: **R2 przez 10.12.0.2** i **R3 przez 10.13.0.2**. Kierownik pyta: „Czy do określonej usługi PC-B możemy wymusić przejazd przez R3, podczas gdy zwykły ruch nadal wybiera R2?” To zadanie **wyboru tabeli routingu**, nie wymiany fizycznego okablowania.
 
-W zwykłym routingu R1 sprawdzi destination IP w \`inet.0\`. Jeśli dla 198.51.100.10 jedyną najlepszą drogą jest default przez WAN-A, oba pakiety pójdą przez A. Wpisanie drugiej default route z gorszą preference nie rozwiąże wymagania biznesowego: nadal wygrywa jedna droga dla danego celu. Wpisanie dwóch equal-cost defaults również nie zapewni, że **właśnie PC-A** będzie korzystał z B, a PC-B z A.
+W podstawowym `inet.0` R1 zna LAN-B `198.51.100.0/24` przez R2. Samo dopisanie gorszego backupu przez R3 nie gwarantuje, że *konkretnie dopasowany pakiet* pójdzie do R3. Nie możemy także udawać, że w kanonicznym LAN-A istnieje drugi host: mamy **tylko PC-A 192.0.2.10**. Dlatego w tej lekcji zmienimy kontekst routingu dla ruchu **PC-A→PC-B (destination 198.51.100.10/32)**, a dla innych adresów, np. testowego ping PC-A→R2 10.12.0.2, pozostawimy zwykły lookup. To jest demonstracja destination-based FBF, nie source-based PBR z dwoma klientami.
 
-Potrzebujemy czegoś innego: możliwości wyboru **kontekstu routingu** na podstawie tego, jaki pakiet przyszedł. W Junos każdy kontekst może mieć własną tablicę tras — to świat **routing instances**.
-
-Możesz potraktować je jak dwie niezależne mapy. Na mapie A droga do usługi prowadzi przez WAN-A. Na mapie B — przez WAN-B. Problem nie polega na tym, że jedno z miast jest położone gdzie indziej. Problem polega na tym, że na dwóch mapach **inaczej wyznaczamy drogę**. Router może trzymać obie mapy jednocześnie.
+Możesz potraktować routing instances jak dwie mapy dla tej samej sieci. W `inet.0` LAN-B prowadzi górą przez R2. W `FBF-ALT.inet.0` ten sam cel prowadzi do R3, czyli dolną gałęzią. Zależność od dodatkowej tablicy routingu pokażemy najpierw bez filter, a w późniejszej lekcji dopiero podłączymy ją do ingress R1.
 
 ### Czy routing instance to zawsze VRF?
 
@@ -290,7 +288,7 @@ Uproszczenie „routing instance = VRF” pomaga rozpocząć naukę, ale przesta
 
 ### Najpierw tworzymy alternatywną mapę, jeszcze bez wysyłania do niej pakietów
 
-Zbudujmy instancję **FBF-ALT**. Jej default route ma wskazywać WAN-B, czyli next-hop 10.13.0.2. W tym samym czasie \`inet.0\` nadal ma default przez WAN-A.
+Zbudujmy instancję **FBF-ALT**. Jej default route ma wskazywać R3 (dolny transit), czyli next-hop 10.13.0.2. W tym samym czasie \`inet.0\` nadal ma default przez R2 (górny transit).
 
 **R1-vSRX — Configuration Mode [edit], przygotowanie odrębnej tablicy dla ruchu specjalnego**
 
@@ -309,7 +307,7 @@ show route table FBF-ALT.inet.0
 show configuration routing-instances FBF-ALT | display set
 ~~~
 
-Pytanie, które na tym etapie powinno się pojawić, brzmi: **skąd FBF-ALT ma wiedzieć, czym jest 10.13.0.2?** Jej default wskazuje ten next-hop, ale fizyczna sieć 10.13.0.0/30 należy do interfejsu WAN-B skonfigurowanego w podstawowym kontekście. Samo zapisanie adresu next-hop w dodatkowej tabeli nie daje automatycznie wiedzy o jego osiągalności.
+Pytanie, które na tym etapie powinno się pojawić, brzmi: **skąd FBF-ALT ma wiedzieć, czym jest 10.13.0.2?** Jej default wskazuje ten next-hop, ale fizyczna sieć 10.13.0.0/30 należy do interfejsu R3 (dolny transit) skonfigurowanego w podstawowym kontekście. Samo zapisanie adresu next-hop w dodatkowej tabeli nie daje automatycznie wiedzy o jego osiągalności.
 
 ### Słynna pułapka: „trasa jest w tabeli, ale router nie wie, jak dojść do next-hopa”
 
@@ -321,9 +319,9 @@ W routingu taka sytuacja to problem **next-hop resolution**. Dla FBF-ALT możemy
 flowchart LR
   IN["R1: zwykły pakiet OFFICE"] --> M["inet.0<br/>0/0 via 10.12.0.2"]
   SPEC["R1: specjalny pakiet OFFICE"] --> B["FBF-ALT.inet.0<br/>0/0 via 10.13.0.2"]
-  M --> A["connected 10.12.0.0/30<br/>WAN-A"]
+  M --> A["connected 10.12.0.0/30<br/>R2 (górny transit)"]
   B --> Q{"Czy ta tabela zna<br/>10.13.0.0/30?"}
-  Q -->|tak| OK["WAN-B"]
+  Q -->|tak| OK["R3 (dolny transit)"]
   Q -->|nie| FAIL["Unresolved next-hop"]
 ~~~
 
@@ -331,9 +329,9 @@ flowchart LR
 
 To jest prawdziwa przyczyna, dla której w typowym scenariuszu FBF potrzebujemy jeszcze jednego mechanizmu. Nie jest nim kolejna static default i nie jest nim firewall filter. Potrzebujemy możliwości **udostępnienia wybranych informacji routingu między tablicami**. Do tego służą RIB groups w następnym kroku.
 
-### Czy można po prostu przypisać WAN-B do FBF-ALT?
+### Czy można po prostu przypisać R3 (dolny transit) do FBF-ALT?
 
-W niektórych projektach dałoby się rozważyć przeniesienie interfejsu do innej instancji routingu, ale to nie jest to samo zadanie. Przy klasycznym FBF chcemy zachować fizyczne interfejsy w głównym kontekście, a **dla wybranych pakietów** użyć dodatkowej tabeli. Gdybyśmy przenieśli WAN-B do oddzielnego virtual-router, zmienilibyśmy sposób, w jaki całe urządzenie traktuje ten interfejs, oraz jego dostępność dla innych usług.
+W niektórych projektach dałoby się rozważyć przeniesienie interfejsu do innej instancji routingu, ale to nie jest to samo zadanie. Przy klasycznym FBF chcemy zachować fizyczne interfejsy w głównym kontekście, a **dla wybranych pakietów** użyć dodatkowej tabeli. Gdybyśmy przenieśli R3 (dolny transit) do oddzielnego virtual-router, zmienilibyśmy sposób, w jaki całe urządzenie traktuje ten interfejs, oraz jego dostępność dla innych usług.
 
 Pamiętaj również o SRX: routing instance nie jest tym samym co **security zone**. Routing wybiera trasę; strefy i security policies decydują o dopuszczeniu ruchu, a NAT może przekształcić adresację. PBR/FBF na firewallu stateful wymaga weryfikacji współpracy z flow i NAT. Na klasycznym MX albo EX z reguły nie masz identycznego modelu sesji jak na vSRX. To ma ogromne znaczenie przy porównywaniu labu z konfiguracją produkcyjną.
 
@@ -345,7 +343,7 @@ Pamiętaj również o SRX: routing instance nie jest tym samym co **security zon
 
 ### Dwie tablice, jedna informacja o bezpośrednim połączeniu
 
-Wróćmy do problemu poprzedniej lekcji. \`inet.0\` zna WAN-B jako połączenie bezpośrednie: **10.13.0.0/30 is directly connected**. Tablica \`FBF-ALT.inet.0\` chce wykorzystać next-hop 10.13.0.2, ale nie ma tej samej wiedzy o interfejsie.
+Wróćmy do problemu poprzedniej lekcji. \`inet.0\` zna R3 (dolny transit) jako połączenie bezpośrednie: **10.13.0.0/30 is directly connected**. Tablica \`FBF-ALT.inet.0\` chce wykorzystać next-hop 10.13.0.2, ale nie ma tej samej wiedzy o interfejsie.
 
 Nie musimy kopiować całej \`inet.0\`. Nie potrzebujemy przenosić wszystkich BGP, OSPF i static routes ani mieszać ze sobą wszystkich tenantów. Chcemy udostępnić **informacje pochodzące z interfejsów**. Właśnie tu naturalnie pojawia się **RIB group**.
 
@@ -371,7 +369,7 @@ Dopiero teraz wskazujemy, że grupa ma być używana dla **IPv4 interface routes
 set routing-options interface-routes rib-group inet COPY-INTERFACE-ROUTES
 ~~~
 
-W tym momencie domyślne interfejsowe prefiksy IPv4 mogą być udostępniane do secondary RIB. To potrzebny element następnego ćwiczenia FBF, ponieważ chcemy, by FBF-ALT potrafiła rozwiązać 10.13.0.2 przez WAN-B.
+W tym momencie domyślne interfejsowe prefiksy IPv4 mogą być udostępniane do secondary RIB. To potrzebny element następnego ćwiczenia FBF, ponieważ chcemy, by FBF-ALT potrafiła rozwiązać 10.13.0.2 przez R3 (dolny transit).
 
 **R1-vSRX — Operational Mode, czy connected jest rzeczywiście w dodatkowej tabeli?**
 
@@ -389,15 +387,15 @@ Dwa ostatnie polecenia są kluczowe: pierwsze sprawdza „czy FBF-ALT zna drogę
 
 W naszej małej topologii zwykłe \`interface-routes rib-group\` może wystarczyć. Ale w dużej sieci firma ma również interfejsy management, uplinki do różnych security zones i segmenty, których nie chcesz widzieć w danej tabeli. Tu pojawia się drugi powód użycia RIB group: możliwość **ograniczenia, które trasy trafią do secondary** przez odpowiednią import policy.
 
-Powiedzmy, że FBF-ALT potrzebuje wyłącznie connected do WAN-B. Nie potrzebuje informacji o OFFICE, WAN-A i OOB. Chcielibyśmy zatem dopuścić do kopii tylko **10.13.0.0/30**.
+Powiedzmy, że FBF-ALT potrzebuje wyłącznie connected do R3 (dolny transit). Nie potrzebuje informacji o OFFICE, R2 (górny transit) i OOB. Chcielibyśmy zatem dopuścić do kopii tylko **10.13.0.0/30**.
 
 **R1-vSRX — Configuration Mode [edit], wariant z ograniczeniem importu do secondary RIB**
 
 ~~~junos
-set policy-options policy-statement RIB-ONLY-WAN-B term MATCH-WAN-B from route-filter 10.13.0.0/30 exact
-set policy-options policy-statement RIB-ONLY-WAN-B term MATCH-WAN-B then accept
-set policy-options policy-statement RIB-ONLY-WAN-B term REST then reject
-set routing-options rib-groups COPY-INTERFACE-ROUTES import-policy RIB-ONLY-WAN-B
+set policy-options policy-statement RIB-ONLY-P2P13 term MATCH-P2P13 from route-filter 10.13.0.0/30 exact
+set policy-options policy-statement RIB-ONLY-P2P13 term MATCH-P2P13 then accept
+set policy-options policy-statement RIB-ONLY-P2P13 term REST then reject
+set routing-options rib-groups COPY-INTERFACE-ROUTES import-policy RIB-ONLY-P2P13
 ~~~
 
 Zwróć uwagę na nazwę **import-policy** w kontekście RIB group. To nie jest BGP import policy na sąsiedzie. Tu decydujemy, które wpisy mogą zostać skopiowane do tabel wtórnych. Pierwsza tabela pozostaje podstawowym kontekstem źródła; exact semantics sprawdzaj dla własnego release i typu źródła, a po zmianie koniecznie porównaj obie RIB. **Nie przyjmuj na wiarę, że „reject” usunął route z globalnej inet.0**.
@@ -406,11 +404,11 @@ W ogóle nie musisz używać tej dodatkowej policy, aby zrozumieć podstawowy FB
 
 ### Dlaczego „kopię” w secondary można stracić, kiedy źródło znika?
 
-Wyobraź sobie, że kabel WAN-B zostaje odłączony. Trasa connected do 10.13.0.0/30 przestaje być aktywna w primary. Czy FBF-ALT może sobie powiedzieć: „Nie szkodzi, mam dawną kopię, będę forwardować dalej”? Nie byłoby to rozsądne. **RIB group nie tworzy niezależnej, nieśmiertelnej trasy**. Dokumentacja producenta opisuje, że usunięcie podstawowej trasy powoduje też usunięcie wtórnych wpisów zależnych od niej. Zniknie więc możliwość rozwiązania next-hopa WAN-B, a default w FBF-ALT może stać się nieużyteczna.
+Wyobraź sobie, że kabel R3 (dolny transit) zostaje odłączony. Trasa connected do 10.13.0.0/30 przestaje być aktywna w primary. Czy FBF-ALT może sobie powiedzieć: „Nie szkodzi, mam dawną kopię, będę forwardować dalej”? Nie byłoby to rozsądne. **RIB group nie tworzy niezależnej, nieśmiertelnej trasy**. Dokumentacja producenta opisuje, że usunięcie podstawowej trasy powoduje też usunięcie wtórnych wpisów zależnych od niej. Zniknie więc możliwość rozwiązania next-hopa R3 (dolny transit), a default w FBF-ALT może stać się nieużyteczna.
 
 To łączy RIB group z normalnym życiem routingu. Nie rozwiązujemy awarii przez pamiętanie starych informacji. Rozwiązujemy ją przez korzystanie z aktualnych tras, nawet w wielu kontekstach.
 
-**R1-vSRX — Operational Mode, gdy WAN-B znika**
+**R1-vSRX — Operational Mode, gdy R3 (dolny transit) znika**
 
 ~~~junos
 show interfaces terse
@@ -420,7 +418,7 @@ show route table FBF-ALT.inet.0 0.0.0.0/0 exact extensive
 show route hidden
 ~~~
 
-Przy tym zestawie nie wystarczy informacja „WAN-B is up” — potrzebujesz wiedzieć, czy właściwy logiczny unit ma adres i czy connected jest kwalifikowane w obydwu tabelach. Jeżeli static default istnieje w konfiguracji FBF-ALT, ale nie jest aktywna, problem może być w next-hop resolution, a nie w samym filtrze FBF.
+Przy tym zestawie nie wystarczy informacja „R3 (dolny transit) is up” — potrzebujesz wiedzieć, czy właściwy logiczny unit ma adres i czy connected jest kwalifikowane w obydwu tabelach. Jeżeli static default istnieje w konfiguracji FBF-ALT, ale nie jest aktywna, problem może być w next-hop resolution, a nie w samym filtrze FBF.
 
 ### RIB group to nie „route leaking wszędzie”
 
@@ -432,16 +430,16 @@ Jest też platformowy haczyk. Na części EX/QFX zachowanie RIB groups, typów i
 
 ~~~mermaid
 flowchart TD
-  I["Interface route WAN-B<br/>10.13.0.0/30"] --> P["Primary RIB: inet.0"]
+  I["Interface route R3 (dolny transit)<br/>10.13.0.0/30"] --> P["Primary RIB: inet.0"]
   I --> RG["RIB group:<br/>COPY-INTERFACE-ROUTES"]
   RG --> S["Secondary: FBF-ALT.inet.0"]
   S --> NH["Rozwiązanie default<br/>via 10.13.0.2"]
-  NH --> UP["WAN-B: prawidłowy next-hop"]
+  NH --> UP["R3 (dolny transit): prawidłowy next-hop"]
   I -. "awaria interfejsu / brak route" .-> F["Trasa źródłowa znika"]
   F -.-> S
 ~~~
 
-*Rysunek 7.5 (autorski). Tekst alternatywny: jedna trasa interface WAN-B trafia do primary inet.0 i przez RIB group również do FBF-ALT.inet.0; ta kopia umożliwia rozwiązanie default przez 10.13.0.2. Usunięcie źródła może usunąć także wpis wtórny.*
+*Rysunek 7.5 (autorski). Tekst alternatywny: jedna trasa interface R3 (dolny transit) trafia do primary inet.0 i przez RIB group również do FBF-ALT.inet.0; ta kopia umożliwia rozwiązanie default przez 10.13.0.2. Usunięcie źródła może usunąć także wpis wtórny.*
 
 W tym momencie drugi dyspozytor w naszej analogii ma już mapę do bramy operatora B. Ale nadal żaden klient nie został mu przypisany. **Routing instances i RIB groups przygotowują alternatywną drogę; dopiero FBF zdecyduje, który pakiet ją wykorzysta.**
 
@@ -630,7 +628,7 @@ Spisz przed zmianą: wersję obrazu vSRX, mapping portów, stan obu tras R1→R4
 
 ## 7.8. Laboratorium DIAMOND — aggregate, generated, RIB groups, FBF i ECMP [LAB]
 
-**Status: PLANNED / NOT RUNTIME VALIDATED.** W rozdziale 7 używamy już wyłącznie kanonicznego DIAMOND: **R1, R2, R3, R4, PC-A i PC-B**. Nie ma Linux UP-A ani UP-B. Wszystkie scenariusze przeprowadzaj na osobnej kopii labu z konsolą, a testy `then routing-instance` wykonuj tylko jeśli konkretny Junos/vSRX tę funkcję obsługuje. Nie wyłączaj flow-mode tylko po to, aby obejść ograniczenia FBF.
+**Status: PLANNED / NOT RUNTIME VALIDATED.** W rozdziale 7 używamy już wyłącznie kanonicznego DIAMOND: **R1, R2, R3, R4, PC-A i PC-B**. Nie ma Linux R2 ani R3. Wszystkie scenariusze przeprowadzaj na osobnej kopii labu z konsolą, a testy `then routing-instance` wykonuj tylko jeśli konkretny Junos/vSRX tę funkcję obsługuje. Nie wyłączaj flow-mode tylko po to, aby obejść ograniczenia FBF.
 
 ### Faza 0. Sprawdź fizyczną mapę
 
@@ -1042,7 +1040,7 @@ To nie jest lista funkcji do wykucia. To kolejne decyzje w historii jednego paki
 
 Warto zakończyć rozdział kilkoma pytaniami. Nie musisz zapamiętać całych outputów, ale powinieneś umieć je rozstrzygnąć z CLI.
 
-**Pytanie pierwsze.** R1 ma aktywne 10.60.20.0/24, ale WAN-A nie działa. Czy 10.60.0.0/16 aggregate może nadal być aktywny? **Tak**, jeśli istnieje choć jeden kwalifikujący się contributor i nie ma dodatkowych ograniczeń. Nie wynika z tego, że wszystkie podsieci wewnątrz /16 są osiągalne.
+**Pytanie pierwsze.** R1 ma aktywne 10.60.20.0/24, ale R2 (górny transit) nie działa. Czy 10.60.0.0/16 aggregate może nadal być aktywny? **Tak**, jeśli istnieje choć jeden kwalifikujący się contributor i nie ma dodatkowych ograniczeń. Nie wynika z tego, że wszystkie podsieci wewnątrz /16 są osiągalne.
 
 **Pytanie drugie.** Dlaczego \`show route protocol aggregate\` pokazuje 10.70.0.0/16, chociaż skonfigurowałeś \`generate\`? Ponieważ w Junos typ wyświetlany w RIB i jego domyślna preference dla aggregate/generated mogą być podobne. Rozróżnij je po konfiguracji i next-hop.
 
@@ -1050,7 +1048,7 @@ Warto zakończyć rozdział kilkoma pytaniami. Nie musisz zapamiętać całych o
 
 **Pytanie czwarte.** Dlaczego po usunięciu \`NORMAL then accept\` nie działa PC-B, mimo że zwykła globalna default jest nadal aktywna? Bo stateless input filter może odrzucić pakiet niedopasowany do żadnego termu, zanim zwykła droga będzie dla niego użyteczna.
 
-**Pytanie piąte.** W FIB widzisz dwa next-hopy, ale jeden transfer TCP korzysta z WAN-A. Czy ECMP jest uszkodzony? **Niekoniecznie**: per-flow hashing może przypisać cały przepływ do jednego next-hopa. Rozkład trzeba badać na większej liczbie niezależnych flows.
+**Pytanie piąte.** W FIB widzisz dwa next-hopy, ale jeden transfer TCP korzysta z R2 (górny transit). Czy ECMP jest uszkodzony? **Niekoniecznie**: per-flow hashing może przypisać cały przepływ do jednego next-hopa. Rozkład trzeba badać na większej liczbie niezależnych flows.
 
 **Pytanie szóste.** Czy FBF zastępuje security policy na vSRX? **Nie**. To odrębny wybór kontekstu routingu; stateful flow, strefy, NAT i droga powrotna muszą być poprawne niezależnie od FBF.
 
