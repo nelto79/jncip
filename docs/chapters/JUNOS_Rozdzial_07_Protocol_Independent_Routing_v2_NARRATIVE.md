@@ -550,3 +550,106 @@ Kiedy patrzysz na liczniki uplinku i widzisz ogromną nierównowagę, pytaj w te
 Nie poprawiaj \`hash-key\` tylko dlatego, że jeden iperf pokazał 90/10. Najpierw sprawdź **co jest rozkładane**: pakiety, przepływy czy po prostu ilość bajtów. Dla jednego dużego połączenia 100/0 może być prawidłowym zachowaniem per-flow ECMP.
 
 *Źródła: [Configuring Per-Flow Load Balancing](https://www.juniper.net/documentation/us/en/software/junos/sampling-forwarding-monitoring/topics/concept/policy-configuring-per-flow-load-balancing.html), [Configuring Per-Packet Load Balancing](https://www.juniper.net/documentation/us/en/software/junos/sampling-forwarding-monitoring/topics/concept/policy-configuring-per-packet-load-balancing.html), [load-balance CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/load-balance-edit-policy-options-policy-statement-then.html), [Understanding Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-overview.html).*
+
+---
+
+## 7.6. Filter-Based Forwarding — ten sam cel, ta sama brama, a jednak inny operator [S]
+
+### Zaczynamy od pytania, którego nie rozwiąże zwykły longest prefix match
+
+Kierownik oddziału wraca z wymaganiem, od którego zaczęła się nasza historia: „Chcemy, żeby PC-A korzystał z WAN-B, natomiast PC-B ma dalej korzystać z WAN-A”. Oba komputery są w tej samej sieci OFFICE 192.0.2.0/24. Oba wysyłają do **203.0.113.10**. Jeśli router zawsze wykonuje ten sam lookup po destination w tej samej \`inet.0\`, obydwa pakiety otrzymają tę samą decyzję routingu.
+
+Potrzebujemy więc kontrolowanego wyjątku: zanim dokonamy lookup po celu, popatrzymy na **źródło pakietu**. Jeśli źródło to dokładnie PC-A 192.0.2.10, korzystamy z \`FBF-ALT.inet.0\`. W przeciwnym razie zostajemy przy standardowej \`inet.0\`.
+
+To właśnie sens **Filter-Based Forwarding (FBF)**. Najpierw *klasyfikujemy pakiet* stateless firewall filter, a następnie dla dopasowanego ruchu wskazujemy **inną routing instance**, w której nastąpi wybór drogi.
+
+Jeśli pracowałeś na Cisco, to dobry moment na skojarzenie z PBR i \`route-map\` na SVI. W Cisco często dopasowujesz ACL i ustawiasz next-hop. W klasycznym Junos FBF typowo nie wpisujemy do filtra bezpośrednio adresu operatora B. Wskazujemy **routing-instance** — a ona już ma własne trasy, na przykład default via 198.51.100.6. To nie jest dokładnie taki sam model jak wszystkie warianty Cisco PBR, ale zamiar jest podobny.
+
+### Trzy części, bez których FBF nie istnieje jako działająca usługa
+
+Na R1 przygotowaliśmy już dwie z nich. Po pierwsze, utworzyliśmy \`FBF-ALT\` typu forwarding z default przez WAN-B. Po drugie, dzięki RIB group udostępniliśmy connected trasę 198.51.100.4/30, aby next-hop 198.51.100.6 mógł być rozwiązany.
+
+Brakuje ostatniej części: **filtra na interfejsie wejściowym OFFICE**, który rozpozna wybrane pakiety i skieruje je do drugiej tablicy. To bardzo ważne: FBF nie jest globalną zmianą dla każdego pakietu przechodzącego przez R1. W najprostszym scenariuszu jest **wyborem kontekstu lookup dla pakietu na określonym ingress**.
+
+**R1-vSRX — Configuration Mode [edit], klasyfikacja tylko PC-A po potwierdzeniu wsparcia FBF**
+
+~~~junos
+set firewall family inet filter OFFICE-FBF term SPECIAL from source-address 192.0.2.10/32
+set firewall family inet filter OFFICE-FBF term SPECIAL then routing-instance FBF-ALT
+set firewall family inet filter OFFICE-FBF term NORMAL then accept
+set interfaces ge-0/0/1 unit 0 family inet filter input OFFICE-FBF
+~~~
+
+Wyjaśnijmy to powoli. Pierwszy term \`SPECIAL\` pasuje do pakietu, którego **source-address** to 192.0.2.10. Zwróć uwagę: filtr nie sprawdza BGP route ani nazwy klienta. Patrzy na konkretny nagłówek IP pakietu, który przyszedł na właściwy interfejs.
+
+Działanie \`then routing-instance FBF-ALT\` wskazuje alternatywną tablicę dla dopasowanego ruchu. Jeśli jej default jest użyteczna, lookup wybierze WAN-B. To nie jest polecenie „zezwól aplikacji PC-A”. To polecenie „dla tego pakietu użyj innego kontekstu routingu”. Na SRX dodatkowa **security policy** i stan sesji nadal muszą dopuścić ruch.
+
+Ostatni term \`NORMAL then accept\` jest równie ważny jak pierwszy. Dlaczego? W zwykłym stateless firewall filter pakiet, który nie pasuje do żadnego termu, na końcu otrzymuje **implicit discard**. Bez NORMAL klient PC-B może zostać odcięty, chociaż naszym celem była zmiana zachowania wyłącznie PC-A.
+
+~~~mermaid
+flowchart TD
+  IN["Pakiet wchodzi do OFFICE<br/>na ge-0/0/1.0"] --> F{"Źródło = 192.0.2.10?"}
+  F -->|tak| ALT["Routing lookup w FBF-ALT.inet.0"]
+  F -->|nie| MAIN["NORMAL then accept<br/>zwykły lookup w inet.0"]
+  ALT --> B["Default via 198.51.100.6<br/>WAN-B"]
+  MAIN --> A["Default via 198.51.100.2<br/>WAN-A"]
+~~~
+
+*Rysunek 7.7 (autorski). Tekst alternatywny: pakiet PC-A dopasowuje term SPECIAL i używa alternatywnej tablicy do WAN-B; inne pakiety dopasowują NORMAL i korzystają ze zwykłej tablicy do WAN-A. Nie jest to pełny schemat przetwarzania stateful SRX.*
+
+Po utworzeniu filtra mamy więc trzy elementy, które trzeba zawsze zweryfikować osobno: czy term pasuje do konkretnego źródła, czy filtr jest rzeczywiście przypisany na **input** właściwego logicznego interfejsu \`family inet\`, oraz czy \`FBF-ALT.inet.0\` posiada poprawną, rozwiązaną trasę do celu.
+
+### Dlaczego nie możemy uznać sukcesu po samym commit?
+
+Załóżmy, że \`commit complete\` pojawia się na konsoli. To dopiero początek testu. FBF może nadal nie działać, jeśli filtr nie jest na interfejsie, który dostaje pakiety, albo druga RIB nie ma connected do WAN-B. Co więcej, nawet jeśli pakiet dotarł do WAN-B, Linux upstream musi mieć drogę powrotną do klienta OFFICE, a na SRX odpowiednia sesja musi zostać zaakceptowana.
+
+Potrzebujemy **dwóch klientów**: dopasowanego i niedopasowanego. Jeśli przetestujesz wyłącznie PC-A i działa, nie wiesz jeszcze, czy przez przypadek odciąłeś PC-B. A jeśli na obu wyślesz ping do różnego destination, nie udowodnisz poprawnego wyboru drogi na podstawie source. Dlatego w naszym labie testują **ten sam cel** 203.0.113.10, ale mają inne źródła.
+
+**R1-vSRX — Operational Mode, trzy elementy ścieżki**
+
+~~~junos
+show configuration firewall family inet filter OFFICE-FBF | display set
+show configuration interfaces ge-0/0/1 | display set
+show route table inet.0 0.0.0.0/0 exact
+show route table FBF-ALT.inet.0 0.0.0.0/0 exact extensive
+show route table FBF-ALT.inet.0 198.51.100.4/30 exact
+~~~
+
+To nadal nie jest dowód ruchu. Dlatego będziemy równocześnie obserwować pakiety na obydwu Linux upstream. Gdy ping z PC-A pojawia się na UP-B, a z PC-B na UP-A, mamy już znacznie silniejszy dowód niż sam \`show route\`.
+
+### FBF a SRX: route selection nie omija stateful firewall
+
+Na klasycznym switchu/routrze FBF może być przede wszystkim decyzją forwarding w PFE. Na vSRX dochodzi **security flow**, czyli stan sesji i polityki pomiędzy strefami. Kiedy PC-A zostanie skierowany do WAN-B, jego ruch może wymagać policy \`CLIENT → WAN-B\`, a nie wyłącznie tej, którą dotąd dopuszczaliśmy dla WAN-A. Czasami znaczenie ma również NAT i kolejność przetwarzania. Jeżeli reply przyjdzie przez inne urządzenie niż request, stateful security może potraktować go inaczej, niż oczekujesz po samej analizie routingu.
+
+Nie wszystko, co producent nazywa „policy-based routing” na SRX, jest identyczne z klasycznym firewall filter FBF na MX. Istnieją także funkcje **Advanced Policy-Based Routing** i rozwiązania zależne od konkretnych modeli/wydania. **Przed uruchomieniem ćwiczenia zweryfikuj wsparcie filtra z \`then routing-instance\` na swojej wersji vSRX**. Jeśli obraz go nie wspiera, nie udawaj, że jest to poprawny lab; możesz wykonać ćwiczenie na wspieranej platformie EX/MX/QFX lub zaprojektować odrębny wariant pod faktycznie obsługiwany SRX APBR.
+
+**R1-vSRX — Operational Mode, warstwa SRX po obserwacji FBF**
+
+~~~junos
+show security zones
+show security policies
+show security flow session
+show route table FBF-ALT.inet.0
+~~~
+
+Weryfikacja security to **osobny etap**: \`then accept\` w stateless filter nie zezwala automatycznie na nową sesję między strefami. I odwrotnie — permisja w stateful security policy nie naprawi unresolved next-hop.
+
+### Czy można dodać count, log i policer do tego samego termu?
+
+Techniczna pokusa jest duża: skoro mamy term \`SPECIAL\`, dodajmy jednocześnie \`then count\`, \`then log\` i \`then routing-instance\`. W niektórych konfiguracjach Junos i rodzinach urządzeń te akcje **nie mogą być swobodnie łączone**. Dokumentacja FBF na ACX wymienia ograniczenia dla \`routing-instance\` razem z \`count\`, \`log\`, \`syslog\`, \`policer\` czy \`port-mirror\`. Inne platformy mają własne możliwości instalacji filtra w sprzęcie.
+
+Dlatego podstawowy przykład celowo **nie dodaje count/log do termu routing-instance**. O poprawności świadczą odczyty RIB/FIB i ruch na upstreamach. Jeśli potrzebujesz monitoringu produkcyjnego, sprawdź obsługiwany model liczenia i telemetryki dla danego ASIC i release, zamiast zgadywać.
+
+### A co z IPv6?
+
+Przykład używa \`firewall family inet\`, więc dotyczy **IPv4**. FBF na IPv6 wymaga właściwej rodziny \`inet6\` i może mieć odmienne wsparcie na platformach EX/QFX/ACX, w tym ograniczenia do konkretnych kierunków interfejsu albo określonych wydań Junos. Nie twórz fałszywego wniosku „FBF zadziałał dla IPv4, więc IPv6 naturalnie podąży tą samą polityką”.
+
+### Moment, który powinien połączyć wszystkie poprzednie lekcje
+
+Spójrz na R1 i spróbuj opowiedzieć jego pracę w jednym ciągu:
+
+Najpierw \`inet.0\` zna interfejsy i zwykłe trasy. Obok istnieje \`FBF-ALT.inet.0\` ze swoim default do B. RIB group udostępnia jej connected do next-hopa. Kiedy pakiet PC-A wpływa na OFFICE, stateless filter dopasowuje source i wybiera FBF-ALT. W tej tablicy destination lookup kieruje go przez WAN-B. Ale nawet wtedy na SRX trzeba przejść przez właściwy stateful security flow, a po drugiej stronie musi istnieć return path. Pakiet PC-B nie pasuje do termu SPECIAL, więc pozostaje w normalnym lookup przez WAN-A.
+
+To jest cały mechanizm. Gdy widzisz go jako historię jednej paczki, nazwy \`routing-instances\`, \`rib-groups\` i \`firewall filter\` przestają wyglądać jak losowe trzy sekcje CLI.
+
+*Źródła: [Filter-Based Forwarding Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-option-filter-based-forwarding-overview.html), [Example Configuring FBF](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/example/filter-based-forwarding-example.html), [FBF for EX Series](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/filter-based-forwarding-ex-series.html), [Advanced PBR on SRX](https://www.juniper.net/documentation/us/en/software/junos/application-identification/topics/topic-map/security-application-advanced-policy-based-routing.html).*
