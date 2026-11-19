@@ -1,3 +1,9 @@
+# STATUS: DRAFT ARCHIWALNY — NIEKANONICZNY
+
+**Ta wersja alternatywna agenta nie jest bieżącym Rozdziałem 8.** Zawiera historyczną dwurouterową adresację i jest zachowana wyłącznie do porównania. Używaj [aktualnego rozdziału 8](JUNOS_Rozdzial_08_Routing_Policy_and_Firewall_Filters.md) oraz [kanonicznego DIAMOND Mermaid](../../labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) (4×vSRX+2×VPCS). Nie używaj topologii z tego pliku do nowych ćwiczeń ani promptów dla Codexa.
+
+---
+
 # Rozdział 8 — Routing Policy and Firewall Filters
 ## Kto może opowiedzieć o trasie, a kto może przepuścić pakiet?
 
