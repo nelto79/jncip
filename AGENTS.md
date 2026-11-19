@@ -14,12 +14,21 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 2b. docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md — pełny rozdział 4 (4.1–4.14 oraz 4.15 LAB), Cisco ↔ Junos, AAA, NTP, SNMPv3, syslog, archival, traceoptions, rescue.
 2c. docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md — pełny rozdział 5 (5.1–5.8 oraz 5.9 LAB), workflow diagnostyki i maintenance, interface counters/DOM, show/monitor, ping/source/VRF, upgrade, reboot/halt i root recovery.
 3. **labs/reference-diamond-4vsrx-2vpcs/README.md — KANONICZNA topologia diamentowa: 4 vSRX + 2 VPCS, wszystkie interfejsy, CIDR i loopbacki /32. Nie zmieniaj ich w kolejnych rozdziałach bez jawnego wariantu.**
+3a. **labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md — diagram Mermaid do osadzania i linkowania w podręczniku (sześć łączy, oba IP/CIDR każdego segmentu, wszystkie loopbacki).** W rozdziałach wykorzystuj ten sam model, a w razie korekty diagramu aktualizuj również jego kopię w referencyjnym README.
 3a. labs/reference-diamond-4vsrx-2vpcs/CODEX_GCP_EVE_NG_PROMPT.md — instrukcja wdrożenia na EVE-NG/GCP, bez ingerencji w istniejące laby.
 3b. labs/ch02-four-vsrx/README.md — specyfikacja pierwszego większego labu.
 4. labs/ch02-four-vsrx/CODEX_TASK.md — kryteria implementacji i walidacji.
 5. labs/ch03-cli-change-management/README.md — lab z dwiema sesjami administratorów, konsolą i kontrolowanym commit confirmed; status PLANNED, dopóki nie ma rzeczywistych testów.
 6. labs/ch04-initial-config/README.md — nowy izolowany lab z vSRX, Linux bastion i services (NTP, syslog, SNMPv3, SCP, AAA opcjonalnie), status PLANNED.
 7. labs/ch05-operational-monitoring/README.md — nowy izolowany 2×vSRX+2×VPCS lab fault injection, status PLANNED.
+
+## Obowiązkowa topologia DIAMOND w rozdziałach JNCIP
+
+- Przy wykładach wykorzystujących kilka routerów (routing statyczny, OSPF, BGP, routing policy, ECMP, troubleshooting) używaj [kanonicznego diagramu Mermaid](labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) i [tabeli adresacji](labs/reference-diamond-4vsrx-2vpcs/README.md) zamiast tworzyć od zera sprzeczne sieci.
+- Identyfikatory w całym kursie: **R1-vSRX, R2-vSRX, R3-vSRX, R4-vSRX, PC-A/VPC1, PC-B/VPC2**. Bazowe segmenty, IP/CIDR, lo0.0 /32 i bramy VPCS są stałe; dla konkretnego ćwiczenia zmieniaj jedynie omawiany routing/policy, a każdy odmienny plan oznacz jako osobny wariant.
+- W tekście przed diagramem postaw problem inżynierski, a po nim opowiedz, którędy płynie pakiet, jak wraca i co zmienia awaria; diagram nie zastępuje dydaktyki.
+- W scenariuszach statycznych nie obiecuj pełnej automatycznej konwergencji po awarii tylko R1–R2; loopbacki innych routerów nie są reachable bez jawnego routingu. Na vSRX uwzględnij security policies oraz stan sesji.
+- Nie nazywaj labu uruchomionym/zweryfikowanym bez dowodów z EVE-NG. Interfejsy ge-0/0/x z diagramu są logicznym celem do sprawdzenia na rzeczywistym obrazie.
 
 ## Zasady dokumentacyjne
 
