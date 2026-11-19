@@ -50,6 +50,36 @@ W blueprint mamy **15 punktów**, a nie tylko „hostname + root password”. Pr
 
 ---
 
+## Wspólna topologia szkoleniowa DIAMOND — obowiązująca adresacja
+
+**Źródło prawdy:** [DIAMOND — Mermaid + pełne adresy obu końców każdego łącza](../../labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) oraz [tabela interfejsów i loopbacków](../../labs/reference-diamond-4vsrx-2vpcs/README.md). Diagram poniżej jest ten sam we wszystkich rozdziałach — **4×vSRX + 2×VPCS, sześć segmentów**.
+
+```mermaid
+flowchart LR
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 172.31.240.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+
+  PCA ---|"LAN-A · 172.31.240.0/24<br/>PC-A eth0: 172.31.240.10/24<br/>R1 ge-0/0/2.0: 172.31.240.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
+```
+
+W tym rozdziale konfigurujemy przede wszystkim **R1-vSRX z DIAMOND** (nazwę urządzenia, konta, dostęp i usługi), zachowując jego **data-plane z kanonicznego diagramu**. Dla NTP, TACACS+, SNMPv3 i backupów potrzebny jest jednak **osobny segment OOB / dodatkowy serwer**, którego sześciowęzłowy DIAMOND sam nie zawiera. Dlatego oznaczone niżej przykłady usług management stanowią **niezależny rozszerzony lab**, z odrębną podsiecią `172.31.240.0/24`; **nie dodawaj tych adresów do `ge-0/0/x` bazowego diamentu ani nie traktuj ich jako siódmego połączenia**. Port `fxp0` jest zależny od obrazu, a dostęp nie jest potwierdzony runtime.
+
+---
+
 ## 4.1. Factory-default state — czy „z pudełka” znaczy to samo na SRX i EX? [A]
 
 ### 4.1.1. Pierwszy haczyk: jeden producent, wiele różnych punktów startowych
@@ -146,10 +176,10 @@ W Cisco zwykle konfigurujesz `hostname`, `ip domain-name`, DNS oraz NTP. W Junos
 set system host-name LAB-SRX01
 set system domain-name lab.example
 set system time-zone Europe/Warsaw
-set system name-server 192.0.2.53
+set system name-server 172.31.240.53
 ~~~
 
-**Komentarz dydaktyczny:** `lab.example` to domena dokumentacyjna; serwer DNS `192.0.2.53` **jest przykładem** i nie musi istnieć w Twoim labie. Dodanie adresu DNS w konfiguracji **nie stworzy serwera DNS**. Jeśli serwis DNS ma być testowany, uruchom go w topologii.
+**Komentarz dydaktyczny:** `lab.example` to domena dokumentacyjna; serwer DNS `172.31.240.53` **jest przykładem** i nie musi istnieć w Twoim labie. Dodanie adresu DNS w konfiguracji **nie stworzy serwera DNS**. Jeśli serwis DNS ma być testowany, uruchom go w topologii.
 
 **Most z Cisco:**
 - `hostname SITE-EX01` ↔ `set system host-name SITE-EX01`;
@@ -172,10 +202,10 @@ Dla nowego site ustalamy przed wpisaniem pierwszego `set interfaces`:
 
 ~~~mermaid
 flowchart LR
-  ADMIN["Bastion 192.0.2.20"] --> SWITCH["OOB switch/segment 192.0.2.0/24"]
-  SWITCH --> SRX["LAB-SRX01\nfxp0.0 192.0.2.10"]
-  SWITCH --> SVR["LAB-SERVICES\n192.0.2.30"]
-  SWITCH --> GW["OOB gateway 192.0.2.1"]
+  ADMIN["Bastion 172.31.240.20"] --> SWITCH["OOB switch/segment 172.31.240.0/24"]
+  SWITCH --> SRX["LAB-SRX01\nfxp0.0 172.31.240.10"]
+  SWITCH --> SVR["LAB-SERVICES\n172.31.240.30"]
+  SWITCH --> GW["OOB gateway 172.31.240.1"]
   SRX -. "niezależna płaszczyzna ruchu" .-> DATA["ge-0/0/x\ntraffic/firewall"]
 ~~~
 
@@ -188,7 +218,7 @@ Jeśli urządzenie i wydanie rzeczywiście używają `fxp0.0` jako zarządzania 
 **Wariant A — LAB-SRX01, klasyczny vSRX z `fxp0.0` i bez dedykowanej management-instance; Configuration Mode [edit]**
 
 ~~~junos
-set interfaces fxp0 unit 0 family inet address 192.0.2.10/24
+set interfaces fxp0 unit 0 family inet address 172.31.240.10/24
 ~~~
 
 To wystarczy do komunikacji z bastionem i serwerami **na tej samej podsieci**. Dla ruchu poza podsiecią potrzebujesz świadomie zaprojektowanej trasy (np. statycznej w właściwej tablicy), a nie „magicznego default gateway”.
@@ -196,7 +226,7 @@ To wystarczy do komunikacji z bastionem i serwerami **na tej samej podsieci**. D
 **Wariant B — EX4400 z portem OOB `me0`; Configuration Mode [edit], przykład osobnego urządzenia**
 
 ~~~junos
-set interfaces me0 unit 0 family inet address 192.0.2.11/24
+set interfaces me0 unit 0 family inet address 172.31.240.11/24
 ~~~
 
 **Nigdy nie wklejaj obu wariantów do tego samego urządzenia** — są odpowiednie dla różnych platform. Jeśli fabrycznie masz na `me0.0` klienta DHCP, przy przejściu na adres statyczny najpierw sprawdź jego konfigurację i usuń sprzeczne elementy zgodnie z planem. Jeśli używasz **Virtual Chassis**, interfejs zarządzania może mieć postać **`vme`**, więc przeczytaj dokumentację topologii.
@@ -450,13 +480,13 @@ To działa z kontami skonfigurowanymi w `system login`. Pamiętaj, że prawidło
 
 ### 4.5.4. Wariant Enterprise — TACACS+ jako pierwsza próba, local password jako fallback
 
-Zakładamy wyizolowane środowisko szkoleniowe, w którym serwer TACACS+ istnieje naprawdę pod `192.0.2.40` i jest osiągalny. **Jeżeli go nie ma, nie wykonuj tego wariantu.** Nie zapisuj tajnego shared secret do GitHuba.
+Zakładamy wyizolowane środowisko szkoleniowe, w którym serwer TACACS+ istnieje naprawdę pod `172.31.240.40` i jest osiągalny. **Jeżeli go nie ma, nie wykonuj tego wariantu.** Nie zapisuj tajnego shared secret do GitHuba.
 
 **Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant demonstracyjny wymagający serwera AAA**
 
 ~~~junos
 set system authentication-order [ tacplus password ]
-set system tacplus-server 192.0.2.40 source-address 192.0.2.10
+set system tacplus-server 172.31.240.40 source-address 172.31.240.10
 ~~~
 
 Osobno trzeba wprowadzić wymagany **shared secret** w bezpiecznej sesji/zarządzanym kanale, ale nie dostarczamy tu wrażliwej wartości:
@@ -464,7 +494,7 @@ Osobno trzeba wprowadzić wymagany **shared secret** w bezpiecznej sesji/zarząd
 **Urządzenie: LAB-SRX01 — Configuration Mode [edit], szablon polecenia z obowiązkowym sekretami z vault, nie do bezpośredniego commit**
 
 ~~~text
-set system tacplus-server 192.0.2.40 secret <Z_VAULT_NIE_W_GITHUB>
+set system tacplus-server 172.31.240.40 secret <Z_VAULT_NIE_W_GITHUB>
 ~~~
 
 **To polecenie jest NIEKOMPLETNE bez rzeczywistego sekretu** i powyższy wiersz z nawiasami kątowymi nie jest przeznaczony do wklejenia. Trzeba także skonfigurować zgodne konto/template i mapowanie praw na serwerze AAA. Same `tacplus-server` oraz `authentication-order` nie gwarantują, że użytkownik dostanie oczekiwaną klasę.
@@ -500,7 +530,7 @@ Centralne AAA może opierać się na RADIUS (np. ClearPass lub ISE), również w
 
 ~~~junos
 set system authentication-order [ radius password ]
-set system radius-server 192.0.2.41 source-address 192.0.2.10
+set system radius-server 172.31.240.41 source-address 172.31.240.10
 ~~~
 
 Tutaj również wymagany jest odpowiedni sekret i konfiguracja po stronie serwera; **nie uruchamiaj tego wariantu bez rzeczywistej infrastruktury RADIUS**. Pamiętaj, że `system radius-server` do administracyjnego logowania na router to **inny kontekst** niż `access profile` dla użytkowników 802.1X/captive portal.
@@ -721,8 +751,8 @@ NTP client kieruje zapytania do jednego lub kilku serwerów. Serwer może być s
 
 ~~~mermaid
 flowchart LR
-  MASTER["Autorytatywne źródło czasu\ncorporate NTP"] --> S1["NTP 192.0.2.30"]
-  MASTER --> S2["NTP 192.0.2.31"]
+  MASTER["Autorytatywne źródło czasu\ncorporate NTP"] --> S1["NTP 172.31.240.30"]
+  MASTER --> S2["NTP 172.31.240.31"]
   S1 --> EX["EX4400 / Junos"]
   S2 --> EX
   S1 --> FW["SRX / Junos"]
@@ -735,13 +765,13 @@ flowchart LR
 
 ### 4.8.3. Konfigurujemy NTP z zaufanego segmentu
 
-Na naszym izolowanym labie serwer czasu powinien znajdować się na `LAB-SERVICES` pod `192.0.2.30` — **jeśli faktycznie uruchomisz tam działającą usługę NTP**. Drugi `192.0.2.31` jest opcjonalny.
+Na naszym izolowanym labie serwer czasu powinien znajdować się na `LAB-SERVICES` pod `172.31.240.30` — **jeśli faktycznie uruchomisz tam działającą usługę NTP**. Drugi `172.31.240.31` jest opcjonalny.
 
 **Urządzenie: LAB-SRX01 — Configuration Mode [edit], NTP dla lokalnej sieci management**
 
 ~~~junos
-set system ntp server 192.0.2.30 prefer
-set system ntp source-address 192.0.2.10
+set system ntp server 172.31.240.30 prefer
+set system ntp source-address 172.31.240.10
 set system time-zone Europe/Warsaw
 show | compare
 ~~~
@@ -754,7 +784,7 @@ show | compare
 show ntp associations
 show ntp status
 show system uptime
-ping 192.0.2.30
+ping 172.31.240.30
 ~~~
 
 **Czego szukasz?** Zobacz, czy urządzenie ma widoczne association, czy właściwy serwer jest wybrany, jaki jest offset, delay i jakość synchronizacji. Sam działający ping do serwera **nie dowodzi**, że UDP/123 oraz NTP działają.
@@ -898,13 +928,13 @@ Pomyśl o poczcie:
 ~~~junos
 set system syslog file messages any notice
 set system syslog file messages authorization info
-set system syslog host 192.0.2.30 any notice
-set system syslog host 192.0.2.30 authorization info
-set system syslog source-address 192.0.2.10
+set system syslog host 172.31.240.30 any notice
+set system syslog host 172.31.240.30 authorization info
+set system syslog source-address 172.31.240.10
 show | compare
 ~~~
 
-`LAB-SERVICES` pod `192.0.2.30` musi naprawdę uruchamiać odbiornik syslog, a pomiędzy urządzeniami ruch syslog musi być dozwolony. **Domyślny zdalny syslog UDP nie zapewnia transport encryption i gwarancji dostarczenia**. Wymagania TLS, portów, formatu wiadomości i retencji SIEM należy uzgodnić osobno.
+`LAB-SERVICES` pod `172.31.240.30` musi naprawdę uruchamiać odbiornik syslog, a pomiędzy urządzeniami ruch syslog musi być dozwolony. **Domyślny zdalny syslog UDP nie zapewnia transport encryption i gwarancji dostarczenia**. Wymagania TLS, portów, formatu wiadomości i retencji SIEM należy uzgodnić osobno.
 
 **Urządzenie: LAB-SRX01 — Operational Mode**
 
@@ -978,13 +1008,13 @@ flowchart LR
 
 ### 4.11.3. Minimalny szablon archiwizacji bez ujawniania hasła
 
-Załóżmy, że serwer `LAB-SERVICES` pod `192.0.2.30` ma konto `junos-archive`, przygotowany katalog i wcześniej zaufany host key. Na urządzeniu istnieje dopuszczona metoda bezhasłowego SCP, zgodna z wydaniem Junos i polityką security.
+Załóżmy, że serwer `LAB-SERVICES` pod `172.31.240.30` ma konto `junos-archive`, przygotowany katalog i wcześniej zaufany host key. Na urządzeniu istnieje dopuszczona metoda bezhasłowego SCP, zgodna z wydaniem Junos i polityką security.
 
 **Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant LAB do zweryfikowania z faktycznym serwerem SCP**
 
 ~~~junos
 set system archival configuration transfer-on-commit
-set system archival configuration archive-sites "scp://junos-archive@192.0.2.30/backup/junos/"
+set system archival configuration archive-sites "scp://junos-archive@172.31.240.30/backup/junos/"
 show | compare
 ~~~
 
@@ -1285,13 +1315,13 @@ Tak — choć nie wszystkie elementy wymagają trzech routerów i OSPF. W tym ro
 - **LAB-SERVICES** — Linux VM pełniąca w miarę dostępnych pakietów NTP/syslog/SCP i opcjonalnie TACACS+/RADIUS;
 - **1 × odizolowany wirtualny switch** management, bez mostowania do korporacyjnego LAN.
 
-Poniższe adresy z puli **TEST-NET `192.0.2.0/24`** służą wyłącznie dokumentacji i odizolowanemu labowi. **Nie routuj ich do Internetu.**
+Poniższe adresy z puli **prywatnej puli RFC1918 `172.31.240.0/24`** służą wyłącznie dokumentacji i odizolowanemu labowi. **Nie routuj ich do Internetu.**
 
 ~~~mermaid
 flowchart LR
-  ADMIN["LAB-ADMIN\nLinux 192.0.2.20/24"] --- OOB["EVE NET-CH04-MGMT\nizolowany switch"]
-  OOB --- SRX["LAB-SRX01\nfxp0.0 192.0.2.10/24"]
-  OOB --- SERVICES["LAB-SERVICES\nLinux 192.0.2.30/24\nNTP + Syslog + SCP + NMS"]
+  ADMIN["LAB-ADMIN\nLinux 172.31.240.20/24"] --- OOB["EVE NET-CH04-MGMT\nizolowany switch"]
+  OOB --- SRX["LAB-SRX01\nfxp0.0 172.31.240.10/24"]
+  OOB --- SERVICES["LAB-SERVICES\nLinux 172.31.240.30/24\nNTP + Syslog + SCP + NMS"]
   CON["EVE console\nniezależny kanał"] -. "OOB recovery" .-> SRX
 ~~~
 
@@ -1347,7 +1377,7 @@ configure private
 set system host-name LAB-SRX01
 set system domain-name lab.example
 set system time-zone Europe/Warsaw
-set interfaces fxp0 unit 0 family inet address 192.0.2.10/24
+set interfaces fxp0 unit 0 family inet address 172.31.240.10/24
 set system services ssh
 set system root-authentication plain-text-password
 show | compare
@@ -1395,7 +1425,7 @@ Po wpisaniu każdego hasła Junos poprosi o interaktywną wartość. Następnie 
 **Urządzenie: LAB-ADMIN — Linux shell, NOWA sesja przez SSH do LAB-SRX01**
 
 ~~~bash
-ssh labadmin@192.0.2.10
+ssh labadmin@172.31.240.10
 ~~~
 
 **Urządzenie: LAB-SRX01 — Operational Mode, sesja labadmin**
@@ -1408,7 +1438,7 @@ show system users
 **Urządzenie: LAB-ADMIN — Linux shell, NOWA sesja z ograniczonym kontem**
 
 ~~~bash
-ssh nocview@192.0.2.10
+ssh nocview@172.31.240.10
 ~~~
 
 **Urządzenie: LAB-SRX01 — Operational Mode, sesja nocview**
@@ -1462,8 +1492,8 @@ Jeśli brak usługi NTP, doinstalowanie/skonfigurowanie jej musi być osobnym ja
 **Urządzenie: LAB-SRX01 — Configuration Mode [edit], NTP**
 
 ~~~junos
-set system ntp server 192.0.2.30
-set system ntp source-address 192.0.2.10
+set system ntp server 172.31.240.30
+set system ntp source-address 172.31.240.10
 show | compare
 commit check
 ~~~
@@ -1471,12 +1501,12 @@ commit check
 **Urządzenie: LAB-SRX01 — Operational Mode, weryfikacja po commit**
 
 ~~~junos
-ping 192.0.2.30
+ping 172.31.240.30
 show ntp associations
 show ntp status
 ~~~
 
-**Dowód PASS:** wybrany serwer synchronizuje czas (zgodnie z `ntp status` i rzeczywistym systemem serwera). **Nie wystarczy** obecność adresu `192.0.2.30` w konfiguracji.
+**Dowód PASS:** wybrany serwer synchronizuje czas (zgodnie z `ntp status` i rzeczywistym systemem serwera). **Nie wystarczy** obecność adresu `172.31.240.30` w konfiguracji.
 
 **Fault injection:** wyłącz NTP *na serwerze labowym* i sprawdź, czy Junos straci synchronizację po odpowiednim czasie. **Nie zmieniaj czasu systemowego na Junos podczas oczekującego `commit confirmed`** — timer rollback zależy od zegara systemowego.
 
@@ -1489,9 +1519,9 @@ Najpierw uruchom/zweryfikuj odbiornik syslog na `LAB-SERVICES` (np. rsyslog/sysl
 ~~~junos
 set system syslog file messages any notice
 set system syslog file messages authorization info
-set system syslog host 192.0.2.30 any notice
-set system syslog host 192.0.2.30 authorization info
-set system syslog source-address 192.0.2.10
+set system syslog host 172.31.240.30 any notice
+set system syslog host 172.31.240.30 authorization info
+set system syslog source-address 172.31.240.10
 show | compare
 commit check
 ~~~
@@ -1522,7 +1552,7 @@ show configuration snmp | display set
 **Urządzenie: LAB-ADMIN — Linux shell z zainstalowanym klientem Net-SNMP, komenda SZABLONOWA — nie uruchamiaj z dosłownymi placeholderami**
 
 ~~~text
-snmpget -v3 -l authPriv -u NMS-RO -a SHA -A <AUTH_SECRET_Z_VAULT> -x AES -X <PRIV_SECRET_Z_VAULT> 192.0.2.10 1.3.6.1.2.1.1.3.0
+snmpget -v3 -l authPriv -u NMS-RO -a SHA -A <AUTH_SECRET_Z_VAULT> -x AES -X <PRIV_SECRET_Z_VAULT> 172.31.240.10 1.3.6.1.2.1.1.3.0
 ~~~
 
 W produkcji nie umieszczaj sekretów jawnie w historii powłoki/argumentach procesu. Użyj bezpiecznej metody dostarczenia credentiali zgodnej z narzędziem i polityką organizacji.
@@ -1536,7 +1566,7 @@ To najbardziej praktyczny test disaster recovery w całym rozdziale. Na `LAB-SER
 **Urządzenie: LAB-SRX01 — Configuration Mode [edit], szablon archiwizacji**
 
 ~~~junos
-set system archival configuration archive-sites "scp://junos-archive@192.0.2.30/backup/junos/"
+set system archival configuration archive-sites "scp://junos-archive@172.31.240.30/backup/junos/"
 set system archival configuration transfer-on-commit
 show | compare
 commit check
@@ -1773,7 +1803,7 @@ show log messages | match "snmp|SNMP"
 
 ### 4.TS.6. „Syslog lokalnie jest, a w SIEM nie ma nic”
 
-**Symptom:** `show log messages` zawiera zdarzenia, lecz serwer `192.0.2.30` nie.
+**Symptom:** `show log messages` zawiera zdarzenia, lecz serwer `172.31.240.30` nie.
 
 **Urządzenie: LAB-SRX01 — Operational Mode**
 
@@ -1870,7 +1900,7 @@ To jest najbardziej wartościowy nawyk Tier 3: nie szukasz pięciu niezależnych
 
 3. vSRX ma adres na `fxp0`. Czy oznacza to automatyczne istnienie odrębnej `mgmt_junos.inet.0`?
 
-4. Dodałeś `set system name-server 192.0.2.53`, ale DNS nie działa. Czy stworzyłeś tym poleceniem serwer DNS?
+4. Dodałeś `set system name-server 172.31.240.53`, ale DNS nie działa. Czy stworzyłeś tym poleceniem serwer DNS?
 
 5. `labadmin` ma poprawne hasło, ale klasa `read-only` i próbuje commit. Co powstrzyma zmianę?
 
@@ -1892,7 +1922,7 @@ To jest najbardziej wartościowy nawyk Tier 3: nie szukasz pięciu niezależnych
 
 14. NMS potrafi pobrać SNMPv3 `sysUpTime.0`, ale nie otrzymuje trapów. Czy polling i trapy są jednym mechanizmem?
 
-15. Na SRX skonfigurowano `system syslog host 192.0.2.30 any notice`. Czy to oznacza, że szczegółowe logi każdej sesji firewall znajdą się w zdalnym SIEM?
+15. Na SRX skonfigurowano `system syslog host 172.31.240.30 any notice`. Czy to oznacza, że szczegółowe logi każdej sesji firewall znajdą się w zdalnym SIEM?
 
 16. `transfer-on-commit` jest w konfiguracji, a operator widzi `commit complete`. Czy można wnioskować, że plik backupu dotarł do serwera?
 
