@@ -627,498 +627,273 @@ Spisz przed zmianą: wersję obrazu vSRX, mapping portów, stan obu tras R1→R4
 
 **Przykładowa notatka do maintenance:** „In isolated JNCIP DIAMOND, R1 ingress ge-0/0/2.0 FBF route lookup via R3 was reviewed against FBF-ALT and R4 return path. Lab outcome pending runtime verification; no production change performed.”
 
-## 7.8. Laboratorium — od jednej działającej trasy do FBF i ECMP [LAB]
 
-Zrobimy to w taki sposób, jak prowadziłbym warsztat przy tablicy i konsoli. Najpierw zobaczysz sieć bez żadnej „magii”. Użytkownicy dotrą do testowej usługi po zwykłej default route. Potem dodamy aggregate i generated, a na końcu alternatywną tablicę oraz FBF. Będziemy wiedzieć, **co właśnie zmieniliśmy i co powinno zmienić się w ruchu**, zamiast wklejać 200 linii konfiguracji i potem zgadywać.
+## 7.8. Laboratorium DIAMOND — aggregate, generated, RIB groups, FBF i ECMP [LAB]
 
-**Status laboratorium: PLANNED / NOT RUNTIME VALIDATED.** Ten scenariusz to projekt do uruchomienia, a nie raport z uruchomionej maszyny. Nie mamy tu wyniku \`show version\` konkretnego vSRX, mapowania NIC, zachowania security flow ani potwierdzenia wsparcia \`then routing-instance\` przez konkretny obraz. Przed wykonaniem zweryfikuj te elementy w EVE-NG i Juniper Feature Explorer. Jeśli klasyczny FBF jest niewspierany na danej wersji vSRX, przenieś tę fazę na wspierany EX/MX/QFX albo zaprojektuj osobny wariant APBR z właściwą dokumentacją SRX. **Nie deklaruj runtime PASS na podstawie samego commit albo wygenerowanego .unl.**
+**Status: PLANNED / NOT RUNTIME VALIDATED.** W rozdziale 7 używamy już wyłącznie kanonicznego DIAMOND: **R1, R2, R3, R4, PC-A i PC-B**. Nie ma Linux UP-A ani UP-B. Wszystkie scenariusze przeprowadzaj na osobnej kopii labu z konsolą, a testy `then routing-instance` wykonuj tylko jeśli konkretny Junos/vSRX tę funkcję obsługuje. Nie wyłączaj flow-mode tylko po to, aby obejść ograniczenia FBF.
 
-### Co musimy mieć w EVE-NG?
-
-Nie potrzebujemy czterech ciężkich vSRX dla tego konkretnego mechanizmu. Wystarczy jeden router **LAB-R1-vSRX** i cztery lekkie maszyny Linux: dwóch klientów OFFICE oraz dwóch operatorów. R1 ma trzy porty danych: OFFICE, WAN-A, WAN-B. Segmenty mają być całkowicie izolowane. Nie łączymy cloud bridge, Internetu ani sieci zarządzania GCP z ruchem testowym.
+### Faza 0. Sprawdź fizyczną mapę
 
 ~~~mermaid
 flowchart LR
-  subgraph OFF["OFFICE 192.0.2.0/24"]
-    PCA["LAB-PC-A<br/>192.0.2.10/24"]
-    PCB["LAB-PC-B<br/>192.0.2.11/24"]
-  end
-  PCA --- R1["LAB-R1-vSRX<br/>OFFICE 192.0.2.1"]
-  PCB --- R1
-  R1 ---|"WAN-A 198.51.100.1/30"| A["LAB-UP-A<br/>198.51.100.2/30<br/>lo: 203.0.113.10/32"]
-  R1 ---|"WAN-B 198.51.100.5/30"| B["LAB-UP-B<br/>198.51.100.6/30<br/>lo: 203.0.113.10/32"]
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
 ~~~
 
-*Rysunek 7.8 (autorski). Tekst alternatywny: PC-A i PC-B współdzielą OFFICE oraz bramę R1; dwa różne upstream Linux reprezentują WAN-A i WAN-B; oba mają identyczny testowy loopback, ale nie współdzielą segmentu Ethernet, więc ten sam cel pozwala udowodnić różny wybór ścieżki.*
+LAN-A: PC-A `192.0.2.10/24` ↔ R1 `192.0.2.1/24` na `ge-0/0/2.0`; LAN-B: R4 `198.51.100.1/24` na `ge-0/0/2.0` ↔ PC-B `198.51.100.10/24`. Transit R1–R2 `10.12.0.0/30`, R1–R3 `10.13.0.0/30`, R2–R4 `10.24.0.0/30`, R3–R4 `10.34.0.0/30`. Loopbacki R1–R4: `10.255.255.1/32` do `10.255.255.4/32`.
 
-Dlaczego używamy **tego samego 203.0.113.10/32 na dwóch Linux upstream**? Chodzi o kontrolowany eksperyment podobny do lokalnego anycast. Gdy PC-A i PC-B wysyłają do dokładnie tego samego destination, ale pakiety pojawiają się na dwóch różnych upstreamach, mamy dowód, że R1 wybrał **inną drogę**, a nie że jeden klient trafił do innego adresu. To izolowany test, nie pełny projekt usługi anycast z routingiem dynamicznym.
-
-| Maszyna | Interfejs logiczny do weryfikacji | Adres | Rola |
-|---|---|---|---|
-| LAB-R1 | \`ge-0/0/1.0\` | 192.0.2.1/24 | OFFICE, ingress FBF |
-| LAB-PC-A | \`eth0\` lub rzeczywisty NIC | 192.0.2.10/24 | Źródło „special” |
-| LAB-PC-B | \`eth0\` lub rzeczywisty NIC | 192.0.2.11/24 | Źródło „normal” |
-| LAB-R1 | \`ge-0/0/0.0\` | 198.51.100.1/30 | WAN-A |
-| LAB-UP-A | \`eth0\` | 198.51.100.2/30 | Operator A |
-| LAB-R1 | \`ge-0/0/2.0\` | 198.51.100.5/30 | WAN-B |
-| LAB-UP-B | \`eth0\` | 198.51.100.6/30 | Operator B |
-| Oba upstream Linux | \`lo\` | 203.0.113.10/32 | Wspólny testowy cel |
-| LAB-UP-A | \`lo\` | 10.60.10.10/32 i 10.70.10.10/32 | Cele do tras contributor |
-| LAB-UP-B | \`lo\` | 10.60.20.10/32 | Cel do drugiego contributor |
-
-Wszystkie wartości IP są laboratoryjne. Zwróć uwagę, że **IP interfejsów EVE-NG nie jest automatycznie zgodne z numeracją \`ge-0/0/x\` w obrazie vSRX**. Dla konkretnej wersji mogą istnieć inne interfejsy danych i osobny management \`fxp0\`. Mapowanie jest pierwszą rzeczą do potwierdzenia.
-
-### Faza 0. Zanim cokolwiek zepsujemy, sprawdźmy, co już jest na wirtualnych maszynach
-
-Wchodzisz na R1, widzisz prompt \`>\`, ale nie wykonujesz jeszcze \`set\`. Najpierw sprawdzamy wersję, interfejsy, ewentualne istniejące strefy, NAT i konfigurację zarządzania. Jeśli maszyna była już używana, nie próbuj doprowadzić jej do stanu „czystego” komendą \`delete security\` czy przypadkowym factory reset. W takim przypadku lepiej stworzyć odrębną instancję labową.
-
-**LAB-R1-vSRX — Operational Mode, read-only discovery**
+**R1-vSRX, R2-vSRX, R3-vSRX, R4-vSRX — każde urządzenie osobno, Operational Mode**
 
 ~~~junos
 show version
-show chassis hardware
 show interfaces terse
 show configuration interfaces | display set
-show configuration security zones | display set
-show configuration security policies | display set
-show configuration security nat | display set
 show configuration routing-options | display set
 show configuration routing-instances | display set
+show configuration security zones | display set
 show configuration firewall | display set
+show security flow session
 show system commit
 ~~~
 
-Na Linux hostach sprawdzamy nazwy interfejsów, adresację i systemowy firewall. Nie zakładaj, że masz \`eth0\`: współczesny Linux może pokazać \`ens3\`, \`enp1s0\` albo coś innego. Jeśli \`tcpdump\` nie jest zainstalowany, przygotuj obraz z tym narzędziem **przed** odizolowaniem labu, a nie instaluj go później przez produkcyjną sieć.
+Zweryfikuj faktyczne mapowanie NIC/QEMU, wersję obrazu, konsolę i zasoby EVE. Nie zmieniaj oryginalnego labu wykorzystywanego przez pozostałe rozdziały.
 
-**LAB-PC-A — Linux shell, discovery**
+### Faza 1. Przywróć bazowy routing PC-A → R1 → R2 → R4 → PC-B
 
-~~~bash
-ip -br link
-ip -4 addr
-ip -4 route
-~~~
+Na R1 primary do LAN-B prowadzi przez `10.12.0.2`, backup przez `10.13.0.2`. Na R4 return primary do LAN-A przez `10.24.0.1`, backup przez `10.34.0.1`. R2 i R3 znają statycznie oba LAN-y poprzez sąsiadów na swoich odcinkach. Security zones `LAB` i permit dla kontrolowanych testów ICMP muszą być przygotowane tak jak w rozdziale 6.
 
-**LAB-UP-A — Linux shell, discovery**
-
-~~~bash
-ip -br link
-ip -4 addr
-ip -4 route
-command -v tcpdump
-~~~
-
-Na końcu tej fazy powinieneś wiedzieć, które NIC tworzą OFFICE, WAN-A i WAN-B; czy nie ma konfliktujących adresów; czy security zone jest rzeczywiście pusta; i czy możesz bez ryzyka użyć \`commit confirmed\` mając console. Dopiero wtedy przystąp do konfiguracji.
-
-### Faza 1. Trzy interfejsy R1 — ale jeszcze bez alternatywnej tablicy
-
-R1 ma po prostu znać swoje trzy segmenty. Niczego jeszcze nie dzielimy między instances. Potrzebujemy najpierw stabilnego podłoża.
-
-**LAB-R1-vSRX — Operational Mode, wejście do konfiguracji**
+**R1-vSRX — Configuration Mode [edit private], tylko gdy brakuje baseline**
 
 ~~~junos
-configure private
-~~~
-
-**LAB-R1-vSRX — Configuration Mode [edit private], wyłącznie po potwierdzeniu mapowania NIC**
-
-~~~junos
-set system host-name LAB-R1
-set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24
-set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.1/30
-set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.5/30
-set interfaces ge-0/0/1 description "CH07-OFFICE"
-set interfaces ge-0/0/0 description "CH07-WAN-A"
-set interfaces ge-0/0/2 description "CH07-WAN-B"
+set routing-options static route 198.51.100.0/24 next-hop 10.12.0.2
+set routing-options static route 198.51.100.0/24 qualified-next-hop 10.13.0.2 preference 15
 show | compare
 commit check
-commit confirmed 10
 ~~~
 
-Dlaczego \`commit confirmed\`? Ponieważ popełnienie błędu w mapowaniu interfejsów może odciąć dostęp. W odizolowanym labie i z niezależną konsolą ta funkcja pozwala bezpiecznie cofnąć zmianę po upływie czasu, jeśli niczego nie potwierdzimy. **Po uruchomieniu \`commit confirmed\` nie wykonuj ponownie \`commit check\`**. Post-check ma być operacyjny, a nie kolejnym commitowym rytuałem.
-
-### Faza 2. Konfiguracja hostów i droga powrotna
-
-Przygotowujemy PC-A i PC-B. Oba są w tej samej sieci i mają tę samą bramę. Każdy z nich będzie potem wysyłał do 203.0.113.10. Pamiętaj, że poniżej \`IFACE=eth0\` to przykład; podstaw poprawną nazwę interfejsu. Jeśli obraz ma już skonfigurowany adres, nie dodawaj go drugi raz.
-
-**LAB-PC-A — Linux shell, klient do przekierowania**
-
-~~~bash
-IFACE=eth0
-sudo ip link set "$IFACE" up
-sudo ip -4 addr add 192.0.2.10/24 dev "$IFACE"
-sudo ip -4 route replace default via 192.0.2.1 dev "$IFACE"
-ip -4 route
-ping -c 3 192.0.2.1
-~~~
-
-**LAB-PC-B — Linux shell, klient korzystający ze zwykłego routingu**
-
-~~~bash
-IFACE=eth0
-sudo ip link set "$IFACE" up
-sudo ip -4 addr add 192.0.2.11/24 dev "$IFACE"
-sudo ip -4 route replace default via 192.0.2.1 dev "$IFACE"
-ip -4 route
-ping -c 3 192.0.2.1
-~~~
-
-Na obu upstream Linux chcemy mieć **adres transit, testowy loopback oraz drogę powrotną do OFFICE**. To ostatnie łatwo przeoczyć. Wtedy zobaczysz echo request na UP-A, ale odpowiedź nie wróci do PC-A i wyciągniesz fałszywy wniosek „FBF nie działa”. Uzupełnimy drogę powrotną jawnie.
-
-**LAB-UP-A — Linux shell, operator A**
-
-~~~bash
-IFACE=eth0
-sudo ip link set "$IFACE" up
-sudo ip -4 addr add 198.51.100.2/30 dev "$IFACE"
-sudo ip -4 addr add 203.0.113.10/32 dev lo
-sudo ip -4 addr add 10.60.10.10/32 dev lo
-sudo ip -4 addr add 10.70.10.10/32 dev lo
-sudo ip -4 route replace 192.0.2.0/24 via 198.51.100.1 dev "$IFACE"
-ip -4 route
-~~~
-
-**LAB-UP-B — Linux shell, operator B**
-
-~~~bash
-IFACE=eth0
-sudo ip link set "$IFACE" up
-sudo ip -4 addr add 198.51.100.6/30 dev "$IFACE"
-sudo ip -4 addr add 203.0.113.10/32 dev lo
-sudo ip -4 addr add 10.60.20.10/32 dev lo
-sudo ip -4 route replace 192.0.2.0/24 via 198.51.100.5 dev "$IFACE"
-ip -4 route
-~~~
-
-Te ustawienia \`ip\` są zwykle nietrwałe po restarcie Linux. To zamierzone w laboratorium, ale przy tworzeniu reprodukowalnego .unl warto je umieścić w skrypcie bootstrap dedykowanym do testowego obrazu. **Nie commituj haseł ani produkcyjnych konfiguracji.**
-
-R1 może już sprawdzić reachability operatorów po transit. To jeszcze **nie** jest test FBF ani końcowej aplikacji, ale pozwala wykryć zamienione WAN-A z WAN-B.
-
-**LAB-R1-vSRX — Operational Mode, test transitów**
+**R4-vSRX — Configuration Mode [edit private], tylko gdy brakuje baseline**
 
 ~~~junos
-ping 198.51.100.2 source 198.51.100.1 count 3
-ping 198.51.100.6 source 198.51.100.5 count 3
-show route 198.51.100.0/30 exact
-show route 198.51.100.4/30 exact
-~~~
-
-Zanim potwierdzisz fazę interfejsów, upewnij się, że post-check przeszedł. Jeśli nie, pozwól automatycznemu rollbackowi lub napraw mapowanie przez konsolę, w sposób zgodny z planem.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], wyłącznie po PASS fazy 1–2**
-
-~~~junos
-commit
-~~~
-
-### Faza 3. SRX musi dopuścić testy — inaczej każda lekcja routingu skończy się fałszywą diagnozą
-
-Na vSRX potrzebujemy security zones. Nasze testy mają korzystać z ICMP od klientów w OFFICE do obu upstreamów. Z punktu widzenia zasad bezpieczeństwa stworzymy tylko laboratoryjne polityki **CLIENT → WAN-A** i **CLIENT → WAN-B** dla \`junos-ping\`. Na firewallu produkcyjnym użyłbyś precyzyjnych adresów i aplikacji; nie jest to rekomendacja bezwarunkowego zezwalania na cały ruch.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], po sprawdzeniu ewentualnych konfliktów stref**
-
-~~~junos
-set security zones security-zone CLIENT interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
-set security zones security-zone WAN-A interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
-set security zones security-zone WAN-B interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
-set security policies from-zone CLIENT to-zone WAN-A policy CH07-PING-A match source-address any
-set security policies from-zone CLIENT to-zone WAN-A policy CH07-PING-A match destination-address any
-set security policies from-zone CLIENT to-zone WAN-A policy CH07-PING-A match application junos-ping
-set security policies from-zone CLIENT to-zone WAN-A policy CH07-PING-A then permit
-set security policies from-zone CLIENT to-zone WAN-B policy CH07-PING-B match source-address any
-set security policies from-zone CLIENT to-zone WAN-B policy CH07-PING-B match destination-address any
-set security policies from-zone CLIENT to-zone WAN-B policy CH07-PING-B match application junos-ping
-set security policies from-zone CLIENT to-zone WAN-B policy CH07-PING-B then permit
+set routing-options static route 192.0.2.0/24 next-hop 10.24.0.1
+set routing-options static route 192.0.2.0/24 qualified-next-hop 10.34.0.1 preference 15
 show | compare
 commit check
-commit confirmed 10
 ~~~
 
-Dlaczego nie wprowadzamy reguł pozwalających na wszystko? Po pierwsze, nie potrzebujemy ich. Po drugie, chcemy utrzymać różnicę między **routowaniem pakietu** a **zezwoleniem na jego sesję**. Do testów wystarczy ICMP, jeśli konkretna wersja SRX ma predefiniowaną aplikację \`junos-ping\`. Sprawdź też, czy nie działa dziedziczone source NAT, które mogłoby zmienić adres widziany po drugiej stronie i zepsuć naszą obserwację source-based FBF.
+**PC-A — VPCS console**
 
-**LAB-R1-vSRX — Operational Mode, kontrola stref i polityk**
-
-~~~junos
-show security zones
-show security policies from-zone CLIENT to-zone WAN-A
-show security policies from-zone CLIENT to-zone WAN-B
-show configuration security nat | display set
+~~~text
+ip 192.0.2.10/24 192.0.2.1
+ping 198.51.100.10
+trace 198.51.100.10
 ~~~
 
-Jeżeli output odpowiada założeniom i podstawowe testy działają, potwierdź warunkowy commit.
+**PC-B — VPCS console**
 
-**LAB-R1-vSRX — Configuration Mode [edit private], po PASS security baseline**
-
-~~~junos
-commit
+~~~text
+ip 198.51.100.10/24 198.51.100.1
+ping 192.0.2.10
 ~~~
 
-### Faza 4. Najpierw musi działać zwykły default via WAN-A
+Jeżeli nie ma poprawnego ruchu w obu kierunkach, nie zaczynaj dalszych faz: bez działającego baseline nie odróżnisz błędu RIB group od wcześniejszego braku trasy lub policy.
 
-Zanim zaczniemy manipulować tablicami, ustawiamy klasyczną default route. Zwykły router z jedną tablicą powinien teraz kierować obu klientów do 203.0.113.10 przez WAN-A. Tak wygląda **baseline**, którego nie możemy pominąć.
+### Faza 2. Statyczne trasy contributor to nie nowe fizyczne sieci
 
-**LAB-R1-vSRX — Configuration Mode [edit private], default w globalnej inet.0**
+Zdefiniuj **syntetyczne prefiksy** służące wyłącznie do badań RIB/FIB: `10.60.10.0/24` przez R2 i `10.60.20.0/24` przez R3. Żaden węzeł z naszego diamentu nie ma tych sieci jako direct, zatem **nie oczekuj** rzeczywistego ping do `10.60.10.10` bez osobnej, jawnie nazwanej rozszerzonej wersji ćwiczenia.
+
+**R1-vSRX — Configuration Mode [edit private], kopia LAB**
 
 ~~~junos
-set routing-options static route 0.0.0.0/0 next-hop 198.51.100.2
+set routing-options static route 10.60.10.0/24 next-hop 10.12.0.2
+set routing-options static route 10.60.20.0/24 next-hop 10.13.0.2
 show | compare
 commit check
-commit confirmed 10
 ~~~
 
-**LAB-PC-A — Linux shell, przed FBF**
-
-~~~bash
-ping -c 5 203.0.113.10
-~~~
-
-**LAB-PC-B — Linux shell, przed FBF**
-
-~~~bash
-ping -c 5 203.0.113.10
-~~~
-
-Teraz odpalamy jedną z najbardziej wartościowych obserwacji całego kursu. Użytkownicy nie zobaczą, którym WAN poszedł pakiet — obie strony mają ten sam testowy loopback. Ale na upstreamach możemy przechwycić pakiety. \`tcpdump\` jest tutaj znacznie mocniejszym dowodem niż \`show route\` R1.
-
-**LAB-UP-A — Linux shell, obserwacja prób do testowego loopback**
-
-~~~bash
-sudo tcpdump -ni eth0 'icmp and host 203.0.113.10' -c 20
-~~~
-
-**LAB-UP-B — Linux shell, kontrola czy ruch nie trafił na łącze zapasowe**
-
-~~~bash
-sudo tcpdump -ni eth0 'icmp and host 203.0.113.10' -c 20
-~~~
-
-**Przewidywany wynik (NIEZWERYFIKOWANY RUNTIME):** requesty z PC-A i PC-B pojawią się na UP-A; UP-B nie zobaczy tych pakietów. Jeśli obydwa komputery nie mogą dostać odpowiedzi, oddzielnie sprawdź Linux return route, firewall, SRX security policy i NAT. Jeśli UP-B widzi requesty mimo braku FBF, znaczy to, że baseline różni się od zakładanego — nie przechodź do kolejnej fazy bez wyjaśnienia.
-
-**LAB-R1-vSRX — Operational Mode, RIB i FIB baseline**
-
-~~~junos
-show route 0.0.0.0/0 exact extensive
-show route forwarding-table destination 203.0.113.10
-show security flow session
-~~~
-
-Po pozytywnym post-check potwierdź commit. W tym momencie obie klasy klientów mają działać przez WAN-A. Dopiero z tego stabilnego stanu będziemy budować bardziej zaawansowane mechanizmy.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], po PASS default**
-
-~~~junos
-commit
-~~~
-
-
-### Faza 5. Trzy statyczne drogi, dwa różne rodzaje summary
-
-Mamy już prosty działający ruch. Teraz dokładamy trasy do sieci aplikacyjnych, aby nie mylić kolejnych mechanizmów z problemami fizycznego WAN. Na UP-A znajduje się testowy loopback 10.60.10.10 i 10.70.10.10, na UP-B — 10.60.20.10. R1 dostanie dwa bardziej szczegółowe prefixy wewnątrz **10.60.0.0/16** oraz jeden wewnątrz **10.70.0.0/16**.
-
-Z pierwszej grupy stworzymy **aggregate reject**, z drugiej **generated** odziedziczony z contributora. Nie wprowadzamy jeszcze żadnego BGP export: to czysta obserwacja RIB/FIB.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], statyczne contributors i dwa summary**
-
-~~~junos
-set routing-options static route 10.60.10.0/24 next-hop 198.51.100.2
-set routing-options static route 10.60.20.0/24 next-hop 198.51.100.6
-set routing-options aggregate route 10.60.0.0/16
-set routing-options static route 10.70.10.0/24 next-hop 198.51.100.2
-set routing-options generate route 10.70.0.0/16
-show | compare
-commit check
-commit confirmed 10
-~~~
-
-**LAB-R1-vSRX — Operational Mode, czy contributorzy są aktywni?**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
 show route 10.60.10.0/24 exact extensive
 show route 10.60.20.0/24 exact extensive
-show route 10.60.0.0/16 exact extensive
-show route 10.70.10.0/24 exact extensive
-show route 10.70.0.0/16 exact extensive
+show route forwarding-table destination 10.60.10.10
 ~~~
 
-Są tu dwa rodzaje oczekiwań. **Oba /24** powinny być aktywne jako static przy działających WAN i rozwiązanych next-hopach. **Aggregate /16** powinien móc powstać dzięki aktywnym bardziej szczegółowym trasom, domyślnie z reject next-hop. **Generated /16** powinien móc powstać dzięki 10.70.10.0/24 i skierować nieobjęte bardziej szczegółowym prefiksem pakiety przez next-hop primary contributor.
+Dwie trasy mogą być aktywne, bo next-hopy są rozwiązywalne, nawet jeśli żaden serwer pod takim adresem nie istnieje. To dowód route selection, a nie end-to-end reachability.
 
-Teraz trzy testy na PC-B. Zauważ, że wybieramy **różne cele w obrębie jednego summary**, żeby udowodnić, że działa LPM i że summary nie „zastępuje” realnych /24.
+### Faza 3. Aggregate: podsumowanie i jego domyślny reject
 
-**LAB-PC-B — Linux shell, dwa realne hosty i nieistniejący fragment aggregate**
-
-~~~bash
-ping -c 3 10.60.10.10
-ping -c 3 10.60.20.10
-ping -c 3 10.60.99.25
-~~~
-
-Dwa pierwsze powinny przejść właściwymi upstreamami, jeśli security i return path są poprawne. Trzeci powinien zostać zatrzymany na R1 przez aggregate /16, ponieważ brak bardziej szczegółowej trasy do 10.60.99.25. Otrzymanie ICMP unreachable albo timeout zależy od platformy i filtrowania odpowiedzi; dlatego sprawdzamy FIB i położenie pakietu, a nie opieramy całego wniosku na ping.
-
-**LAB-R1-vSRX — Operational Mode, forwarding do adresu nieistniejącego pod aggregate**
+**R1-vSRX — Configuration Mode [edit private]**
 
 ~~~junos
+set routing-options aggregate route 10.60.0.0/16
+show | compare
+commit check
+~~~
+
+**R1-vSRX — Operational Mode**
+
+~~~junos
+show route 10.60.0.0/16 exact extensive
+show route 10.60.10.0/24 exact
 show route forwarding-table destination 10.60.99.25
-show route 10.60.0.0/16 exact extensive
 ~~~
 
-**LAB-PC-B — Linux shell, drugi eksperyment — generated**
+Jeżeli contributor /24 jest aktywny, aggregate /16 może stać się aktywny. Dla adresu z prawdziwej /24 wygrywa specyficzna trasa. Dla nieobsadzonego `10.60.99.25` może wygrać aggregate reject. Nie myl reject w FIB z odrzuceniem BGP import policy.
 
-~~~bash
-ping -c 3 10.70.10.10
-ping -c 3 10.70.99.25
-~~~
+### Faza 4. Generated: route z next-hop contributor
 
-Dla 10.70.99.25 oczekujemy innego zachowania niż przy aggregate: generated /16 może skierować pakiet przez **WAN-A**, pomimo braku hosta na upstream. Ping może się nie udać, ale jeśli zobaczymy request na UP-A, mamy dowód, że R1 przekazał go dalej.
-
-**LAB-UP-A — Linux shell, obserwacja nieistniejącego celu wewnątrz generated summary**
-
-~~~bash
-sudo tcpdump -ni eth0 'host 10.70.99.25' -c 10
-~~~
-
-**Przewidywany wynik (NIEZWERYFIKOWANY):** UP-A zobaczy pakiety przeznaczone do 10.70.99.25, jeśli generated jest aktywna i forwarduje via next-hop primary contributor. Nie twierdzimy, że sam TCP/IP stack UP-A odpowie na taki pakiet. To test **forwardingu R1**, nie sukcesu usługi na nieistniejącym host.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], po pozytywnym sprawdzeniu obu summary**
+**R1-vSRX — Configuration Mode [edit private]**
 
 ~~~junos
-commit
+set routing-options static route 10.70.10.0/24 next-hop 10.12.0.2
+set routing-options generate route 10.70.0.0/16
+show | compare
+commit check
 ~~~
 
-### Faza 6. Budujemy osobną tablicę, ale na razie nie kierujemy do niej klientów
+**R1-vSRX — Operational Mode**
 
-R1 wciąż ma globalną default przez WAN-A. To ma pozostać bez zmian. Obok tworzymy \`FBF-ALT\` typu forwarding z default przez WAN-B. Ważne: do tej pory PC-A i PC-B nadal korzystają z \`inet.0\`, bo nigdzie nie podpięliśmy filtra wejściowego.
+~~~junos
+show route 10.70.0.0/16 exact extensive
+show route 10.70.10.0/24 exact
+show route forwarding-table destination 10.70.99.25
+~~~
 
-**LAB-R1-vSRX — Configuration Mode [edit private], tworzymy forwarding instance**
+Zamiast reject generated może przekazać pakiet przez next-hop primary contributor R2. Pamiętaj: docelowy host `10.70.99.25` jest hipotetyczny; nie jest nowym urządzeniem EVE.
+
+### Faza 5. FBF-ALT: ta sama sieć docelowa, inna tabela
+
+Zbuduj drugą RIB na R1, gdzie LAN-B wskazuje R3, podczas gdy zwykła `inet.0` nadal wskazuje R2. Dla `FBF-ALT` next-hop `10.13.0.2` musi być **osiągalny w tej samej tabeli**.
+
+**R1-vSRX — Configuration Mode [edit private], jeśli FBF wspierane**
 
 ~~~junos
 set routing-instances FBF-ALT instance-type forwarding
-set routing-instances FBF-ALT routing-options static route 0.0.0.0/0 next-hop 198.51.100.6
+set routing-instances FBF-ALT routing-options static route 198.51.100.0/24 next-hop 10.13.0.2
 show | compare
 commit check
-commit confirmed 10
 ~~~
 
-**LAB-R1-vSRX — Operational Mode, co druga tabela wie przed RIB group?**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-show configuration routing-instances FBF-ALT | display set
-show route table FBF-ALT.inet.0
-show route table FBF-ALT.inet.0 198.51.100.4/30 exact
+show route table inet.0 198.51.100.0/24 exact
+show route table FBF-ALT.inet.0 198.51.100.0/24 exact extensive
 ~~~
 
-Jeśli connected route 198.51.100.4/30 nie jest w secondary, nie traktuj tego jako awarii: to punkt dydaktyczny, który chcieliśmy zobaczyć. Sama static default w nowej instancji nie daje automatycznie dostępu do connected z globalnej tabeli. Zrób notatkę, czy default jest active/inactive i co mówi output. Ten etap nie musi powodować sukcesu forwarding — ponieważ FBF nie jest jeszcze aktywny, nie uszkadza normalnego ruchu klientów.
+Druga tabela jeszcze może mieć unresolved next-hop. Poprawny wpis w konfiguracji nie jest dowodem aktywnego routingu.
 
-**LAB-R1-vSRX — Configuration Mode [edit private], po zapisaniu obserwacji**
+### Faza 6. RIB group: celowo udostępnij connected do R3
 
-~~~junos
-commit
-~~~
+To jest eksperyment z **rozwiązywaniem next-hop w secondary RIB**, a nie przenoszeniem interfejsu między VRF. Import-policy powinna selektywnie przepuścić connected do P2P-13 `10.13.0.0/30`. Sposób ewaluacji reguł sprawdź na faktycznej platformie; nie zakładaj, że samo commit check dowodzi funkcjonalności.
 
-Teraz definiujemy RIB group \`COPY-INTERFACE-ROUTES\` z primary \`inet.0\` i secondary \`FBF-ALT.inet.0\`, a następnie podpinamy ją do interface routes. To powinno udostępnić w FBF-ALT podstawowe informacje do rozwiązania next-hop 198.51.100.6.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], grupa dla interface routes IPv4**
+**R1-vSRX — Configuration Mode [edit private]**
 
 ~~~junos
-set routing-options rib-groups COPY-INTERFACE-ROUTES import-rib [ inet.0 FBF-ALT.inet.0 ]
-set routing-options interface-routes rib-group inet COPY-INTERFACE-ROUTES
+set policy-options policy-statement CH07-P2P13 term P2P-13 from route-filter 10.13.0.0/30 exact
+set policy-options policy-statement CH07-P2P13 term P2P-13 then accept
+set policy-options policy-statement CH07-P2P13 term REST then reject
+set routing-options rib-groups CH07-RIB import-rib [ inet.0 FBF-ALT.inet.0 ]
+set routing-options rib-groups CH07-RIB import-policy CH07-P2P13
+set routing-options interface-routes rib-group inet CH07-RIB
 show | compare
 commit check
-commit confirmed 10
 ~~~
 
-**LAB-R1-vSRX — Operational Mode, obserwacja po podpięciu RIB group**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-show configuration routing-options rib-groups | display set
-show configuration routing-options interface-routes | display set
-show route table inet.0 198.51.100.4/30 exact
-show route table FBF-ALT.inet.0 198.51.100.4/30 exact
-show route table FBF-ALT.inet.0 0.0.0.0/0 exact extensive
+show route table inet.0 10.13.0.0/30 exact
+show route table FBF-ALT.inet.0 10.13.0.0/30 exact
+show route table FBF-ALT.inet.0 198.51.100.0/24 exact extensive
 ~~~
 
-**Oczekiwany wynik (NIEZWERYFIKOWANY):** FBF-ALT zna connected do WAN-B i jej default może zostać poprawnie rozwiązana. Jeśli na tej platformie RIB group nie udostępnia oczekiwanych tras, zatrzymaj lab i sprawdź wsparcie konkretnego Junos, zamiast dorzucać przypadkowe \`next-table\` albo przenosić interfejsy pomiędzy instancjami.
+Jeżeli connected nie dociera do dodatkowej RIB albo default/static pozostaje hidden, wyjaśnij powód na podstawie show route extensive zamiast dodawać przypadkowe next-table.
 
-**LAB-R1-vSRX — Configuration Mode [edit private], dopiero po PASS RIB group**
+### Faza 7. Włącz filtr ingress — tylko PC-B przez R3
 
-~~~junos
-commit
-~~~
+W sześciowęzłowym DIAMOND nie mamy dwóch klientów w LAN-A. Dlatego uczymy **destination-based FBF**: pakiet PC-A do PC-B `198.51.100.10` trafi do `FBF-ALT`, lecz pakiet PC-A do R2 `10.12.0.2` pozostanie w `inet.0`. Nie przedstawiaj tego jako testu dwóch źródeł PBR.
 
-Właśnie przeprowadziliśmy ważny eksperyment: przygotowaliśmy alternatywną trasę bez jeszcze jednej zmiany routingu klientów. I to jest dobra praktyka produkcyjna — najpierw przygotuj nowy kontekst i sprawdź jego next-hop, dopiero potem decyduj, jakie pakiety mają zacząć z niego korzystać.
-
-### Faza 7. Włączamy FBF dla PC-A, ale PC-B ma nie zauważyć zmiany
-
-Mamy \`inet.0\` dla WAN-A i \`FBF-ALT.inet.0\` dla WAN-B. Teraz wejściowy stateless filter wybierze alternatywną tablicę dla jednego źródła. Nie włączaj go, jeśli FBF nie jest wspierany na danym vSRX lub jeśli FBF-ALT default nadal jest unresolved. Jeśli to SRX, przed zmianą potwierdź również \`CLIENT → WAN-B\` security policy.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], FBF na ingress OFFICE**
+**R1-vSRX — Configuration Mode [edit private], tylko gdy obraz wspiera FBF**
 
 ~~~junos
-set firewall family inet filter OFFICE-FBF term SPECIAL from source-address 192.0.2.10/32
+set firewall family inet filter OFFICE-FBF term SPECIAL from destination-address 198.51.100.10/32
 set firewall family inet filter OFFICE-FBF term SPECIAL then routing-instance FBF-ALT
 set firewall family inet filter OFFICE-FBF term NORMAL then accept
-set interfaces ge-0/0/1 unit 0 family inet filter input OFFICE-FBF
+set interfaces ge-0/0/2 unit 0 family inet filter input OFFICE-FBF
 show | compare
 commit check
 commit confirmed 10
 ~~~
 
-Teraz jeden z najważniejszych testów w całym laboratorium. **PC-A i PC-B wysyłają do tego samego 203.0.113.10**. Oczekujemy, że pierwszy zostanie skierowany przez WAN-B, drugi pozostanie na WAN-A. Uważnie rozróżnij requesty od odpowiedzi, bo na uplinkach możesz zobaczyć oba kierunki.
+**PC-A — VPCS console**
 
-**LAB-PC-A — Linux shell, klient objęty FBF**
-
-~~~bash
-ping -c 5 203.0.113.10
+~~~text
+ping 10.12.0.2
+ping 198.51.100.10
+trace 198.51.100.10
 ~~~
 
-**LAB-PC-B — Linux shell, klient nieobjęty FBF**
-
-~~~bash
-ping -c 5 203.0.113.10
-~~~
-
-**LAB-UP-A — Linux shell, obserwacja requestów klienta zwykłego**
-
-~~~bash
-sudo tcpdump -ni eth0 'icmp and host 203.0.113.10' -c 20
-~~~
-
-**LAB-UP-B — Linux shell, obserwacja requestów klienta specjalnego**
-
-~~~bash
-sudo tcpdump -ni eth0 'icmp and host 203.0.113.10' -c 20
-~~~
-
-Spodziewamy się, że na UP-B pojawi się źródło **192.0.2.10**, a na UP-A źródło **192.0.2.11**. Jeśli ruch pakietowy trafia na poprawny upstream, ale ping nie ma odpowiedzi, przyjrzyj się drodze powrotnej, strefom oraz stateful session na SRX. Sama klasyfikacja FBF nie daje automatycznej permisji security.
-
-**LAB-R1-vSRX — Operational Mode, status po zmianie**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-show configuration interfaces ge-0/0/1 | display set
-show configuration firewall family inet filter OFFICE-FBF | display set
-show route table inet.0 0.0.0.0/0 exact
-show route table FBF-ALT.inet.0 0.0.0.0/0 exact
+show configuration interfaces ge-0/0/2 | display set
+show firewall filter OFFICE-FBF
+show route table FBF-ALT.inet.0 198.51.100.0/24 exact
 show security flow session
 ~~~
 
-**Oczekiwany wynik (NIEZWERYFIKOWANY):** działa host-to-host test z obu PC; requesty PC-A pojawiają się tylko na WAN-B, a PC-B tylko na WAN-A, bez niezamierzonych dodatkowych tras. Ostateczna obserwacja ma pochodzić z faktycznego \`tcpdump\` oraz session/route output — nie tylko z faktu, że parser przyjął \`then routing-instance\`.
+Jeśli PC-A dociera do R2, termin NORMAL nie zablokował innych celów. Przekierowanie do R3 potwierdź przez stan FIB/flow i obserwację pakietów, **nie tylko zielony ping**.
 
-Jeśli dwa niezależne testy przeszły, potwierdź \`commit\`. W przeciwnym razie wykorzystaj rollback, nie usuwaj całego filtrowania.
+### Faza 8. Najważniejsza pułapka: R4 może odesłać przez R2
 
-**LAB-R1-vSRX — Configuration Mode [edit private], dopiero po PASS obu klientów**
+FBF może wymusić request PC-A → R1 → R3 → R4, ale bazowy R4 nadal preferuje R2 w drodze zwrotnej. SRX jest stateful, więc asymetryczna ścieżka może powodować drop. Dopiero **osobny, świadomy wariant** z tymczasowym return via R3 pozwala sensownie testować end-to-end. Po teście obowiązkowo odtwórz baseline R4.
+
+**R4-vSRX — Configuration Mode [edit private], tylko kopia LAB**
 
 ~~~junos
-commit
+delete routing-options static route 192.0.2.0/24
+set routing-options static route 192.0.2.0/24 next-hop 10.34.0.1
+show | compare
+commit check
+commit confirmed 10
 ~~~
 
-Teraz mamy pierwszy kompletny punkt odniesienia: globalny ruch korzysta z WAN-A, a jedno źródło z WAN-B. W dalszej części celowo będziemy go psuć i zbierać dowody, dlaczego.
+**R4-vSRX — Operational Mode**
 
+~~~junos
+show route 192.0.2.0/24 exact extensive
+show security flow session
+~~~
 
-### Faza 8. Pierwsza awaria: aggregate przestaje istnieć, choć jego konfiguracja została
+**PC-A — VPCS console**
 
-Zaczniemy od bezpiecznego eksperymentu, który nie powinien odciąć nam całej sieci OFFICE. Wycofujemy oba static routes /24 tworzące 10.60.0.0/16, ale nie usuwamy \`aggregate route 10.60.0.0/16\` z konfiguracji. Co przewidujesz?
+~~~text
+ping 198.51.100.10
+trace 198.51.100.10
+~~~
 
-Jeżeli nie ma innych aktywnych contributorów ani specjalnego \`passive\`, aggregate straci podstawę do aktywności. Właśnie dlatego \`commit check\` nie wystarczy jako test routingu: konfiguracja /16 będzie nadal poprawna składniowo, ale route może przestać być aktywna.
+Brak odpowiedzi mimo trasy przez R3 nie musi oznaczać błędnego FBF: sprawdź policies i sesje na R1/R3/R4. Nie potwierdzaj zmiany R4, jeśli test ma się sam wycofać.
 
-**LAB-R1-vSRX — Configuration Mode [edit private], kontrolowany fault tylko w odizolowanym labie**
+### Faza 9. Controlled fault: aggregate bez contributor
+
+**R1-vSRX — Configuration Mode [edit private]**
 
 ~~~junos
 delete routing-options static route 10.60.10.0/24
@@ -1128,63 +903,39 @@ commit check
 commit confirmed 2
 ~~~
 
-**LAB-R1-vSRX — Operational Mode, podczas odliczania — bez kolejnego commit/check**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
 show route 10.60.0.0/16 exact extensive
-show route protocol aggregate
 show configuration routing-options aggregate | display set
 show system commit
 ~~~
 
-**Oczekiwanie (NIEZWERYFIKOWANE):** brak aktywnego aggregate 10.60.0.0/16, ale konfiguracja \`aggregate route\` nadal istnieje. Wyjątkiem byłby inny kwalifikujący się contributor lub celowo ustawiona opcja zmieniająca zachowanie trasy.
+Zauważ różnicę między obecnością `set aggregate` w candidate/active a rzeczywistą aktywnością podsumowania w RIB. Po auto-rollback sprawdź, czy contributory wróciły.
 
-**Naprawa:** nie zatwierdzaj tej zmiany. Pozwól automatycznemu rollbackowi po \`commit confirmed 2\` przywrócić contributor routes. Po odtworzeniu wykonaj read-only \`show route\` i test hostów. Jeśli rollback nie nastąpi, zatrzymaj test, sprawdź historię i zastosuj zaplanowane ręczne przywrócenie baseline przez konsolę. Nie traktuj \`rollback 1\` jak stałego aliasu do „naszej wersji sprzed pięciu faz”, bo historia zmienia się po commit.
+### Faza 10. Controlled fault: RIB group traci connected
 
-### Faza 9. Druga awaria: FBF istnieje, ale WAN-B nie daje się rozwiązać w secondary RIB
-
-Teraz celowo odpinamy RIB group od źródła tras interfejsowych. Sama definicja \`COPY-INTERFACE-ROUTES\` zostaje w konfiguracji, podobnie jak \`FBF-ALT\` i input filter na OFFICE. To ma pokazać różnicę między *istniejącym obiektem*, *używaną grupą* i *faktyczną trasą connected w secondary table*.
-
-Najpierw przewidywanie: jeśli FBF-ALT nie ma innej drogi do 198.51.100.6, a connected route przestanie być dostępna, jej default przez B może stać się unresolved. PC-A powinien wtedy utracić prawidłową alternatywną ścieżkę, podczas gdy PC-B nadal może korzystać z normalnej \`inet.0\` przez A. Dokładny efekt na danym vSRX musimy zaobserwować, a nie zakładać.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], kontrolowane usunięcie powiązania RIB group**
+**R1-vSRX — Configuration Mode [edit private]**
 
 ~~~junos
-delete routing-options interface-routes rib-group inet COPY-INTERFACE-ROUTES
+delete routing-options interface-routes rib-group inet CH07-RIB
 show | compare
 commit check
 commit confirmed 2
 ~~~
 
-**LAB-R1-vSRX — Operational Mode, rozpoznanie problemu podczas pending rollback**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-show route table FBF-ALT.inet.0 198.51.100.4/30 exact
-show route table FBF-ALT.inet.0 0.0.0.0/0 exact extensive
-show route table inet.0 198.51.100.4/30 exact
-show configuration routing-options interface-routes | display set
-show system commit
+show route table FBF-ALT.inet.0 10.13.0.0/30 exact
+show route table FBF-ALT.inet.0 198.51.100.0/24 exact extensive
 ~~~
 
-**LAB-PC-A — Linux shell, klient SPECIAL w czasie awarii**
+Jeżeli trasa do R3 zniknęła tylko z secondary table, diagnozą jest brak next-hop resolution w FBF-ALT — nie link down w EVE.
 
-~~~bash
-ping -c 3 203.0.113.10
-~~~
+### Faza 11. Controlled fault: usuwamy NORMAL z filtra
 
-**LAB-PC-B — Linux shell, klient NORMAL w czasie awarii**
-
-~~~bash
-ping -c 3 203.0.113.10
-~~~
-
-**Naprawa:** pozwól wygaśnięciu \`commit confirmed\` automatycznie przywrócić powiązanie \`interface-routes\`, a potem sprawdź connected w FBF-ALT i właściwy upstream dla PC-A. Jeśli secondary nadal nie ma potrzebnej trasy, nie dodawaj przypadkowej kolejnej default; sprawdź wsparcie RIB group i istniejące import-policy.
-
-### Faza 10. Trzecia awaria: włączyliśmy FBF tylko dla jednego hosta, ale odcięliśmy resztę biura
-
-W naszej konfiguracji filtr \`OFFICE-FBF\` ma dwa termy: SPECIAL i NORMAL. Do tej pory NORMAL był trochę niewidocznym bohaterem całej historii. Zobaczysz jego znaczenie, gdy usuniemy go na dwie minuty. FBF dla PC-A pozostanie skonfigurowany, ale inne źródła nie dopasują już żadnej reguły. Standardowy stateless filter ma na końcu **implicit discard**.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], kontrolowany błąd wyłącznie w laboratorium**
+**R1-vSRX — Configuration Mode [edit private], tylko osobna konsola**
 
 ~~~junos
 delete firewall family inet filter OFFICE-FBF term NORMAL
@@ -1193,179 +944,75 @@ commit check
 commit confirmed 2
 ~~~
 
-**LAB-PC-A — Linux shell, dopasowany do SPECIAL**
+**PC-A — VPCS console**
 
-~~~bash
-ping -c 3 203.0.113.10
+~~~text
+ping 10.12.0.2
+ping 198.51.100.10
 ~~~
 
-**LAB-PC-B — Linux shell, niepasujący do SPECIAL**
+Jeżeli ping do R2 przestaje działać, a interfejs R1–R2 jest up, możliwą przyczyną jest implicit discard innych destination po usunięciu końcowego termu. Po auto-rollback sprawdź licznik/konfigurację filtra.
 
-~~~bash
-ping -c 3 203.0.113.10
-~~~
+### Faza 12. Generated vs aggregate: forwarding może być inny mimo podobnego /16
 
-**Oczekiwany wynik:** PC-A może nadal korzystać z WAN-B, podczas gdy PC-B jest odrzucany przez brak termu kończącego filtrowanie \`accept\`. Trasa default PC-B w \`inet.0\` nadal jest aktywna; to nie routing, tylko stateless filter zatrzymał pakiet przed jego zwykłą ścieżką. Jeśli PC-B nadal działa, sprawdź, czy właściwy filter jest aktywny i czy pakiet faktycznie przechodzi przez ingress, który testujemy.
-
-**Naprawa:** nie zatwierdzaj zmiany. Pozwól automatycznemu rollbackowi przywrócić NORMAL, a następnie wykonaj dwa testy post-check. Nie usuwaj filtra w całości, bo celem nie jest wyłączenie FBF dla PC-A, tylko przywrócenie ruchu, który powinien pozostać nietknięty.
-
-### Faza 11. Czwarta lekcja: generated route nie jest bezpiecznym reject summary
-
-To nie musi być nowa konfiguracja fault injection. Po prostu wróć do tras 10.70.0.0/16 i do obserwacji UP-A. Zwykłe \`aggregate 10.60.0.0/16\` chroni nieistniejący fragment summary przez reject. \`generate 10.70.0.0/16\` może wysłać pakiet do nieistniejącego fragmentu /16 przez next-hop contributora.
-
-**LAB-PC-B — Linux shell, dwa cele bez hostów w odpowiednich summary**
-
-~~~bash
-ping -c 3 10.60.99.25
-ping -c 3 10.70.99.25
-~~~
-
-**LAB-UP-A — Linux shell, obserwacja nieobsługiwanego fragmentu generated**
-
-~~~bash
-sudo tcpdump -ni eth0 'host 10.70.99.25 or host 10.60.99.25' -c 10
-~~~
-
-**Oczekiwanie:** pakiet do 10.70.99.25 może opuścić R1 przez A, podczas gdy pakiet do 10.60.99.25 powinien trafić w reject w R1, jeśli aggregate jest aktywny i nie ma konkretnej trasy. **Niedziałający ping do obu adresów nie oznacza tego samego mechanizmu**. Różnicę rozpoznajemy po RIB/FIB i rzeczywistym capture na UP-A.
-
-### Faza 12. Piąta lekcja — ECMP poza FBF, aby nie mieszać dwóch mechanizmów
-
-Dopiero gdy zakończysz fault injection FBF, rozpocznij osobny eksperyment na dwóch równorzędnych next-hopach. W przeciwnym razie nie będziesz wiedzieć, czy dany pakiet wybrał WAN-B na podstawie FBF czy hasha ECMP.
-
-Tymczasowo zdejmujemy filtr \`OFFICE-FBF\` **z interfejsu**, ale go nie kasujemy z konfiguracji. Następnie tworzymy do tego samego 203.0.113.10/32 dwa static next-hopy. Stosujemy forwarding-table export policy \`ECMP-TO-SERVICE\`, której zadaniem jest umożliwienie wykorzystania multipath w FIB.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], ODRĘBNY WARIANT ECMP**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-delete interfaces ge-0/0/1 unit 0 family inet filter input OFFICE-FBF
-set routing-options static route 203.0.113.10/32 next-hop 198.51.100.2
-set routing-options static route 203.0.113.10/32 next-hop 198.51.100.6
-set policy-options policy-statement ECMP-TO-SERVICE term SERVICE from route-filter 203.0.113.10/32 exact
-set policy-options policy-statement ECMP-TO-SERVICE term SERVICE then load-balance per-packet
-set policy-options policy-statement ECMP-TO-SERVICE term SERVICE then accept
-set policy-options policy-statement ECMP-TO-SERVICE term REST then accept
-set routing-options forwarding-table export ECMP-TO-SERVICE
+show route 10.60.0.0/16 exact extensive
+show route 10.70.0.0/16 exact extensive
+show route forwarding-table destination 10.60.99.25
+show route forwarding-table destination 10.70.99.25
+~~~
+
+Różne next-hopy mówią, czy router odrzuca prefix aggregate, czy kieruje pakiet zgodnie z generated contributor. Nie wymagaj odpowiedzi od nieistniejących hostów.
+
+### Faza 13. ECMP oddzielnie od FBF
+
+Najpierw wycofaj FBF z ingress. Na R1 przetestuj równorzędne next-hopy do LAN-B — bez jednoczesnej zmiany source policy. W R4 musi nadal istnieć poprawny return path. Jeden ping z PC-A to **jeden flow**, nie statystyka dystrybucji.
+
+**R1-vSRX — Configuration Mode [edit private], osobny wariant ECMP**
+
+~~~junos
+delete interfaces ge-0/0/2 unit 0 family inet filter input OFFICE-FBF
+delete routing-options static route 198.51.100.0/24
+set routing-options static route 198.51.100.0/24 next-hop 10.12.0.2
+set routing-options static route 198.51.100.0/24 next-hop 10.13.0.2
+set policy-options policy-statement CH07-ECMP term LANB from route-filter 198.51.100.0/24 exact
+set policy-options policy-statement CH07-ECMP term LANB then load-balance per-packet
+set policy-options policy-statement CH07-ECMP term LANB then accept
+set policy-options policy-statement CH07-ECMP term REST then accept
+set routing-options forwarding-table export CH07-ECMP
 show | compare
 commit check
-commit confirmed 10
+commit confirmed 2
 ~~~
 
-W tym eksperymencie **nie potwierdzamy od razu** nowego stanu. Chcemy porównać RIB i FIB, a potem pozwolić na bezpieczny rollback do bazowego FBF. W produkcji nigdy nie zastępuj istniejącej globalnej forwarding-table policy bez review — tutaj bazowy router miał nie mieć żadnej.
-
-**LAB-R1-vSRX — Operational Mode, weryfikacja kwalifikacji multipath**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-show route 203.0.113.10/32 exact extensive
-show route forwarding-table destination 203.0.113.10
-show configuration routing-options forwarding-table | display set
+show route 198.51.100.0/24 exact extensive
+show route forwarding-table destination 198.51.100.10
 ~~~
 
-Przypomnij sobie pułapkę nazwy: \`load-balance per-packet\` na wielu Junos prowadzi w praktyce do **per-flow balancing**. Uruchomienie jednego ping z PC-A nie musi dać równomiernego podziału. Warto wykonać wiele **niezależnych flows**, różniących się source/destination lub portami, jeśli konkretne narzędzia i hash platformy pozwalają to obserwować.
+Jeżeli FIB ma obydwa next-hopy, a ICMP wybiera tylko R2, per-flow hash może być prawidłowy. Dodatkowe flows wymagają odrębnie udokumentowanego generatora — nie zmieniaj kanonicznych VPCS na fikcyjne PC-C.
 
-**LAB-PC-A — Linux shell, podstawowy test jednego źródła**
+### Faza 14. Martians, cleanup i evidence
 
-~~~bash
-ping -c 20 203.0.113.10
-~~~
+Nie używaj martians jako domyślnego wyjaśnienia dla każdego failed ping. Martian addresses to mechanizm kwalifikacji tras, nie synonim filtracji pakietu przez SRX.
 
-**LAB-PC-B — Linux shell, drugi niezależny source**
-
-~~~bash
-ping -c 20 203.0.113.10
-~~~
-
-**LAB-UP-A — Linux shell, ruch w wariancie ECMP**
-
-~~~bash
-sudo tcpdump -ni eth0 'icmp and host 203.0.113.10' -c 30
-~~~
-
-**LAB-UP-B — Linux shell, ruch w wariancie ECMP**
-
-~~~bash
-sudo tcpdump -ni eth0 'icmp and host 203.0.113.10' -c 30
-~~~
-
-Tylko dwa hosty i ICMP to **ograniczona próba**, nie statystyczny dowód równomiernego ECMP. Jeżeli każdy ping wybrał ten sam WAN, ale FIB ma oba next-hopy, eksperyment wymaga większej liczby niezależnych flows, a nie natychmiastowej zmiany konfiguracji. Możesz użyć przygotowanego wcześniej offline narzędzia generującego połączenia z różnymi portami, o ile platforma hash rzeczywiście bierze je pod uwagę. Również 70/30 w liczbie bajtów może być poprawne przy per-flow, jeśli rozmiary strumieni są nierówne.
-
-**Naprawa/przywrócenie FBF baseline:** pozwól \`commit confirmed\` wycofać wariant ECMP i sprawdź, że filter \`OFFICE-FBF\` znowu jest przypięty do OFFICE, a forwarding-table export wróciło do wcześniejszego stanu. Po tym teście PC-A ma znów korzystać z WAN-B, a PC-B z WAN-A — inaczej laboratorium nie wróciło do właściwego punktu odniesienia.
-
-### Faza 13. Martians pozostawiamy jako read-only
-
-To świadoma decyzja. Zmienianie martian list na tym samym R1 mogłoby utrudnić interpretację wcześniejszych tras oraz zachowania FBF. Dlatego w tym głównym labie wykonujemy tylko obserwację.
-
-**LAB-R1-vSRX — Operational Mode, domyślne martian prefixes i zwykłe trasy firmy**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
 show route martians
-show route 10.60.0.0/16 exact
-show route 127.0.0.0/8
-~~~
-
-Nie wyciągaj wniosku, że istnieje trasa 127.0.0.0/8 tylko dlatego, że jest reguła martian. I nie dodawaj \`allow\` dla zakresu specjalnego „aby móc przetestować ping”. Oddzielny eksperyment martian można zrealizować na osobnym węźle z kontrolowanym prefiksem i zapisanymi stanami, bez mieszania go z usługą OFFICE.
-
-### Faza 14. Cleanup i evidence package
-
-Często bardziej wartościowe niż sam wynik ping jest to, co pozostawiasz po zakończeniu szkolenia. Masz dwie sensowne drogi:
-
-**Wariant zachowania labu:** pozostaw działający baseline FBF jako przyszły punkt odniesienia. Usuń tylko tymczasowe eksperymenty i potwierdź, że nie ma \`commit confirmed\` w toku, PC-A korzysta z WAN-B, PC-B z WAN-A, RIB group działa, a ECMP-only wariant został wycofany. Oznacz lab jako **PLANNED**, dopóki nie uruchomisz go i nie zbierzesz rzeczywistych wyników.
-
-**Wariant pełnego przywrócenia:** użyj izolowanego snapshotu maszyny sprzed ćwiczenia, jeśli taki snapshot jest rzeczywiście sprawdzony i obejmuje odpowiednie dyski/konfigurację. Sam restart wirtualnej maszyny nie jest automatycznym rollback. Jeśli nie masz snapshotu, wykonaj **punktowy cleanup** wyłącznie swoich obiektów i tylko po przejrzeniu \`show | compare\`. Nie kasuj cudzych \`routing-options\`, \`security\` czy \`interfaces\` globalnie.
-
-Wariant punktowy wciąż wymaga ostrożności. Poniższe polecenia usuwają tylko obiekty nazwane w tym rozdziale i zakładają **świeżego, izolowanego** vSRX bez obcych referencji. Najpierw sprawdź dokładnie aktualną konfigurację. Jeśli coś zostało użyte także przez inny lab, nie wykonuj cleanup automatycznie.
-
-**LAB-R1-vSRX — Configuration Mode [edit private], przykład punktowego usunięcia obiektów zaawansowanych**
-
-~~~junos
-delete interfaces ge-0/0/1 unit 0 family inet filter input OFFICE-FBF
-delete firewall family inet filter OFFICE-FBF
-delete routing-options forwarding-table export ECMP-TO-SERVICE
-delete policy-options policy-statement ECMP-TO-SERVICE
-delete routing-options static route 203.0.113.10/32
-delete routing-options interface-routes rib-group inet COPY-INTERFACE-ROUTES
-delete routing-options rib-groups COPY-INTERFACE-ROUTES
-delete routing-instances FBF-ALT
-delete routing-options aggregate route 10.60.0.0/16
-delete routing-options generate route 10.70.0.0/16
-delete routing-options static route 10.60.10.0/24
-delete routing-options static route 10.60.20.0/24
-delete routing-options static route 10.70.10.0/24
-show | compare
-commit check
-commit confirmed 10
-~~~
-
-Jeśli nie wykonywałeś wariantu ECMP i policy nie istnieje, polecenie \`delete\` może zgłosić brak obiektu — to nie dowodzi uszkodzenia routera. W takim przypadku pomiń odpowiednią linię po przejrzeniu aktualnego stanu, zamiast wklejać blok bezmyślnie.
-
-W zależności od planowanego końcowego stanu możesz zachować podstawową default, adresy interfejsów i reguły \`CH07-PING-A/B\` jako bazę innych labów albo usunąć je osobno, punktowo, odtwarzając snapshot. Nie podaję masowego \`delete security\`, ponieważ mogłoby przypadkowo usunąć management i inne potrzebne reguły. Przy takim cleanup **brak host-to-host reachability po usunięciu static/FBF może być oczekiwany**; test końcowy ma potwierdzać docelowy stan, a nie poprzedni.
-
-**LAB-R1-vSRX — Operational Mode, końcowe sprawdzenie stanu**
-
-~~~junos
-show system commit
+show route table inet.0
+show route table FBF-ALT.inet.0
 show configuration firewall | display set
-show configuration routing-instances | display set
 show configuration routing-options | display set
-show interfaces terse
-show route
+show security flow session
+show system commit
 ~~~
 
-**LAB-R1-vSRX — Configuration Mode [edit private], po zatwierdzonych testach cleanup**
-
-~~~junos
-commit
-~~~
-
-Jeśli chcesz mieć z tego pełnowartościowy dowód laboratoryjny, zapisz w \`VERIFY.md\` rzeczywisty release, mapowanie NIC, konfigurację baseline, liczbę aktywnych tras, \`show route\` do obu summary, zawartość obu RIB, wynik FBF na obu upstreamach, ścieżkę rollback każdego fault i status osobno dla każdego testu. Nie wpisuj „RUNTIME VALIDATED”, jeśli jedynym dowodem jest poprawny \`commit\` albo statyczna kontrola pliku .unl.
-
-### Czego nauczyliśmy się naprawdę?
-
-Najlepszą częścią ćwiczenia nie jest to, że potrafisz wpisać \`set routing-instances FBF-ALT\`. Najważniejsze jest rozumienie **dlaczego**. Zbudowaliśmy dwie alternatywne drogi, ale to nie wystarczyło do rozwiązania problemu. Musieliśmy nauczyć drugą tablicę, jak dotrzeć do własnego next-hopa, a potem wskazać wyłącznie wybrane pakiety do tej tablicy. Równolegle zobaczyliśmy, że aggregate i generated inaczej traktują pakiety do nieistniejących fragmentów summary, a ECMP nie obiecuje dokładnie 50/50 dla pojedynczego połączenia.
-
-To już nie jest „więcej komend routingu”. To jest świadome projektowanie **punktów podejmowania decyzji w Junos**.
-
-
----
+Odtwórz kopię DIAMOND z `R1→LAN-B via R2, backup via R3` oraz `R4→LAN-A via R2, backup via R3`, bez testowych aggregate, generated, FBF i ECMP. Po każdym `commit confirmed` nie wykonuj kolejnego `commit check` przed świadomym potwierdzeniem lub rollbackiem. Zapisz w `VERIFY.md` mapping portów, wersję Junos, RIB/FIB, testy obu VPCS i kontrolowane awarie. Prefiksy `10.60.0.0/16` / `10.70.0.0/16` są wyłącznie dodatkowymi wpisami testowymi; nie zmieniają schematu sześciu połączeń.
 
 ## Warsztat projektowy. Jak wykorzystać tę wiedzę przy budowaniu prawdziwego oddziału Enterprise?
 
