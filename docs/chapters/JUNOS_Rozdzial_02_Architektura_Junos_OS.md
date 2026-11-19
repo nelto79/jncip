@@ -443,7 +443,7 @@ show ip route 203.0.113.0
 **Urządzenie: R1-vSRX — operational mode**
 
 ~~~junos
-show route 203.0.113.0/24 exact
+show route 198.51.100.0/24 exact
 show route 203.0.113.0/24 detail
 ~~~
 
@@ -701,8 +701,8 @@ set routing-options static route 203.0.113.0/24 discard
 **Urządzenie: R1-vSRX — operational mode**
 
 ~~~junos
-show route 203.0.113.0/24 exact
-show route forwarding-table destination 203.0.113.1
+show route 198.51.100.0/24 exact
+show route forwarding-table destination 198.51.100.10
 ~~~
 
 Nie stosuj tego do istniejących tras firmowych — takie polecenia celowo niszczą osiągalność prefiksu! **Na pamięć:** \`reject\` = drop z sygnalizacją, \`discard\` = cichy drop. **Do zrozumienia:** wynik ping lub traceroute zależy od rodzaju nieosiągalności, nie tylko od samego routingu.
