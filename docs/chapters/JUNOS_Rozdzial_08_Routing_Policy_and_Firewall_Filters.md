@@ -445,6 +445,8 @@ Szczególnie ważna jest jeszcze jedna różnica. Pakiet **do własnego adresu r
 
 Spróbujmy zbudować filtr z konkretnym zadaniem, zamiast poznawać od razu listę wszystkich match conditions.
 
+**Osobna demonstracja koncepcyjna anti-spoof (nie fizyczny host w kanonicznym DIAMOND):** źródło `203.0.113.10` jest celowo fałszywe względem LAN-A i nie należy do żadnego z naszych VPCS. Rzeczywiste ćwiczenie wykonywalne na PC-A `192.0.2.10` znajduje się w labie 8.14 (Fault C). Jeśli chcesz wytworzyć spoofed packet, wymaga to osobnego oznaczonego wariantu Linux/generatora, nie dopisania PC-C do diamentu.
+
 Do interfejsu LAN R1 jest podłączona wyłącznie sieć 192.0.2.0/24. Zespół bezpieczeństwa zauważył, że jeden z testowych komputerów potrafi wysyłać pakiety z nieprawidłowym adresem źródłowym 203.0.113.10. Jeśli taki pakiet pojawi się na wejściu LAN, chcemy go zablokować i policzyć. **Zwykły ruch z LAN-A nadal ma działać.**
 
 Nie zaczynamy od składni. Najpierw ustalamy warunek: jeśli źródło pakietu znajduje się w 203.0.113.0/24, uruchom `discard` i zwiększ licznik `SPOOFED`. Jeśli pakiet nie pasuje, pozwól mu przejść przez filtr, aby dalsze etapy — routing i ewentualna security policy — podjęły swoje decyzje. Ten drugi warunek musi być jawny, bo **domyślny koniec zwykłego stateless firewall filter odrzuca pakiety bez dopasowania**.
@@ -518,7 +520,7 @@ show interfaces ge-0/0/2 extensive
 
 Pierwsze polecenie potwierdza, czy filter jest faktycznie podpięty do logicznego interfejsu i we właściwym kierunku. Drugie pokazuje kolejność termów. Trzecie — o ile dana implementacja wystawia liczniki w tym widoku — pozwala obserwować `SPOOFED` i `OTHER-PACKETS`. Czwarte daje statystyki interfejsu, ale bez wyciągania pochopnych wniosków: licznik błędów L1 nie jest dowodem odrzucenia przez firewall filter.
 
-A teraz próba kontrolna. Najpierw wysyłamy ruch **dozwolony** z PC-A. Licznik `OTHER-PACKETS` powinien rosnąć, a `SPOOFED` nie. Potem, wyłącznie w odizolowanym labie, testujemy źródło 203.0.113.10 i obserwujemy wzrost `SPOOFED`. Nie musimy przy tym doprowadzić do skutecznego połączenia z serwerem: chcemy wykazać lokalne odrzucenie przez filtr.
+A teraz próba kontrolna. Najpierw wysyłamy ruch **dozwolony** z PC-A. Licznik `OTHER-PACKETS` powinien rosnąć, a `SPOOFED` nie. Potem, **tylko w osobnym wariancie z hostem Linux/generatorem pakietów zamiast standardowego PC-A**, można zasymulować źródło 203.0.113.10 i obserwować wzrost `SPOOFED`. W samym kanonicznym DIAMOND test ten pozostaje rozumowaniem o filtrze, nie wykonaną procedurą VPCS. Nie musimy przy tym doprowadzić do skutecznego połączenia z serwerem: chcemy wykazać lokalne odrzucenie przez filtr.
 
 Dla EX/QFX przy większych filtrach trzeba uwzględnić **zasoby TCAM/PFE**. Nie wszystkie match conditions i action modifiers są jednakowo wspierane na wszystkich modelach; sam fakt, że przykład istnieje w CLI Reference, nie jest gwarancją jego instalacji na każdym układzie forwarding. Jeśli counter nie rośnie, najpierw sprawdź family, interfejs, kierunek i fizyczną ścieżkę pakietu; dopiero później szukaj problemu z samym termem.
 
