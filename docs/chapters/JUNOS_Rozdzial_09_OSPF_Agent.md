@@ -1819,3 +1819,113 @@ show system commit
 
 ---
 
+## 9.17. Sprawdź, czy rozumiesz — krótkie zadania autorskie
+
+To **autorskie pytania sprawdzające**, a nie kopie pytań z egzaminu JN0-352 ani JN0-650. Spróbuj najpierw sam przewidzieć wynik. Po każdym pytaniu znajduje się rozumowanie, a nie tylko litera odpowiedzi.
+
+### Przypadek 1 — na OSPFv2 p2p nie ma DR
+
+R2 i R3 po dedykowanym Ethernet mają odpowiednio priority 200 i 50. Interfejs obu ma **interface-type p2p**. Który router jest DR?
+
+**Rozwiązanie:** żaden. DR election jest problemem sieci multiaccess broadcast/NBMA, nie p2p. Priorytet nie ma tu zastosowania do roli DR. Jeśli show ospf neighbor pokazuje Full, prawidłowy wynik nie wymaga DR. W Cisco również network type wpływa na election; sama wysoka wartość priority nic nie zmienia na p2p.
+
+### Przypadek 2 — różne LSA, podobna informacja
+
+R1 w Area 10 potrzebuje drogi do 10.9.104.0/24 w Area 20. Czy ma żądać Router LSA R4 z całej Area 20?
+
+**Rozwiązanie:** nie. Wieloobszarowe OSPF ukrywa szczegóły topologii innych obszarów. R1 powinien otrzymać od ABR odpowiednią inter-area informację o prefiksie, w OSPFv2 **Type 3**. W OSPFv3 szukasz **Inter-Area-Prefix LSA**. Jeżeli próbujesz rekonstruować wewnętrzną LSDB Area 20 na R1, diagnozujesz zły obiekt.
+
+### Przypadek 3 — E1, E2 i preference
+
+R3 ogłasza static 172.31.90.0/24 jako E1 z metric 30. R1 pokazuje **[OSPF/150]**, a nie **[OSPF/30]**. Czy OSPF ignoruje wybraną metrykę?
+
+**Rozwiązanie:** nie. **150** to Junos *route preference dla zewnętrznego OSPF*, czyli element wyboru źródła trasy w RIB. **30** jest external metric wyrażoną w LSA; trasa E1 obejmuje także koszt dojścia do ASBR. Obie wartości dotyczą różnych etapów.
+
+### Przypadek 4 — LSDB kontra RIB
+
+R1 ma pełną adjacency, widzi LSA Type 5 do 172.31.90.0/24, ale **show route** nie pokazuje aktywnej trasy OSPF dla tego prefiksu. Czy flooding jest na pewno zepsuty?
+
+**Rozwiązanie:** obecność LSA oznacza, że przynajmniej ta informacja dotarła do LSDB. Poszukaj problemu z kalkulacją external, dojściem do ASBR, import policy, hidden/inactive i konkurencją w RIB. Jeśli inna trasa o lepszej preference jest aktywna, pakiety mogą korzystać z niej, mimo istniejącej LSA.
+
+### Przypadek 5 — „IPv4 jest dobrze, IPv6 powinno też działać”
+
+OSPFv2 neighbor jest Full na R2–R3. Na R2 nie ma żadnego OSPFv3 neighbor, choć IPv6 adresy są poprawne. Czy globalny router ID R2 wymaga 128-bitowej wartości?
+
+**Rozwiązanie:** nie. Router ID pozostaje 32-bitowy. Sprawdź osobny OSPFv3 interface config, IPv6 link-local, Area ID, OSPFv3 instance i **host-inbound ospf3** na vSRX. OSPFv2 Full nie dowodzi niczego o IPv6 LSDB.
+
+### Przypadek 6 — „network-summary-export naprawi ASBR”
+
+R3 jest ABR i ASBR. Operator chce wyłącznie redystrybuować static 172.31.90.0/24 do OSPF, ale używa **network-summary-export** na Area 20. Czy to poprawny punkt konfiguracji?
+
+**Rozwiązanie:** nie. **protocols ospf export** odpowiada za wprowadzanie trasy z RIB do OSPF external; **network-summary-export** za międzyobszarowe Type 3 na ABR. Dwie polityki mogą współistnieć, ale obsługują różne etapy i różne typy LSA.
+
+### Przypadek 7 — stub i brak default
+
+R4 ma poprawną adjacency z R3 w stub Area 20. Nie ma jednak route 0.0.0.0/0. Czy wystarczy stwierdzić „OSPF musi automatycznie generować default, więc problem jest w R4”?
+
+**Rozwiązanie:** nie. Na R3 sprawdź **stub default-metric**, LSDB Type 3 i czy R4 nie ma innnej polityki/trasy. Oficjalny przewodnik Junos każe jawnie konfigurować generowanie default w opisanym modelu. Powinieneś udowodnić, czy ABR w ogóle wysłał default.
+
+### Przypadek 8 — FULL, a ERP martwy
+
+R1 ma do 10.9.104.0/24 aktywną trasę OSPF i prawidłowy next-hop. PC-A nie może jednak połączyć się z PC-B. Który rozdział podręcznika należy otworzyć obok rozdziału 9?
+
+**Rozwiązanie:** co najmniej routing fundamentals (RIB/FIB, next-hop), routing policy/firewall filter/SRX security flow i diagnostykę hostów. Trzeba zbadać **security policy**, ewentualny NAT i drogę powrotną, zamiast bez potrzeby zmieniać SPF metric.
+
+---
+
+## Zakończenie — jeden pakiet, cztery różne decyzje
+
+Wracamy do incydentu z prologu. Klient w Area 10 wysyła pakiet do serwera w Area 20. Jako inżynier możesz teraz rozdzielić cztery decyzje:
+
+1. **Czy router zna mapę?** Neighbor Full i właściwe LSA w LSDB oznaczają spójność odpowiednich części topologii, nie automatycznie trasę do każdego prefiksu.
+2. **Czy OSPF umie policzyć drogę?** SPF, inter-area calculation, external handling i import/export przekształcają LSA w kandydatów.
+3. **Czy Junos użyje tej trasy?** RIB może porównać OSPF z direct/static/BGP; aktywny wynik ma mieć rozwiązanego next-hopa i trafić do forwarding table.
+4. **Czy konkretny pakiet przejdzie?** Interfejs fizyczny, ARP/ND, PFE, SRX security policy, NAT i droga powrotna są osobnymi warunkami.
+
+To najważniejszy nawyk diagnostyczny poziomu Professional: **nie wydawać wyroku na podstawie jednego „show ospf neighbor”**. Czytaj router jak proces: Hello, adjacency, LSDB, obliczenie trasy, RIB, FIB, dataplane. Potem zadawaj pytania: *co dokładnie wiem, czego jeszcze nie wiem i jakim następnym poleceniem rozstrzygnę hipotezę?*
+
+**NA PAMIĘĆ:** role ABR/ASBR/DR/BDR, pakiety 1–5, podstawowe LSA v2, OSPFv3 link/intra-area prefix, area 0, stany OSPF, podział OSPFv2/OSPFv3, kluczowe komendy show i mechanizm passive.  
+**DO ZROZUMIENIA:** po co jest LSDB, dlaczego multi-area, jak powstaje Type 3/5/7, związek costs/SPF oraz route preference, różnica policy external od summary policy, bezpieczeństwo SRX.  
+**DO PRZEĆWICZENIA:** budowa 4-vSRX LAB, analiza Full versus LSA, symulacja błędnego area, filtrowanie Type 3, redystrybucja Type 5, IPv6 adjacency fault, rollback.
+
+---
+
+## Źródła producenta i granice weryfikacji
+
+Poniższe źródła stanowią dokumentację techniczną dla mechanizmów oznaczonych w tekście symbolami [S1]–[S25]. Preferowane są strony HTML dokumentacji Juniper/HPE (w listopadzie 2026 część dokumentacji Juniper przekierowuje do networkingdocs.hpe.com). Nie korzystano z exam dumpów. **Brak dostępu do runtime vSRX i EVE-NG** oznacza, że składnia jest oparta na udokumentowanych przykładach producenta i logice Junos, nie na wykonanym teście parsera danej wersji. Każdy wariant zależny od platformy wymaga **commit check** i postcheck na właściwym obrazie.
+
+- **[S1]** [Introduction to OSPF — Juniper](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/ospf-overview.html). Baza link-state, area, ASBR, metryka E1/E2 i zachowanie SPF.
+- **[S2]** [lsa-refresh-interval — Junos CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/lsa-refresh-interval-edit-protocols-ospf.html). Mechanizm i domyślna częstotliwość odświeżania LSA.
+- **[S3]** [show ospf database — CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-ospf-database.html). Interpretacja nagłówków i zawartości LSDB.
+- **[S4]** [Configuring OSPF Interfaces — Juniper](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-interfaces.html). OSPF packet/control path, network types, neighbor config, OSPFv3 AF.
+- **[S5]** [Security Zones — Juniper](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/topic-map/security-zone-configuration.html). Host-inbound protocols ospf/ospf3 na SRX.
+- **[S6]** [router-id — Junos CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/router-id-edit-routing-options.html). Router ID i rekomendacja konfiguracji jawnej.
+- **[S7]** [protocols under SRX host-inbound — CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/security-edit-protocols-interface-host-inbound-traffic.html). Rozróżnienie host-bound od tranzytu.
+- **[S8]** [Configuring OSPF Areas — Juniper](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-areas.html). DR/BDR, ABR, stub/NSSA i default generation.
+- **[S9]** [Configuring OSPF Areas — stub/NSSA](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-areas.html). Wymóg jawnego default-metric w przedstawionych scenariuszach.
+- **[S10]** [nssa — Junos CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/nssa-edit-protocols-ospf.html). Type 7, no-summaries i default.
+- **[S11]** [virtual-link — Junos CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/virtual-link-edit-protocols-ospf.html). Warunki virtual link i role ABR.
+- **[S12]** [realm under ospf3 — Junos CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/realm-edit-protocols-ospf3.html) oraz [OSPFv3 Multiple Address Families](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-interfaces.html). IPv4 unicast realm, LSDB per AF i inet.0/inet6.0.
+- **[S13]** [Configuring OSPF Routing Policy](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-routing-policy.html). OSPF external redistribution i inter-area prefix policy.
+- **[S14]** [Default Route Preference Values](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/bgp/topics/concept/routing-protocols-default-route-preference-values.html). OSPF internal 10 i external 150.
+- **[S15]** [show ospf3 database — CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-ospf3-database.html). Link LSA i IntraAreaPrefix.
+- **[S16]** [passive — Junos CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/passive-edit-protocols-ospf.html). Reklamowanie prefiksu bez sąsiedztwa.
+- **[S17]** [Configuring OSPF Interfaces — NBMA](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-interfaces.html). Neighbor i poll interval na nonbroadcast.
+- **[S18]** [reference-bandwidth — Junos CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/reference-bandwidth-edit-protocols-ospf.html). Domyślne 100 Mbps i wyliczanie cost.
+- **[S19]** [Configuring OSPF Timers](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-timers.html). Hello/Dead i LSA retransmit.
+- **[S20]** [Configuring OSPF Authentication](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-authentication.html), [OSPFv3 IPsec Feature](https://apps.juniper.net/feature-explorer/feature/5851). Wersje i ograniczenia authenticatorów.
+- **[S21]** [Configuring OSPF Fault Detection Using BFD](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-fault-detection-using-bfd.html). OSPF+BFD.
+- **[S22]** [Configuring OSPF Database Protection](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-database-protection.html). Ochrona LSDB.
+- **[S23]** [Configuring OSPF Routing Policy — Import/Export Network Summaries](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-routing-policy.html). Szczególne role network-summary-import/export i inter-area-prefix-import/export.
+- **[S24]** [Default Routing Policies — Junos](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-actions-defaults.html). Default OSPF export i ograniczenia import.
+- **[S25]** [traceoptions for OSPF — CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-ospf.html) oraz [Verifying and Monitoring OSPF](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/verifying-and-monitoring-ospf-configuration.html). Diagnostyka rpd/LSDB.
+
+### Redakcyjny rejestr ograniczeń i następny etap walidacji
+
+1. **STATIC TEXT REVIEW:** pełne sekcje 9.1–9.16, diagramy Mermaid i komendy zostały zapisane, ale nie uruchomiono jeszcze EVE-NG, Junos parser ani analizatorów hardware.
+2. **PLATFORM ASSUMPTIONS:** przykłady vSRX zakładają ethernetowy dataplane, wyraźną security zone i brak kolidującego factory-default NAT. Przykłady z EX/IRB oraz NBMA są ilustracyjne i mogą wymagać innego hardware/feature support.
+3. **VERSION DEPENDENCE:** OSPFv3 realm i wybrane opcje OSPF, MD5/IPsec, BFD, GR, network-summary policy oraz source tracing należy potwierdzić dla dokładnej gałęzi Junos/urządzenia.
+4. **SAFE HANDOFF:** najpierw read-only mapping, później configure in isolated lab, **commit check → commit confirmed → verify → commit**, a po fault injection **cleanup**. Dopiero komplet zrzutów neighbor/LSDB/RIB/FIB/host ping może uzasadniać status **RUNTIME VALIDATED**.
+
+**Kryterium końcowe dla czytelnika:** potrafisz wyjaśnić, dlaczego Junos wybrał określony next-hop dla konkretnego prefiksu OSPF, *który LSA go wyprodukował, który ABR go przekazał, jaką metrykę i kategorię ma trasa oraz co zatrzymuje pakiet, jeśli routing wygląda na zdrowy*. To jest różnica między znajomością komendy a umiejętnością prowadzenia incydentu Tier 3.
+
