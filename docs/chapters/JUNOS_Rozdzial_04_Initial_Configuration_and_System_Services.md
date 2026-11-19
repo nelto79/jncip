@@ -56,14 +56,14 @@ W blueprint mamy **15 punktów**, a nie tylko „hostname + root password”. Pr
 
 ```mermaid
 flowchart LR
-  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 172.31.240.1"]
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
   R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
   R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
   R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
   R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
   PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
 
-  PCA ---|"LAN-A · 172.31.240.0/24<br/>PC-A eth0: 172.31.240.10/24<br/>R1 ge-0/0/2.0: 172.31.240.1/24"| R1
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
   R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
   R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
   R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
