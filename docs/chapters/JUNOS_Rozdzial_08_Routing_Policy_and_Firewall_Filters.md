@@ -828,3 +828,163 @@ show route 10.10.10.0/24 exact extensive
 Mamy więc trzy ważne wnioski z tej lekcji. **OSPF** potrafi stosować import/export, ale nie jest to dowolny filtr wewnętrznej LSDB. **IS-IS** ma zbliżone ograniczenia wynikające z charakteru link-state, z różnicami wsparcia zależnymi od wersji. **BGP** szczególnie naturalnie wykorzystuje polityki na granicach wymiany prefiksów i atrybutów. W każdej sytuacji punktem wyjścia powinno być pytanie: *jaki obiekt trasy oceniamy i na którym etapie protokołu?*
 
 *Źródła: [Protocol Support for Import/Export](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-protocol-support-import-export-policies.html), [Basic BGP Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/basic-routing-policies.html).*
+
+---
+
+## 8.13. Gdy dwie drogi działają — polityka staje się narzędziem inżyniera JNCIP [P]
+
+Do tej pory walczyliśmy głównie o jedną rzecz: aby dobra trasa została zaakceptowana, a niepożądana odrzucona. To ważne, lecz prawdziwe życie w Enterprise nie kończy się na czarno-białej decyzji. Duża firma ma dwa łącza WAN, kilka centrów danych, migrację między operatorami i okresy, gdy backup powinien pozostać backupem — nawet jeśli jego BGP jest cały czas `Established`.
+
+Wyobraź sobie, że uruchamiamy w oddziale drugi router operatorski. **ISP-A** jest łączem podstawowym, **ISP-B** zapasowym. Oba przekazują trasę do tej samej sieci usługowej 10.80.0.0/16. Chcemy, aby ruch z naszej firmy zwykle korzystał z ISP-A. Jednocześnie nie chcemy, żeby świat zewnętrzny traktował ISP-B jako główną drogę *do nas*.
+
+Na pierwszy rzut oka brzmi to jak jedno wymaganie „primary/backup”. Ale to **dwie niezależne decyzje**. Nasz router wybiera, którym łączem **wysyłać** pakiety. Inne autonomiczne systemy wybierają, którym łączem **wysyłać do nas**. Możemy wpływać na obie strony, lecz nie sterujemy nimi jednakowo.
+
+### Najpierw ruch wychodzący: LOCAL_PREF
+
+Gdy dwie konkurujące ścieżki BGP są poprawne i dostępne, chcemy preferować jedną. W granicach własnego AS przydatnym atrybutem jest **LOCAL_PREF**. Wyższa wartość jest preferowana w porównaniu BGP, z zastrzeżeniem pełnego procesu wyboru ścieżki i warunków kwalifikacji. LOCAL_PREF jest wykorzystywany wewnątrz AS, a nie prostym rozkazem wysyłanym do zewnętrznego operatora.
+
+Zróbmy mentalny eksperyment. R-WAN-DUAL otrzymuje dokładnie ten sam 10.80.0.0/16 od dwóch eBGP peerów. W pierwszym scenariuszu oba path mają LOCAL_PREF 100 i wygrywa dalszy tie-breaker. W drugim polityka import na ISP-A ustawia LOCAL_PREF 200, a na ISP-B pozostawiamy 100. Jeśli pozostałe warunki nie unieważniają ścieżki, BGP ma teraz powód, żeby wybrać A.
+
+**R-WAN-DUAL — Configuration Mode, przykład koncepcyjny z dwoma działającymi grupami BGP**
+
+~~~junos
+set policy-options policy-statement FROM-PRIMARY term SERVICE from route-filter 10.80.0.0/16 exact
+set policy-options policy-statement FROM-PRIMARY term SERVICE then local-preference 200
+set policy-options policy-statement FROM-PRIMARY term SERVICE then accept
+set policy-options policy-statement FROM-PRIMARY term REST then reject
+set policy-options policy-statement FROM-BACKUP term SERVICE from route-filter 10.80.0.0/16 exact
+set policy-options policy-statement FROM-BACKUP term SERVICE then local-preference 100
+set policy-options policy-statement FROM-BACKUP term SERVICE then accept
+set policy-options policy-statement FROM-BACKUP term REST then reject
+set protocols bgp group ISP-A import FROM-PRIMARY
+set protocols bgp group ISP-B import FROM-BACKUP
+~~~
+
+To nie jest kompletna konfiguracja obu sąsiadów: zakładamy wcześniej skonfigurowane BGP groups i działające next hops. Import ma tu **jawne whitelisty**, dlatego inne prefiksy zostaną odrzucone. W produkcji nie narzucaj takiego wzorca operatorowi z full table; polityka musi wynikać z umowy i zamierzonego zakresu tras.
+
+**R-WAN-DUAL — Operational Mode, patrzymy, która ścieżka wygrała**
+
+~~~junos
+show bgp summary
+show route 10.80.0.0/16 exact extensive
+show route forwarding-table destination 10.80.1.10
+show configuration protocols bgp | display set
+~~~
+
+Wynik `show route ... extensive` powinien pomóc zobaczyć konkurujące ścieżki i ich atrybuty. Wybór aktywnej trasy a wybór najlepszego BGP path to związane, ale nie zawsze identyczne pytania: w RIB mogą znajdować się również route z innych protokołów, z inną Junos route preference. Dlatego forwarding sprawdzamy osobno.
+
+#### LOCAL_PREF to nie Junos route preference
+
+Tutaj wielu inżynierów — również z Cisco — wpada w pułapkę podobnych nazw. `local-preference` to **atrybut BGP**, ważny przy wyborze najlepszej drogi BGP w ramach AS. `preference` w Junos to **preferencja źródła trasy w RIB**, bliska koncepcyjnie administrative distance w Cisco. Ta druga pomaga decydować, czy wybrać np. trasę BGP, OSPF czy static do tego samego prefiksu. Nie naprawiaj wyboru BGP w ciemno przez zmianę route preference, jeżeli problem naprawdę dotyczy LOCAL_PREF.
+
+### Ruch przychodzący: chcemy zasugerować, nie możemy rozkazać
+
+Załóżmy teraz, że zewnętrzna firma wybiera, jak dotrzeć do naszego 10.10.10.0/24. Chcielibyśmy, żeby korzystała z ISP-A. Tutaj sytuacja jest trudniejsza, ponieważ to *obce* routery wykonują BGP best-path selection.
+
+Możemy ogłaszać trasę przez obu operatorów, ale do ISP-B dodać **AS-PATH prepend**, aby backup wyglądał na dłuższą drogę. Możemy użyć uzgodnionych **BGP communities**, które operator interpretuje zgodnie z własną polityką. W niektórych scenariuszach dwustronnego połączenia do tego samego AS pomocny jest **MED**, o ile sąsiad go bierze pod uwagę.
+
+Żaden z tych mechanizmów nie jest gwarancją, że cały Internet wybierze ISP-A. Zewnętrzne AS mogą preferować swoje LOCAL_PREF, ignorować MED, filtrować communities, albo mieć inne polityki niż nasza. **Inżynier JNCIP rozumie, na jaki element decyzji ma wpływ, a na jaki nie.**
+
+**R-WAN-DUAL — Configuration Mode, koncepcyjny eksport przez łącze zapasowe**
+
+~~~junos
+set policy-options policy-statement BACKUP-OUT term LAN from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement BACKUP-OUT term LAN then as-path-prepend "64510 64510"
+set policy-options policy-statement BACKUP-OUT term LAN then accept
+set policy-options policy-statement BACKUP-OUT term REST then reject
+set protocols bgp group ISP-B export BACKUP-OUT
+~~~
+
+Ten przykład zakłada odrębną, poprawną konfigurację BGP do operatora oraz zgodność z wymaganiami AS-path. Junos sam dodaje local AS w procesie eBGP; `as-path-prepend` manipuluje dodatkowymi wpisami zgodnie z zasadami protokołu i implementacji. Przed użyciem produkcyjnym zweryfikuj cały ogłaszany AS_PATH, żeby nie doprowadzić do pętli ani nieprawidłowej polityki u operatora.
+
+**R-WAN-DUAL — Operational Mode, obserwacja rzeczywistego ogłoszenia**
+
+~~~junos
+show route advertising-protocol bgp 192.0.2.6 detail
+show bgp neighbor 192.0.2.6
+~~~
+
+Tutaj 192.0.2.6 jest **przykładowym adresem drugiego peera z odrębnego scenariusza**, nie sąsiadem 192.0.2.2 z bazowej topologii. Nie ma sensu kopiować tej komendy bez zmiany adresacji i pełnej konfiguracji ISP-B. W prawdziwej sieci o wyborze trasy przychodzącej ostatecznie świadczy obserwacja po stronie operatora lub zewnętrznego punktu widzenia.
+
+### Community: znacznik, którego znaczenie nadaje polityka
+
+W pewnym momencie operator prosi: „Oznaczajcie oddziałowe prefiksy BGP community 64510:100, a nasz system zajmie się resztą”. To świetny moment, aby zobaczyć, jak policy może nie tylko przyjmować albo odrzucać trasy, ale też **dodawać im metadane**.
+
+BGP community działa jak etykieta przyklejona do informacji routingu. Sama etykieta nie jest ACL ani magicznym przełącznikiem. Znaczenie nadaje jej konfiguracja innego routera — naszego, operatora lub kolejnego sąsiada — oraz uzgodniona konwencja. Dwie firmy mogą zresztą interpretować ten sam numer inaczej, jeśli nie ustalą jego semantyki.
+
+Wyobraź sobie, że R1 ma dwie warstwy polityki: pierwsza dodaje etykietę, druga naprawdę decyduje o eksporcie. Chcemy **uniknąć** sytuacji, w której samo oznaczenie trasy przypadkowo kończy ocenę i omija whitelistę.
+
+**R1-vSRX — Configuration Mode, wariant łańcucha BGP zamiast wcześniejszego eksportu**
+
+~~~junos
+set policy-options community SITE-BRANCH members 64510:100
+set policy-options policy-statement MARK-BRANCH term LAN from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement MARK-BRANCH term LAN then community add SITE-BRANCH
+set policy-options policy-statement MARK-BRANCH term LAN then next policy
+set policy-options policy-statement CHECK-EXPORT term LAN from protocol direct
+set policy-options policy-statement CHECK-EXPORT term LAN from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement CHECK-EXPORT term LAN then accept
+set policy-options policy-statement CHECK-EXPORT term REST then reject
+set protocols bgp group TO-R2 export [ MARK-BRANCH CHECK-EXPORT ]
+~~~
+
+Patrzymy na tę konfigurację jak na zdarzenie. Prefix przechodzi przez `MARK-BRANCH`, otrzymuje community, a dzięki `next policy` trafia jeszcze do `CHECK-EXPORT`. Tylko dopasowanie `direct 10.10.10.0/24` kończy się akceptacją. Zmiana `next policy` na `accept` w pierwszej polityce pozwoliłaby ominąć ostateczny filtr — to nie kosmetyka.
+
+Na R2 moglibyśmy dopasowywać nazwane community w `from community` i na tej podstawie ustawiać LOCAL_PREF albo decydować o dalszej redystrybucji. **Nie traktuj jednak otrzymanej community jako uwierzytelnienia prefiksu.** Sąsiad, który jest w stanie wysyłać NLRI, może również wysłać atrybut community. Dobra import policy łączy właściwy kontekst peera, prefix whitelistę, sensowną kontrolę atrybutów i wymagania dotyczące liczby tras.
+
+**R2-vSRX — Configuration Mode, odrębny przykład oznaczania z dodatkowym sprawdzeniem prefiksu**
+
+~~~junos
+set policy-options community SITE-BRANCH members 64510:100
+set policy-options policy-statement FROM-BRANCH term APPROVED from community SITE-BRANCH
+set policy-options policy-statement FROM-BRANCH term APPROVED from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement FROM-BRANCH term APPROVED then local-preference 180
+set policy-options policy-statement FROM-BRANCH term APPROVED then accept
+set policy-options policy-statement FROM-BRANCH term REST then reject
+~~~
+
+Sam obiekt jeszcze nigdzie nie działa — trzeba go podpiąć do właściwego BGP import. W tym scenariuszu celowo zostawiamy go jako przykład budowy termu, bo wcześniejsze `FROM-R1` realizuje już podstawową whitelistę i bez świadomego planu nie powinieneś mieszać ich w trakcie labu.
+
+### MED, AS_PATH, origin, next-hop — nie mieszaj różnych „pokręteł”
+
+Wyobraź sobie pulpit w samochodzie. Masz przyciski odpowiadające za temperaturę, oświetlenie i prędkość. Wszystkie wyglądają jak regulatory, ale tylko jeden wpływa na prędkość. Podobnie jest z atrybutami routingu.
+
+W BGP `local-preference` wpływa na wybór ścieżki w obrębie naszego AS; wyższy zwykle jest preferowany. `as-path-prepend` może uczynić reklamowaną trasę mniej atrakcyjną z zewnątrz, lecz nie przebije wszystkich polityk odbiorców. `metric` jako akcja BGP oznacza **MED**, lecz jako akcja w innej polityce protokołowej może mieć inne znaczenie. `next-hop` wpływa na wskazywaną drogę do celu, ale jej użyteczność zależy od możliwości **rozwiązania next hop**. `preference` to jeszcze inny regulator — lokalna preferencja trasy w RIB.
+
+Możesz więc technicznie poprawnie wpisać polecenie, które nie rozwiązuje właściwego problemu. Na przykład ustawienie MED przy problemie z wewnętrznym LOCAL_PREF może nie zmienić wyniku. Zmiana `then preference` przy próbie wpłynięcia na decyzję obcego AS nie sprawi, że ten AS zacznie korzystać z preferowanego łącza. A BGP route z poprawną community może być **hidden**, jeśli next hop pozostaje nierozwiązywalny.
+
+```mermaid
+flowchart LR
+  A["Dokąd wyślę ruch<br/>z własnego AS?"] --> L["BGP import / LOCAL_PREF<br/>i pozostałe kryteria wyboru"]
+  B["Jak świat wybierze<br/>drogę do mnie?"] --> X["BGP export:<br/>AS_PATH, MED, communities"]
+  X --> C["Polityka obcego AS<br/>decyduje o rezultacie"]
+  D["Czy wybrana droga działa?"] --> F["Next-hop resolution,<br/>RIB/FIB i security"]
+```
+
+*Rysunek 8.8. Tekst alternatywny: wpływ na ruch wychodzący odbywa się głównie przez wybór własnej ścieżki BGP; wpływ na ruch przychodzący przez eksportowane atrybuty pozostaje zależny od innych AS; forwarding wymaga poprawnego next hop. Diagram autorski.*
+
+### Zaawansowany przypadek: OSPF i BGP spotykają się na jednym routerze
+
+W dużej organizacji edge router może uczyć się adresacji wewnętrznej przez OSPF, a wysyłać wybrane prefiksy do BGP partnera. Początkujący administrator pisze `from protocol direct` i dziwi się, że nie reklamuje prefiksu poznanego przez OSPF. Polityka działa, tylko pyta o niewłaściwe źródło trasy.
+
+Rozwiązanie nie brzmi „dodaj `then accept` na samym końcu i wyślij wszystko”. Najpierw ustal, czy konkretny prefiks jest **active OSPF route** w RIB, czy ma być eksportowany do eBGP jako indywidualny prefix, czy lepiej zaprojektować stabilny summary. Potem zbuduj warunek `from protocol ospf` razem z konkretnym `route-filter`. Sprawdź działanie na sąsiedzie i odporność na zniknięcie pojedynczej trasy wewnętrznej.
+
+**R-WAN-EDGE — Configuration Mode, odrębny przykład selektywnego eksportu tras OSPF do BGP**
+
+~~~junos
+set policy-options policy-statement OSPF-TO-BGP term APP from protocol ospf
+set policy-options policy-statement OSPF-TO-BGP term APP from route-filter 10.70.70.0/24 exact
+set policy-options policy-statement OSPF-TO-BGP term APP then accept
+set policy-options policy-statement OSPF-TO-BGP term REST then reject
+set protocols bgp group TO-PARTNER export OSPF-TO-BGP
+~~~
+
+Jeżeli route w RIB faktycznie pochodzi z `static`, a nie z `ospf`, pierwszy term nie dopasuje i reklama nie nastąpi. To bardzo pożyteczny błąd laboratoryjny, ponieważ uczy rozdzielać **prefiks** i **źródło trasy**. Stosuj też ostrożność przy obustronnej redystrybucji OSPF↔BGP: bez przemyślanego tagowania, filtrowania i kontroli topologii możesz stworzyć sprzężenie zwrotne albo niezamierzone szerokie ogłoszenia.
+
+### O czym będziesz pamiętać podczas incydentu JNCIP?
+
+Gdy trafia się prefiks ze złym next hop, community i lokalnym priorytetem, nie zaczynaj od zmiany wszystkiego naraz. Odpowiedz kolejno: Czy route została odebrana? Czy import ją dopuścił? Czy jest hidden lub inactive — i dlaczego? Czy BGP wybrał ją według odpowiednich atrybutów? Czy wygrała jako aktywna trasa w Junos RIB? Czy next hop rozwiązuje się do właściwego interfejsu? Czy export do dalszego peera pozwala ją ogłosić? Dopiero na końcu pytaj, czy konkretne pakiety przechodzą przez filtry i stateful security.
+
+To jest sedno bardziej zaawansowanego routingu: **umiejętność lokalizacji decyzji**, nie pamięciowe posiadanie dziesięciu parametrów `then`.
+
+*Źródła: [Actions in Routing Policy Terms](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-actions-in-routing-policy-terms.html), [Route Preferences Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-protocols-route-preferences-overview.html), [BGP Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/basic-routing-policies.html), [AS-Path Prepending](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/autonomous-systems.html).*
