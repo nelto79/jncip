@@ -252,7 +252,7 @@ flowchart LR
 **Urządzenie: R1-vSRX — Operational Mode, ograniczony capture w izolowanym LAB**
 
 ~~~junos
-monitor traffic interface ge-0/0/1 no-resolve count 20
+monitor traffic interface ge-0/0/0 no-resolve count 20
 ~~~
 
 Opcja `count 20` ogranicza liczbę pakietów, a `no-resolve` ogranicza rozwiązywanie nazw. Bardziej szczegółowe filtry i składnia `matching` wymagają dobrania do wydania. Na vSRX pakiety w wirtualnym dataplane i host-bound mają osobne uwarunkowania — przed wyciągnięciem wniosku **sprawdź dokumentację danego obrazu**.
@@ -1661,7 +1661,7 @@ Później porównaj zdarzenie w logu z czasem w `show system commit` i `show int
 
 ### 5.9.12. LAB F — dlaczego `monitor traffic` nie jest dowodem na brak forwardingu?
 
-Uruchom pakiety PC-A → PC-B i sprawdź `monitor traffic` na R1. Następnie wykonaj ping do **własnego interfejsu** R1 i porównaj, co pojawiło się w capture.
+Uruchom pakiety PC-A → PC-B i sprawdź `monitor traffic` na **górnym uplinku R1 do R2: ge-0/0/0**, a nie na dolnej ścieżce R3. Ruch generowany przez RE może nie być widoczny tak samo jak transit. Następnie wykonaj ping do **własnego interfejsu** R1 i porównaj, co pojawiło się w capture.
 
 **Urządzenie: R1-vSRX — Operational Mode, krótki capture w izolowanym LAB**
 
@@ -1737,6 +1737,22 @@ show security policies
 show security flow session summary
 ~~~
 
+**Urządzenie: R3-vSRX — Operational Mode, czy dolna trasa zapasowa jest gotowa?**
+
+~~~junos
+show interfaces terse
+show route 192.0.2.0/24 exact
+show route 198.51.100.0/24 exact
+~~~
+
+**Urządzenie: R4-vSRX — Operational Mode, powrót do PC-A**
+
+~~~junos
+show interfaces terse
+show route 192.0.2.0/24 exact
+show security flow session summary
+~~~
+
 **Urządzenie: PC-A — VPCS Console, test końcowy**
 
 ~~~text
@@ -1753,7 +1769,7 @@ Dla każdego LAB A–D zapisz w `VERIFY.md`:
 3. Prawdziwy precheck.
 4. Komenda fault injection, `show | compare`, wynik commit check, pending timer.
 5. Wynik `show interfaces/route/security` **podczas awarii**.
-6. Wynik testu PC-A → PC-B oraz powrót do baseline.
+6. Wynik testu PC-A → PC-B **i PC-B → PC-A**, świadome sprawdzenie R1/R4 primary przez R2 + backup R3 oraz powrót do baseline.
 7. Co zadziałało, co nie i jaka jest hipoteza, jeśli wynik odbiega od oczekiwań.
 8. Zamknięcie labu bez aktywnego pending commit i bez sekretów w repo.
 
