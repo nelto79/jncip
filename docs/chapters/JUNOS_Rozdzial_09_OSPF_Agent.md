@@ -567,3 +567,407 @@ show route table inet6.0 protocol ospf3
 
 ---
 
+## 9.9. Konfiguracja obszarów, interfejsów i sąsiadów. [S]
+
+### 9.9.1. Zaczynamy od designu, nie od polecenia „set”
+
+Wyobraź sobie nowe biuro: ma dwa routery na niezależnych uplinkach WAN, lokalne VLAN-y i własny zespół obsługi. Zanim wybierzesz area number, trzeba odpowiedzieć: gdzie jest backbone? Które interfejsy mają tworzyć rzeczywistą adjacency? Które sieci jedynie reklamujemy jako końcowe? Czy adresy i router IDs są stabilne? Co stanie się przy zerwaniu jednego linku?
+
+W Cisco można z rozpędu użyć **router ospf 1** oraz **network 10.0.0.0 0.255.255.255 area 0**. Junos jest czytelniejszy, jeśli myślisz **per interface**: router bierze udział w OSPF tam, gdzie pod **protocols ospf area X interface Y** jawnie określisz interfejs. To ogranicza przypadkowe aktywowanie OSPF na każdym SVI zawierającym się w szerokim wildcard. Sam fakt, że prefix występuje w **inet.0** jako direct, nie powoduje jego reklamy jako intra-area.
+
+Pierwszym zadaniem jest adresacja i Router ID. Dopiero potem protokół. Poniższy mini-przykład R2–R3 na dedykowanym Ethernet może być również pierwszym etapem labu.
+
+**Urządzenie: R2-vSRX — Configuration Mode**
+
+~~~junos
+set routing-options router-id 10.255.0.2
+set interfaces ge-0/0/2 unit 0 family inet address 10.9.23.1/30
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 interface-type p2p
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 metric 10
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+set routing-options router-id 10.255.0.3
+set interfaces ge-0/0/1 unit 0 family inet address 10.9.23.2/30
+set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 metric 10
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+Tu celowo używamy **p2p** na Ethernet, ponieważ w topologii mają być dokładnie dwa routery. Koszt 10 jest jawny, by zminimalizować zależność od raportowanej prędkości wirtualnej karty. To **nie** jest polecenie na ustawienie prędkości Ethernet 10 Mb/s.
+
+**Ważne SRX:** konfiguracja powyżej nadal nie wystarczy dla prawidłowego peeringu, jeśli **host-inbound-traffic protocols ospf** blokuje OSPF na portach. W LAB jest pełna konfiguracja strefy. Nie używaj przypadkowej **factory-default security configuration** jako domniemanej polityki laboratoryjnej.
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show interfaces terse ge-0/0/2
+show ospf interface detail
+show ospf neighbor
+show ospf overview
+show route 10.9.23.0/30 exact
+~~~
+
+R2 ma być up/up, OSPF interface ma pokazać Area 0 i p2p, a R3 — po synchronizacji — Full. Trasa **direct** dla 10.9.23.0/30 już wcześniej istniała dzięki adresacji i nie stanie się magicznie „OSPF/10” tylko dlatego, że włączyliśmy OSPF. **Direct/0** wygrywa z równoległą trasą do tego samego prefiksu, jeśli w ogóle występuje drugi kandydat. Dla demonstracji zdobywania wiedzy przez OSPF trzeba obserwować **zdalny prefix**, nie własny link.
+
+### 9.9.2. Passive: ogłaszaj sieć, nie szukaj tam sąsiadów
+
+W oddziale VLAN z komputerami i drukarkami może liczyć 300 urządzeń. Żaden z nich nie jest routerem OSPF. Wysłanie tam Hello jest zbędne, zwiększa powierzchnię oddziaływania i może tworzyć niechciane peeringi. **Passive interface** rozwiązuje problem: adres interfejsu jest reklamowany do OSPF jako wewnętrzna osiągalność, ale sam interfejs nie wysyła OSPF Hellos i nie zestawia adjacencies.
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+set interfaces ge-0/0/2 unit 0 family inet address 10.9.101.1/24
+set protocols ospf area 0.0.0.10 interface ge-0/0/2.0 passive
+commit check
+commit confirmed 5
+~~~
+
+Po tym kroku sieć LAN może zostać rozgłoszona w Area 10, jeżeli R1 jest połączony z resztą OSPF i RIB/FIB są prawidłowe. Na samym porcie LAN **show ospf neighbor** nie pokaże neighbor — to prawidłowy wynik, a nie awaria. W Cisco znasz **passive-interface**; w Junos wpisuje się **passive** przy konkretnym interfejsie area. [S16]
+
+### 9.9.3. Kiedy potrzebny jest ręczny neighbor?
+
+Na zwykłym Ethernet broadcast lub point-to-point dynamiczne Hellos rozwiązują discovery. Nie wpisuj statycznego sąsiada bez powodu. Ręczne neighbor statements mają zastosowanie na określonych **nonbroadcast** i niektórych point-to-multipoint media, gdzie autodiscovery multicast/broadcast nie działa lub nie jest dostępne. Wtedy dochodzą poll interval oraz zależne od trybu wymagania wyboru DR. Nie przenoś bez namysłu konfiguracji dawnego Frame Relay do współczesnego L3 VLAN.
+
+**Urządzenie: R1-Junos — Configuration Mode (ilustracja dla NBMA; nie wykonuj w LAB Ethernet)**
+
+~~~junos
+set protocols ospf area 0.0.0.0 interface at-0/1/0.0 interface-type nbma
+set protocols ospf area 0.0.0.0 interface at-0/1/0.0 neighbor 192.0.2.2 eligible
+~~~
+
+To przykład zależny od platformy i interfejsu ATM, przytoczony wyłącznie w celu pokazania konstrukcji. **Nie założono, że vSRX dysponuje interfejsem at-0/1/0.0.** Na konkretnej platformie należy zweryfikować obsługę danej technologii i składnię przez CLI Help / docs. [S17]
+
+### 9.9.4. Komendy Cisco a Junos — sensownie, nie słownikowo
+
+| Cel | Cisco IOS XE | Junos |
+|---|---|---|
+| Włączyć OSPF na porcie | **ip ospf 10 area 0** | **set protocols ospf area 0.0.0.0 interface ge-0/0/1.0** |
+| Point-to-point Ethernet | **ip ospf network point-to-point** | **... interface-type p2p** |
+| Ogłaszać LAN bez peerów | **passive-interface Vlan101** | **... interface irb.101 passive** albo **ge... passive** |
+| Ustawić koszt | **ip ospf cost 10** | **... interface ... metric 10** |
+| Ustawić Router ID | **router-id 10.255.0.2** | **set routing-options router-id 10.255.0.2** |
+| Diagnostyka | **show ip ospf interface** | **show ospf interface detail** |
+
+Dwa ostrzeżenia: **irb.101** ma sens, jeśli urządzenie rzeczywiście używa IRB do L3 VLAN; na vSRX interface może być ge. Z kolei globalna **routing-options router-id** bywa wspólnym identyfikatorem protokołów — nie zakładaj, że to odizolowane per-process **router ospf 10**.
+
+---
+
+## 9.10. Dodatkowe podstawowe opcje OSPF. [S]
+
+### 9.10.1. Koszt OSPF to nie przepustowość portu
+
+Pewien inżynier wymienia uplink 1 Gb/s na 10 Gb/s. Zakłada, że OSPF sam przełączy ruch na 10 Gb/s. Patrzy w RIB, a nowy port nadal ma cost 1. Co się stało? Standardowy domyślny **reference-bandwidth Junos = 100 Mbps**. Dla portów wielokrotnie szybszych od 100 Mbps koszt po ograniczeniu do minimum może wyjść taki sam. Różnica fizycznej prędkości nie musi zatem przekładać się na różnicę ścieżek.
+
+W modelu podstawowym: **cost ≈ reference-bandwidth / interface-bandwidth**, z uwzględnieniem ograniczeń, zaokrągleń i szczegółów implementacji. Dlatego w sieciach 10/25/100 Gb/s należy **świadomie** ustalać reference-bandwidth na spójną wartość w domenie OSPF lub przypisywać koszt ręcznie. Producent potwierdza domyślne 100 Mbps. [S18]
+
+**Urządzenie: R2-vSRX — Configuration Mode (wariant globalnego modelu kosztów)**
+
+~~~junos
+set protocols ospf reference-bandwidth 100g
+commit check
+show | compare
+~~~
+
+Składnię i dostępne wartości sprawdź dla release/platformy, szczególnie na starszych urządzeniach. Jeśli chcesz mieć w LAB stuprocentowo przewidywalne koszty, lepiej ustawić **metric** per port, jak zrobiono w 9.16.
+
+**Pytanie:** czy „preferowany interfejs” zawsze musi mieć wyższy bandwidth? Nie. OSPF używa **sumy metryk** od węzła do celu. Administrator może celowo nadać szybszemu linkowi wyższy koszt, np. z uwagi na opłatę za transport, jitter, ograniczenie ruchu OT lub bezpieczeństwo.
+
+### 9.10.2. Timery Hello i Dead: prostota, która potrafi zatrzymać cały site
+
+Na typowym Ethernet OSPFv2 (broadcast i p2p) klasycznie używa **Hello 10 s / Dead 40 s**; na innych mediach wartości mogą się różnić. Nie wolno uznawać tych wartości za uniwersalne dla każdego network type i wydania. Obie strony adjacency muszą być kompatybilne.
+
+**Urządzenie: R2-vSRX — Configuration Mode (kontrolowany eksperyment, równocześnie na obu końcach)**
+
+~~~junos
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 hello-interval 2
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 dead-interval 8
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R3-vSRX — Configuration Mode (wartości identyczne)**
+
+~~~junos
+set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 hello-interval 2
+set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 dead-interval 8
+commit check
+commit confirmed 5
+~~~
+
+W labie celem jest zobaczenie krótszego czasu wykrycia cichej awarii, nie pośpieszne włączenie agresywnych timerów w sieci produkcyjnej. Wymaga to obu końców i oceny wydajności CPU, stabilności transportu i środowiska WAN. Do szybkiej detekcji na prawdziwym WAN często używa się BFD, ale dopiero po dopasowaniu implementacji, MTU i security path.
+
+Junos dokumentuje również szczególną uwagę: **LSA retransmission interval** powinien mieć co najmniej 3 sekundy, aby uniknąć niepotrzebnych retransmit events związanych z opóźnionym ACK. Nie mieszaj tego timera z hello/dead. [S19]
+
+### 9.10.3. Authentication OSPFv2 i bezpieczeństwo OSPFv3
+
+Protokół link-state bez kontroli uczestnictwa wystawia domenę na niechcianych peerów i fałszywe informacje topologiczne. W OSPFv2 Junos wspiera m.in. simple password (słabe, legacy) oraz MD5 na określonych platformach/wydaniach; nowsze mechanizmy związane z IPsec mogą być dostępne zależnie od sprzętu. W OSPFv3 nie wolno wnioskować, że działa **dokładnie ten sam auth header** co w OSPFv2: standardowy model OSPFv3 wykorzystuje mechanizmy IPsec lub odpowiednie rozszerzenia i wsparcie platformy, a jego security nie jest kopią konfiguracji MD5 OSPFv2. [S20]
+
+**Urządzenie: R2-vSRX — Configuration Mode (tylko ilustracja OSPFv2 MD5; użyj własnego sekretu)**
+
+~~~junos
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 authentication md5 5 key "LAB-REPLACE-WITH-UNIQUE-SECRET"
+commit check
+~~~
+
+**Uwaga:** sekrety w repozytorium to tylko jawny placeholder do zastąpienia, nie gotowy PSK produkcyjny. Przed wdrożeniem sprawdź wersję dokładnej składni (np. **authentication md5 key-id key ...**) przez **?** w CLI i dokumentację dla platformy; konfiguracja obu peerów musi być kompatybilna, a MD5 nie powinno być wybierane automatycznie jako współczesny standard kryptograficzny. Ze względów bezpieczeństwa i przenośności release ćwiczenie podstawowe pomija authentication, a osobny wariant może zostać dołączony po weryfikacji.
+
+### 9.10.4. BFD, graceful restart, LSA database protection
+
+Gdy łącze optyczne jest up, ale transport operatora przestaje przekazywać ruch, OSPF może potrzebować Dead interval, by wykryć problem. **BFD** pozwala wykrywać awarie szybciej i informować OSPF. Nie jest metodą szyfrowania LSA ani nowym protokołem wyboru tras. Także **graceful restart** nie jest magicznym „brakiem przerw”: pozwala w określonych warunkach zachować forwarding podczas restartu control plane, jeśli sąsiedzi pomagają i topologia pozostaje zgodna.
+
+**OSPF database protection** ogranicza wpływ zalewu obcych LSA na zasoby rpd. Nie zastępuje poprawnego projektowania obszarów, control-plane protection ani routingu policy. W Junos obsługa konkretnych funkcji BFD, GR i database protection zależy od modelu i release. [S21], [S22]
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show ospf overview
+show ospf interface detail
+show ospf log
+show log messages | match "OSPF|RPD_OSPF|BFD"
+~~~
+
+Co śledzisz? Stany peerów i timery, historię zmian, błędy retransmisji, restart state i diagnostykę linku. Zwiększenie szczegółowości trace jest osobną, kontrolowaną operacją — nigdy stałą polityką „debug all w produkcji”.
+
+---
+
+## 9.11. Zastosowanie routing policies w OSPF. [S]
+
+### 9.11.1. Standardowa pułapka: „Nie widzę static w OSPF, to dodam network”
+
+Załóżmy, że R3 ma statyczną trasę **172.31.90.0/24** prowadzącą do prywatnej sieci partnera. Chcemy, aby reszta firmy znała ten prefix. W Cisco zrobiłbyś **redistribute static route-map ...**. W Junos tworzysz policy z odpowiednim match źródłowej trasy i podpinasz ją pod **protocols ospf export**.
+
+**Nie należy używać globalnego export accept all.** Gdy router dostanie dodatkową default route, statyczne null routes albo nieprzewidziany VRF-leak, bezkrytyczne redystrybuowanie wszystkiego do OSPF może roznieść błędną informację do całej sieci. Stosuj explicit prefix allow-list i explicit reject. Export policy bierze aktywne/kwalifikowane drogi z RIB do procesu OSPF, nie filtruje pakietów aplikacji.
+
+**Urządzenie: R3-vSRX — Configuration Mode (przykład z trasą discard, bez generowania ruchu do partnera)**
+
+~~~junos
+set routing-options static route 172.31.90.0/24 discard
+set policy-options policy-statement OSPF-EXPORT-PARTNER term ALLOW from protocol static
+set policy-options policy-statement OSPF-EXPORT-PARTNER term ALLOW from route-filter 172.31.90.0/24 exact
+set policy-options policy-statement OSPF-EXPORT-PARTNER term ALLOW then metric 50
+set policy-options policy-statement OSPF-EXPORT-PARTNER term ALLOW then external type 1
+set policy-options policy-statement OSPF-EXPORT-PARTNER term ALLOW then accept
+set policy-options policy-statement OSPF-EXPORT-PARTNER term DENY then reject
+set protocols ospf export OSPF-EXPORT-PARTNER
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+Trasa **discard** służy tutaj tylko do pokazania ogłoszenia **osiągalnego logicznie prefiksu**, ale jej rzeczywisty forwarding na R3 odrzuci pakiety. **Nie wolno używać tego jako produkcyjnej drogi do sieci partnera**. Bez prawdziwej next-hop connectivity oczekiwany wynik to **control-plane reachability advertisement bez data-plane reachability** — celowy eksperyment pokazujący, jak łatwo stworzyć blackhole. W docelowym projekcie zamień discard na właściwy, zweryfikowany next-hop.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show ospf database external
+show ospf route
+show route 172.31.90.0/24 exact extensive
+~~~
+
+Przewidywanie: R1 w normal area zobaczy external LSA, a route może wystąpić jako **[OSPF/150]**. Ponieważ ustawiliśmy **external type 1**, **metric** na R1 może uwzględniać wewnętrzny koszt do R3; to nie zmienia standardowej route preference 150 dla external. Jeśli w Area 20 jest **stub**, R4 nie zobaczy Type 5. Jeśli **NSSA**, trzeba przemyśleć położenie ASBR i źródło Type 7.
+
+### 9.11.2. Import policy nie jest „przecinaniem” flooding LSA
+
+W Junos OSPF import policy może odrzucić **trasy external** przy ich instalacji w RIB. Sama w sobie **nie usuwa Type 5 z LSDB** i nie pozwala dowolnie blokować wszystkich intra-area/prefiksów inter-area. To niezbyt intuicyjna różnica względem uproszczonego modelu „route-map in filtruje każdy update”. OSPF nie przesyła list gotowych tras tak jak BGP, więc polityka musi respektować spójność link-state.
+
+**Urządzenie: R1-vSRX — Configuration Mode (wariant do odtworzenia po bazowym LAB)**
+
+~~~junos
+set policy-options policy-statement OSPF-IMPORT-EXTERNAL term BLOCK-PARTNER from protocol ospf
+set policy-options policy-statement OSPF-IMPORT-EXTERNAL term BLOCK-PARTNER from route-filter 172.31.90.0/24 exact
+set policy-options policy-statement OSPF-IMPORT-EXTERNAL term BLOCK-PARTNER then reject
+set policy-options policy-statement OSPF-IMPORT-EXTERNAL term REST then accept
+set protocols ospf import OSPF-IMPORT-EXTERNAL
+commit check
+show | compare
+~~~
+
+Po zatwierdzeniu testu porównaj **show ospf database external** z **show route 172.31.90.0/24**. Jeżeli LSA zostaje, a trasa została odrzucona w procesie import, to nie błąd — to zamierzona różnica między LSDB a RIB. Nie rozgłaszaj tej polityki bez testu na granicach instancji i zgodnego rozumienia default action.
+
+**Gotcha:** match **from protocol ospf** może obejmować więcej niż sam external; w praktyce znaczenie ma punkt zastosowania OSPF import. Stosuj precyzyjne route-filter i testuj wyłącznie adres przeznaczony do blokady. [S23]
+
+### 9.11.3. Różne źródła, różne domyślne preferencje
+
+R3 ma default static **0.0.0.0/0 preference 5** i widzi default external OSPF **preference 150**. Która trasa będzie aktywna dla tego samego /0? Zwykle static. Czy OSPF export policy może zmienić route preference lokalnego **static**? Nie wprost: export kształtuje informację reklamowaną przez OSPF, a wybór aktywnej drogi w RIB jest odrębną decyzją. Podobnie **metric 50** w LSA nie musi oznaczać route preference 50. OSPF wewnętrznie porównuje rodzaje ścieżek i koszty, a następnie Junos wybiera między źródłami w RIB.
+
+### 9.11.4. Czy bez export policy standardowe intra-area LSAs znikną?
+
+Nie. OSPF nadal opisuje łącza interfejsów aktywnych w OSPF i flooduje LSA typów wynikających z topologii. Standardowy default **export policy dla zewnętrznej redystrybucji** jest restrykcyjny, a nie „wyłączony cały link-state”. To jeden z najważniejszych mostów z rozdziałem 8. [S23], [S24]
+
+---
+
+## 9.12. Troubleshooting: ping, traceroute, traceoptions, show commands, logging. [S]
+
+### 9.12.1. Diagnostyka OSPF ma kolejność — inaczej tracisz czas
+
+Sytuacja z dyżuru: klient nie może dostać się do 10.9.104.10. Widzisz, że rpd pracuje, a jeden neighbor jest Full. Czy od razu uruchomić verbose traceoptions na wszystkie OSPF pakiety? Nie. Najpierw spróbuj zaklasyfikować problem.
+
+1. **Physical / L2 / family:** Czy właściwy port naprawdę jest up/up, ma adres i należy do prawidłowego izolowanego segmentu?
+2. **Protocol activation:** Czy OSPF jest skonfigurowany na danym interfejsie w prawidłowej area? Czy SRX dopuszcza host-inbound?
+3. **Neighbor:** Czy sąsiad istnieje i jaki ma stan? Czy ma te same parametry?
+4. **Database:** Czy oczekiwana LSA istnieje, z właściwym Advertising Router i świeżym sequence?
+5. **Route computation:** Czy OSPF obliczył trasę? Czy przypadkiem nie odfiltrowano external?
+6. **RIB/FIB:** Czy trasa jest aktywna, nie hidden/inactive i wskazuje właściwego next-hop?
+7. **Dataplane/security:** Czy forwarding, security policy, session i droga powrotna pozwalają na ruch?
+
+~~~mermaid
+flowchart TB
+  S["Brak reachability"] --> A{"Neighbor Full?"}
+  A -->|nie| B["Interface / area / timers / host-inbound / MTU / auth"]
+  A -->|tak| C{"Oczekiwana LSA?"}
+  C -->|nie| D["Passive / ABR / area type / LSAs / export"]
+  C -->|tak| E{"Route w OSPF i RIB?"}
+  E -->|nie| F["SPF / import policy / preference / next-hop"]
+  E -->|tak| G["FIB / ARP-ND / SRX policy / return path"]
+~~~
+
+**Interpretacja:** to diagnostyczna sekwencja. Nie trzeba bezmyślnie uruchamiać wszystkich komend. Każde polecenie ma rozstrzygać konkretną hipotezę.
+
+**Urządzenie: R2-vSRX — Operational Mode (pierwszy zestaw tylko odczyt)**
+
+~~~junos
+show version
+show interfaces terse
+show ospf overview
+show ospf interface detail
+show ospf neighbor extensive
+show ospf database
+show ospf route
+show route protocol ospf
+show route 10.9.104.0/24 exact extensive
+show route forwarding-table
+~~~
+
+**Interpretacja w kolejności:** po wersji i interfejsach identyfikujesz faktyczny kontekst. Overview pokaże działający proces OSPF i area. Neighbor rozstrzyga o adjacency. Database pozwala dowiedzieć się, co router **wie o topologii**, a show ospf route — jaki wynik obliczył protokół. Dopiero **show route** daje widok RIB. **show route forwarding-table** reprezentuje tablicę forwarding widoczną z RE; na fizycznym ASIC nie musi być dosłownym odczytem każdej sprzętowej tablicy PFE.
+
+### 9.12.2. Ping z RE to nie ruch klienta
+
+Gdy na R2 wykonasz ping z domyślnego źródła, Junos wybierze właściwy adres lokalny oraz tablicę dla lokalnie wygenerowanego pakietu. Klient PC-A używa innego source, może wchodzić innym portem i uruchamiać inne reguły SRX. Dlatego diagnostyka powinna uwzględnić wymuszone source:
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+ping 10.9.104.1 source 10.9.23.1 count 5
+traceroute 10.9.104.1 source 10.9.23.1
+show route 10.9.104.0/24 exact
+~~~
+
+Sukces tego pinga to **dowód pewnej ścieżki host-originated**, nie dowód działania flow PC-A→PC-B. Jeśli IPv6 działa inaczej, testuj osobno **inet6.0**, OSPFv3 i ICMPv6/ND. Traceroute może być ograniczony przez firewall/filter i TTL/Hop Limit ICMP response, więc brak jednej odpowiedzi pośredniej nie dowodzi zaniku pakietów docelowych.
+
+### 9.12.3. Traceoptions: chirurgiczne narzędzie, nie włącznik wszystkiego
+
+Traceoptions zapisują szczegółowe zdarzenia procesu OSPF. Mają swoją cenę: dodatkowy I/O, CPU, rotacja logów i potencjalnie wrażliwe dane. Używaj ograniczonego zakresu, limitu wielkości i liczby plików, najlepiej w izolowanym LAB. Następnie usuń traceoptions i postcheck potwierdzi brak pozostałego debug.
+
+**Urządzenie: R2-vSRX — Configuration Mode (tylko LAB, wersja do weryfikacji na danym Junos)**
+
+~~~junos
+set protocols ospf traceoptions file ospf-ch09 size 2m files 3
+set protocols ospf traceoptions flag hello
+set protocols ospf traceoptions flag adjacency
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show log ospf-ch09
+show log messages | match "RPD_OSPF|OSPF"
+show ospf log
+~~~
+
+**Urządzenie: R2-vSRX — Configuration Mode (cleanup)**
+
+~~~junos
+delete protocols ospf traceoptions
+commit check
+commit
+~~~
+
+Jeśli parser nie obsługuje wybranej flagi na Twoim release, użyj pomocy kontekstowej po **flag ?** i wybierz dokumentowany odpowiednik. **Nie zmieniaj konfiguracji produkcyjnej bez uzgodnionego change i planu rollback.** [S25]
+
+### 9.12.4. Pełne studium awarii: OSPF Full, ale R1 nie widzi sieci R4
+
+**Symptom:** R1 nadal ma Full z R2, lecz nie posiada trasy do 10.9.104.0/24.  
+**Hipoteza A:** R2→R3 nie ma adjacency w backbone.  
+**Test:** show ospf neighbor na R2 i R3; brak Full między nimi.  
+**Wynik:** R2 błędnie ma interface ge-0/0/2.0 w Area 10 zamiast Area 0.  
+**Root cause:** granica obszaru błędnie skonfigurowana na tranzycie; nie ma poprawnej synchronizacji Area 0.  
+**Naprawa:** na R2 przenieść ten jeden interfejs do Area 0; potwierdzić symetrię R3.  
+**Postcheck:** Full R2–R3; R2 widzi Type 3 dla Area 20; R1 dostaje inter-area prefix z R2; RIB i ping wracają.
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show configuration protocols ospf | display set
+show ospf interface detail
+show ospf neighbor
+show ospf database netsummary
+show route 10.9.104.0/24 exact
+~~~
+
+**Urządzenie: R2-vSRX — Configuration Mode (naprawa w LAB)**
+
+~~~junos
+delete protocols ospf area 0.0.0.10 interface ge-0/0/2.0
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 interface-type p2p
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 metric 10
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Ważna praktyka:** naprawa area zmienia bazę i liczbę relacji w OSPF. W realnej sieci może chwilowo zmienić forwarding innych klientów. Jeśli **commit confirmed** zostanie anulowany, sprawdzamy, czy adjacency wróciła do poprzedniego, błędnego stanu i nie mylimy tego z nową awarią.
+
+### 9.12.5. Drugi incydent: Full OSPFv2, brak ping IPv6
+
+**Symptom:** IPv4 z R1 do R4 działa, a IPv6 jest martwe.  
+**Hipoteza:** konfiguracja OSPFv3 nie jest symetryczna na łączu R2–R3.  
+**Test:** show ospf3 interface/neighbor na obu routerach; brak OSPFv3 Full, choć OSPFv2 Full.  
+**Wynik:** host-inbound dla **ospf3** nie został dopuszczony na R3.  
+**Root cause:** SRX local security processing zatrzymywał OSPFv3.  
+**Naprawa:** dodać OSPFv3 do host-inbound na właściwym interfejsie; nie tworzyć zbędnego global permit.  
+**Postcheck:** ospf3 neighbor Full, inet6.0 ma trasę, ping6 z właściwym źródłem działa, test tranzytowy host-host przechodzi tylko przez świadomie skonfigurowaną security policy.
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf3
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R3-vSRX — Operational Mode**
+
+~~~junos
+show ospf3 neighbor
+show ospf3 database
+show route table inet6.0 protocol ospf3
+show security zones
+~~~
+
+### 9.12.6. Gdy problem jest w SRX flow, nie ruszaj OSPF
+
+Jeżeli prefiks jest w RIB i FIB, wszystkie adjacencies są Full, a tylko ruch przez firewall nie działa, przejdź do rozdziału 8 (security policy versus firewall filter) oraz funkcji SRX.
+
+**Urządzenie: R3-vSRX — Operational Mode**
+
+~~~junos
+show security policies
+show security flow session
+show security flow statistics
+show interfaces extensive ge-0/0/2
+~~~
+
+Brak sesji może oznaczać blokadę polityki, ruch, który wcale nie dociera, lub wyłączenie określonych mechanizmów monitorowania/ścieżkę przyspieszoną zależnie od platformy. Sam licznik sesji **nie zastąpi** dowodu pakietowego. Zwróć uwagę na NAT, zone pairing, routing zwrotny i local-inbound dla testów do samego routera.
+
+---
+
