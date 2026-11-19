@@ -603,7 +603,6 @@ Nie wystarczy jeden `show configuration`. Jeśli filter jest zdefiniowany, ale n
 **Urządzenie: R1-vSRX — Configuration Mode, izolowany LAB z konsolą**
 
 ~~~junos
-configure private
 show | compare
 commit check
 commit confirmed 5
@@ -850,6 +849,22 @@ Plan adresacji:
 
 RFC 5737 rezerwuje `192.0.2.0/24` oraz `198.51.100.0/24` jako adresy dokumentacyjne; w izolowanej topologii są bezpiecznymi przykładami. Lab nie powinien prowadzić ich do Internetu.
 
+**Przed blokami „Configuration Mode” w laboratorium:** wchodzimy do trybu konfiguracji ze zwykłego promptu operational. Nie wpisujemy `configure private` *wewnątrz* trybu `[edit]`; dlatego polecenie inicjujące sesję jest wydzielone poniżej.
+
+**Urządzenie: R1-vSRX — Operational Mode (wejście do Configuration Mode)**
+
+~~~junos
+configure private
+~~~
+
+**Urządzenie: R2-vSRX — Operational Mode (wejście do Configuration Mode)**
+
+~~~junos
+configure private
+~~~
+
+W dalszych blokach z nagłówkiem „Configuration Mode” zakładamy już aktywne `[edit private]`. Po `commit confirmed` można wykonać `run show ...` z konfiguracji albo wrócić do Operational Mode i następnie ponownie wejść do Configuration Mode; zawsze obserwuj prompt. Ta sama uwaga dotyczy przykładów z wcześniejszych sekcji, które pokazują fragmenty konfiguracji do zastosowania w gotowym `[edit]`.
+
 ### 8.14.2. Faza 0 — discovery bez zmian
 
 **Cel:** upewnić się, że porty są te, które sądzisz, a config nie ma fabrycznej security policy przeszkadzającej w ćwiczeniach.
@@ -888,7 +903,6 @@ show route
 **Urządzenie: R1-vSRX — Configuration Mode, odseparowany lab, po potwierdzeniu mapping**
 
 ~~~junos
-configure private
 set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/30
 set interfaces ge-0/0/2 unit 0 family inet address 10.10.10.1/24
 set security zones security-zone WAN interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
@@ -910,7 +924,6 @@ commit confirmed 5
 **Urządzenie: R2-vSRX — Configuration Mode, po sprawdzeniu własnego mapping**
 
 ~~~junos
-configure private
 set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.2/30
 set interfaces ge-0/0/2 unit 0 family inet address 10.20.20.1/24
 set security zones security-zone WAN interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
@@ -987,7 +1000,6 @@ commit
 **Urządzenie: R1-vSRX — Configuration Mode**
 
 ~~~junos
-configure private
 set routing-options autonomous-system 64510
 set protocols bgp group TO-R2 type external
 set protocols bgp group TO-R2 peer-as 64520
@@ -1006,7 +1018,6 @@ commit confirmed 5
 **Urządzenie: R2-vSRX — Configuration Mode**
 
 ~~~junos
-configure private
 set routing-options autonomous-system 64520
 set protocols bgp group TO-R1 type external
 set protocols bgp group TO-R1 peer-as 64510
@@ -1075,7 +1086,6 @@ Najpierw R1 tworzy testowy `198.51.100.0/24` jako static discard. To bezpieczny 
 **Urządzenie: R1-vSRX — Configuration Mode**
 
 ~~~junos
-configure private
 set routing-options static route 198.51.100.0/24 discard
 show | compare
 commit check
@@ -1116,7 +1126,6 @@ Na R2 tworzymy inbound whitelist tylko dla LAN-A:
 **Urządzenie: R2-vSRX — Configuration Mode**
 
 ~~~junos
-configure private
 set policy-options policy-statement IMPORT-R1 term LAN-A from route-filter 10.10.10.0/24 exact
 set policy-options policy-statement IMPORT-R1 term LAN-A then accept
 set policy-options policy-statement IMPORT-R1 term DENY-OTHER then reject
@@ -1225,7 +1234,6 @@ Przed cleanup potwierdź, że na R1/R2 nie czeka pending `commit confirmed`. Naj
 **Urządzenie: R1-vSRX — Configuration Mode, cleanup tylko obiektów utworzonych w tym rozdziale**
 
 ~~~junos
-configure private
 delete interfaces ge-0/0/2 unit 0 family inet filter input LAN-IN
 delete firewall family inet filter LAN-IN
 delete policy-options policy-statement DRY-RUN
@@ -1241,7 +1249,6 @@ commit confirmed 5
 **Urządzenie: R2-vSRX — Configuration Mode, cleanup tylko obiektów utworzonych w tym rozdziale**
 
 ~~~junos
-configure private
 delete policy-options policy-statement IMPORT-R1
 delete policy-options policy-statement EXPORT-R2
 delete protocols bgp group TO-R1
@@ -1272,6 +1279,118 @@ show configuration protocols bgp | display set
 ~~~
 
 Nie deklaruj PASS bez dowodów uruchomienia. Wynik końcowy powinien być zapisany jako: PLANNED → GENERATED → STATIC REVIEWED (po audycie składni i zależności) → RUNTIME VALIDATED (wyłącznie po EVE i z artefaktami). **Na dzień 19 listopada 2026 status to GENERATED / NOT RUNTIME VALIDATED.**
+
+---
+
+## Warsztat operatorski: pięć dodatkowych testów przewidywania (uzupełnienie 8.3–8.13)
+
+Poniższe historie są autorskimi ćwiczeniami opartymi na udokumentowanych zachowaniach Junos. Nie są pytaniami z prawdziwego egzaminu. Zostały dodane, bo na poziomie JNCIP potrzebujesz nie tylko wiedzieć, **co działa**, ale również przewidzieć **jak router zachowa się po zmianie kolejności lub kontekstu**.
+
+### 1. Dwa termy wyglądają podobnie, lecz jeden chroni firmę, drugi ujawnia management
+
+W sieci office mamy VLAN management `10.99.0.0/24`, VLAN users `10.10.10.0/24` i peering do operatora. Inżynier konfiguruje policy export z termem `from protocol direct` i `then accept`, bo w output widać, że użytkownicy są connected. Test pingów działa. Wydaje mu się, że wdrożenie jest udane.
+
+Zastanów się, czy taką konfigurację zaakceptowałbyś w change review. **Nie.** Direct jest kategorią źródła trasy. Nie odpowiada na pytanie, *która* sieć connected może zostać opublikowana. W tej samej RIB możesz mieć bezpośrednio podłączony WAN transit, management subnet, testowy segment migracyjny i loopback. Jeśli każda taka trasa jest eligible do eksportu, szeroki term może pozwolić na rozgłoszenie więcej niż planowano.
+
+W Cisco analogiczny błąd popełnia się przez zbyt szerokie `redistribute connected` bez route-map/prefix-list. W Junos najpierw definiuj biznesową listę autoryzowanych prefiksów, dopiero potem dokładaj kontrolę `protocol direct`. Zwróć uwagę na kwalifikację do eksportu: policy sama nie tworzy aktywnej trasy, ale może pozwolić na aktywny connected, o którym zapomniałeś.
+
+**Urządzenie: R1-vSRX — Operational Mode, audyt zakresu direct przed export**
+
+~~~junos
+show route protocol direct
+show route advertising-protocol bgp 192.0.2.2
+show configuration policy-options policy-statement EXPORT-R1 | display set
+~~~
+
+Prawidłowy postcheck musi zawierać test **ujemny**. Jeżeli na R1 są trzy active direct prefiksy, a klient zamówił reklamę jednej sieci, potwierdź również, że dwóch pozostałych nie ma w advertised routes. To zwykle ważniejsze od samego `BGP Established`.
+
+### 2. Wynik `test policy` wygląda dobrze, ale neighbor nie dostał prefixu
+
+Przed zmianą operator uruchamia `test policy EXPORT-R1 10.10.10.0/24`. Widzi poprawne dopasowanie. Następnie po commit sąsiad nadal nie otrzymuje trasy. Czy Junos ignoruje politykę? Niekoniecznie.
+
+Ten test działa na kandydatach znalezionych w lokalnej RIB i sprawdza ich match logic w odpowiednim kontekście, ale **nie zastępuje rzeczywistej ścieżki protokołu**. Może nie uchwycić stanu BGP neighbor, AFI/SAFI, protokołowych reguł advertisement, kwalifikacji active route czy wcześniejszego chain termu używanego w produkcji. Ma także własne domyślne zachowanie akceptacji, opisane w dokumentacji [S13].
+
+Wybierz zatem właściwy dowód dla właściwego etapu: `test policy` przed zmianą jest testem logiki; `show route advertising-protocol` po zmianie to widok wyjściowy; na sąsiedzie `show route receive-protocol` i active RIB pokazują kolejny etap. Gdy działanie nie zgadza się z przewidywaniem, rozdziel *nieaplikowana polityka*, *niekwalifikowany kandydat*, *brak NLRI z powodu protokołu* i *inbound reject po stronie odbiorcy*.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+test policy EXPORT-R1 10.10.10.0/24
+show route 10.10.10.0/24 exact extensive
+show route advertising-protocol bgp 192.0.2.2
+show bgp neighbor 192.0.2.2
+~~~
+
+Jeżeli pierwszy wiersz jest pomyślny, lecz trzeci nie pokazuje prefixu, wciąż masz do zbadania dwa ogniwa: powiązanie policy z grupą/peerem oraz ograniczenia aktywności i eksportu.
+
+### 3. „Zmieniłem filter, więc jego counters powinny rosnąć” — niekoniecznie
+
+Po wprowadzeniu stateless filter pakiety dalej przechodzą; wartości `SPOOF-DROPS` są zerowe. To może oznaczać, że nikt nie wysłał pakietu o źródłowym adresie pasującym do termu, ale równie dobrze: filtr jest zdefiniowany, lecz nie przypięty; jest przypięty do złego kierunku; badany ruch jest IPv6, a filter jest `family inet`; wcześniej działa inny term; filter nie został zainstalowany w PFE; test wykorzystuje RE-originated ping zamiast faktycznego tranzytu.
+
+Dlatego w monitoringu rozdziel trzy pytania. Czy obiekt istnieje w konfiguracji? Czy jest przypisany do **tego interfejsu, tej jednostki i tej family**? Czy urządzenie rzeczywiście wykonało przetwarzanie dla świeżo wywołanego pakietu?
+
+**Urządzenie: EX-CAMPUS-LAB — Operational Mode, przykładowy punkt audytu platformowego**
+
+~~~junos
+show configuration firewall family inet | display set
+show configuration interfaces | display set | match filter
+show firewall
+show interfaces terse
+~~~
+
+Na EX/QFX dodatkowo sprawdź właściwą dla platformy diagnostykę instalacji/kompilacji filtra. Sam `commit complete` nie oznacza, że w ASIC masz wystarczającą liczbę termów i counters dla wymaganego zachowania na wszystkich kierunkach. Dokładne możliwości trzeba dobrać do PFE, wydania i hardware SKU; nie obiecuj jeden-do-jednego zgodności vSRX z EX.
+
+**Środowisko testowe:** wykonaj dwa odczyty counter przed i po wysłaniu trzech kontrolowanych pakietów. Dopiero zmiana delta pozwala łączyć test z faktycznie dopasowanym termem.
+
+### 4. Działa IPv4, lecz IPv6 „znika” po wdrożeniu nowej polityki
+
+To klasyczny pośpiech przy migracji. Inżynier widzi działające `inet.0`, prawidłowe BGP IPv4 i filtr `family inet`. Zakłada, że przeprowadzono ten sam proces dla IPv6. Tymczasem `inet6.0`, `family inet6 unicast`, `firewall family inet6`, ICMPv6 Neighbor Discovery i host firewalls stanowią odrębne elementy.
+
+Na routingu możesz zbudować oddzielną policy z `route-filter 2001:db8:10::/48 exact`, ale nie wprowadzaj jej do IPv4 BGP family. Na dataplane filtrowanie IPv6 nie musi być włączone razem z IPv4. W dodatku nieumiejętne odrzucenie ICMPv6 może zniszczyć ND i rozpoznawanie sąsiadów, co będzie przypominać błędny routing nawet wtedy, gdy IPv6 route jest aktywna.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show route table inet6.0
+show bgp summary
+show configuration protocols bgp | display set
+show configuration firewall family inet6 | display set
+show ipv6 neighbors
+~~~
+
+**Symulowany wniosek:** BGP IPv4 działa, lecz nie skonfigurowano obsługi inet6 unicast i host nie ma poprawnego Neighbor Discovery. Naprawa polega na ustaleniu **którego etapu brakuje**, a nie na przyznaniu „permit all” do firewall filter w nadziei, że IPv6 ruszy.
+
+### 5. BGP route jest aktywna, lecz filtr polityki „odrzucił coś innego”
+
+Nie każdy błąd ma postać braku prefiksu. R1 reklamuje `10.10.10.0/24`. R2 otrzymał trasę i jest aktywna, ale ruch do serwera przez WAN idzie niezgodnie z oczekiwaniem. Jeśli istnieje alternatywna **bardziej szczegółowa** trasa `10.10.10.128/25`, LPM może skierować ruch do serwerów z tego zakresu inną ścieżką niezależnie od tego, czy BGP policy zaakceptowała /24. Routing policy dla /24 nie „przejmuje” pakietów pasujących /25.
+
+Tutaj koniecznie wykonaj trzy odrębne odczyty: candidate route po BGP import; wszystkie active prefixes obejmujące destination; forwarding entry dla konkretnego destination IP. Dopiero potem sprawdzaj uRPF i filters.
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show route 10.10.10.0/24 exact
+show route 10.10.10.128/25 exact
+show route forwarding-table destination 10.10.10.150
+show route receive-protocol bgp 192.0.2.1
+~~~
+
+**Root cause symulowany:** specyficzna /25 ma inną drogę; operator ocenił pakiet tylko na podstawie /24. **Naprawa:** popraw projekt lub konfigurację /25, nie zmieniaj bez potrzeby eksportu /24.
+
+---
+
+## Jak wygląda produkcyjny MOP dla zmiany polityki?
+
+Gdybyś projektował nową lokalizację enterprise albo prowadził change na aktywnym WAN edge, powinieneś traktować import/export i interface filters jak zmiany potencjalnie krytyczne dla całej lokalizacji. Dobrą metodą jest zapisanie przed oknem serwisowym: pełnej listy prefiksów, właściciela każdego prefixu, dozwolonego AS, oczekiwanego kierunku, numeru interfejsu, typu policy, istniejącej ścieżki return oraz oczekiwanych security zones. Nie wpisuj w ticket sekretów ani prywatnych danych klienta.
+
+Przy **BGP export** warto policzyć liczbę prefiksów obecnie reklamowanych, przygotować explicit whitelist i udowodnić zarówno wysłanie wymaganych tras, jak i niewysłanie nieautoryzowanych. W czasie zmiany włączaj tylko jeden logiczny etap, porównuj received/advertised routes na obu końcach, a po zmianie wykonaj test transitu z hosta. Przy **import** ostrożność powinna być jeszcze większa: niechcący odrzucona default route może odciąć całą lokalizację, chociaż sam BGP pozostanie Established.
+
+Przy **firewall filter** osobno wpisz test kontrolny allowed traffic, expected denied traffic i obserwowany counter. Nie sprawdzaj tylko IP źródłowego — sprawdź family, protocol, destination, interface unit, input/output i kolejność termów. Szczególnym ryzykiem jest filtrowanie na `lo0`, bo błędny term może odebrać RE BGP, OSPF, NTP lub SSH. Ochrona RE nie powinna być wdrażana bez konsoli/OOB i planu rollback.
+
+Przy **SRX** wymagaj postcheck sesji stateful i właściwego host-inbound; brak transmisji może wynikać z reguł firewall niezależnych od BGP. Ważne jest także rozróżnienie „ping routera do sąsiada” od „aplikacja klienta przez router”: różnią się źródłem i przebywaną ścieżką processingu.
+
+Dopiero na końcu zdecyduj, czy problem należał do control plane (route advertisement/import), route selection (aktywny RIB), dataplane (FIB/ACL/uRPF) czy stateful security flow. Ta decyzja ma wynikać z dowodów, nie z tego, że ostatnio zmieniano BGP.
+
 
 ---
 
