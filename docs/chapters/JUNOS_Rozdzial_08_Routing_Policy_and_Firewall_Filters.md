@@ -538,3 +538,163 @@ Działająca security policy to nie uniwersalne „permit” dla wszystkiego: li
 Na Catalyście zrobiłbyś `show access-lists`, sprawdził ACL na interfejsie i routing w CEF. Na Junos analogiczne pytania realizujesz przez `show firewall filter`, `show configuration interfaces` i `show route forwarding-table`. Dobrze przenosi się **metodologia**, nie nazwy poleceń. A kiedy pracujesz na SRX, dopisz do tej metodologii osobno `security policies`, `security flow session` i `host-inbound-traffic`.
 
 *Źródła: [Firewall Filters Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-overview.html), [Firewall Filter Installation Status](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/display_firewall_filter_installation_status.html), [Security Policies Overview](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html).*
+
+---
+
+## 8.10. uRPF — kiedy router sprawdza nie dokąd, lecz skąd pakiet przyszedł [A]
+
+Dotąd rozmawialiśmy głównie o adresie docelowym. Router patrzy na destination IP i szuka drogi do następnego hopa. Tymczasem pewnego dnia monitoring pokazuje pakiety przychodzące od operatora z adresem źródłowym należącym do naszej własnej sieci LAN. To wygląda podejrzanie: dlaczego ktoś z Internetu podaje się za komputer z oddziału?
+
+Tu pojawia się **Unicast Reverse Path Forwarding (uRPF)**. Nie jest protokołem routingu ani kolejną BGP policy. To sposób sprawdzenia wiarygodności **źródła pakietu** na podstawie informacji o drodze powrotnej. Router niejako pyta: „Gdybym chciał wysłać coś do tego adresu źródłowego, którędy powinienem to zrobić?”.
+
+W bardzo prostej sieci odpowiedź często zdradza oszustwo. Jeśli pakiet od źródła 10.10.10.50 przyszedł na WAN, ale droga do sieci 10.10.10.0/24 prowadzi przez lokalny LAN, źródło nie pasuje do oczekiwanej strony sieci.
+
+### Strict — „przyszedłeś właściwymi drzwiami?”
+
+W trybie **strict** uRPF sprawdzenie nie kończy się na samym istnieniu route. W klasycznym modelu interfejs, na którym pakiet się pojawił, musi być zgodny z dopuszczalną drogą zwrotną do jego źródła. To mocna ochrona na łączach, gdzie topologia jest symetryczna i dobrze znana.
+
+### Loose — „czy w ogóle wiem, gdzie jest twoja sieć?”
+
+W trybie **loose** nie wymagamy zgodności interfejsu wejściowego z najlepszą drogą powrotną. Wystarcza właściwa osiągalność źródła według zasad danej implementacji. Jest to mniej restrykcyjna kontrola, przydatna zwłaszcza tam, gdzie pakiety mogą przychodzić inną ścieżką niż droga wybierana przez router w przeciwnym kierunku. Zachowanie trasy domyślnej, routing instances oraz kwalifikacja ścieżek mogą zależeć od platformy i ustawień — nie zakładaj jednego uniwersalnego algorytmu na MX, EX, PTX i vSRX.
+
+Teraz ważny scenariusz z sieci Enterprise. Oddział ma dwóch operatorów: **ISP-A** i **ISP-B**. Z polityk BGP wynika, że najlepsza droga *do źródła* konkretnego pakietu prowadzi przez ISP-A. Sam pakiet jednak przyszedł przez ISP-B. Nie musi to oznaczać ataku; czasem jest to wynik asymetrycznego routingu u operatorów albo świadomej polityki traffic engineering.
+
+Jeśli na ISP-B włączysz strict uRPF bez analizy, możesz zacząć odrzucać zupełnie legalny ruch. Administrator widzi wtedy zdrowe BGP i poprawną trasę do destination, a aplikacje nie działają. Często próbuje naprawić to przez zmianę BGP export, choć problem występuje przy **walidacji źródła otrzymanego pakietu**.
+
+```mermaid
+flowchart TB
+    P["Pakiet od źródła S<br/>przychodzi przez ISP-B"] --> R{"Czy istnieje dopuszczalny<br/>reverse path do S?"}
+    R -->|nie| D["uRPF FAIL"]
+    R -->|tak| M{"Jaki tryb?"}
+    M -->|loose| L["PASS według reguł loose"]
+    M -->|strict| Q{"Czy interfejs wejścia<br/>jest dopuszczalnym reverse path?"}
+    Q -->|tak| A["PASS"]
+    Q -->|nie| D
+```
+
+*Rysunek 8.7. Tekst alternatywny: pakiet przychodzi z ISP-B; router sprawdza route powrotną do źródła. Loose dopuszcza istnienie odpowiedniej ścieżki, strict dodatkowo porównuje dopuszczalny interfejs powrotu z ingress. Schemat autorski, celowo pomija platformowe warianty ECMP/feasible paths.*
+
+### Konfiguracja: najpierw sprawdź model, potem składnię
+
+Nie będziemy udawać, że vSRX zawsze zachowa się tak jak MX z konkretnym Trio PFE. W Junos istnieją warianty konfiguracji `rpf-check`, m.in. przy interfejsie logicznym w rodzinie `inet`. Dostępność trybów, akcji na błędzie, współpraca z filter-based forwarding i obsługa ECMP wymagają potwierdzenia w dokumentacji konkretnego modelu i release.
+
+**MX-EDGE-LAB — Configuration Mode, schemat strict uRPF na wspieranym urządzeniu**
+
+~~~junos
+set interfaces ge-0/0/0 unit 0 family inet rpf-check
+~~~
+
+**MX-EDGE-LAB — Configuration Mode, alternatywny wariant loose, nie stosuj równocześnie z poprzednim**
+
+~~~junos
+set interfaces ge-0/0/0 unit 0 family inet rpf-check mode loose
+~~~
+
+**MX-EDGE-LAB — Operational Mode, weryfikacja przy problemie z ruchem z 10.30.30.10**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+show route 10.30.30.10
+show route forwarding-table destination 10.30.30.10
+show interfaces ge-0/0/0 extensive
+~~~
+
+Po pierwszej komendzie potwierdź, na którym interfejsie włączono ochronę. Po dwóch kolejnych — jak wygląda route do **źródła**, nie tylko do destination. Czwarta pomaga ocenić interfejs i dostępne statystyki. Jeżeli platforma wystawia dedykowane liczniki uRPF, odczytaj je według CLI Reference dla tego urządzenia. Nie oczekuj, że wszędzie ta sama nazwa licznika i to samo wyświetlanie będą dostępne.
+
+Junos ma również warianty korzystające z **active-paths** i **feasible-paths**, dzięki którym ocena dozwolonej drogi powrotnej może uwzględniać inne ścieżki niż pojedyncza aktywna. Nie włączaj ich przez zgadywanie: to decyzja projektowa zależna od topologii i modelu zagrożeń. W niektórych implementacjach interakcja uRPF z FBF i routing instances sprawia, że nawet zaawansowany inżynier musi sprawdzić szczegółowy dokument platformy.
+
+**Most z Cisco:** intuicja `ip verify unicast source reachable-via rx` odpowiada strict, a `reachable-via any` luźniejszej kontroli. Nie są to jednak gwarantowane odpowiedniki jeden do jednego przy ECMP, default route, VRF i szczegółach hardware.
+
+*Źródła: [Understanding Unicast RPF (Routers)](https://www.juniper.net/documentation/us/en/software/junos/security-services/topics/topic-map/interfaces-configuring-unicast-rpf.html), [rpf-check CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/rpf-check-edit-interfaces.html), [unicast-reverse-path](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/unicast-reverse-path-edit-routing-options.html).*
+
+---
+
+## 8.11. Od pomysłu do bezpiecznej zmiany — cały dzień pracy z policy i filtrami [A]
+
+Nauka Junos nie kończy się wtedy, gdy potrafisz wpisać komendę. Kończy się wtedy, gdy potrafisz wprowadzić zmianę, udowodnić, że zadziałała, i bezpiecznie wrócić do stanu poprzedniego, jeżeli coś pójdzie nie tak.
+
+Wyobraźmy sobie, że dostałeś ServiceNow Change. Wymaganie jest proste: „Do partnera WAN ma być reklamowany tylko LAN-A, a komputery w LAN-A nie mogą wysyłać ruchu ze źródła spoza firmowej adresacji”. Mamy dwa cele. Chcemy kontrolować **informacje o trasach BGP** i **pakiety wchodzące z LAN**. Gdy połączysz je w jedno ogólne zadanie „skonfigurować filtering”, łatwo zapomnisz o osobnych testach.
+
+### Krok pierwszy: zanim dotkniesz konfiguracji
+
+Najpierw pytasz: co dziś działa? Sprawdzasz istniejące BGP, aktywne trasy i reklamy, definicje oraz miejsca przyłożenia filtrów, security zones i policy na SRX. Zapytaj siebie: **które urządzenie ma podjąć decyzję?** Dla export odpowiada R1; dla import odpowiada R2; dla pakietu wchodzącego na LAN R1 — filtr przypięty do odpowiedniego ingress.
+
+**R1-vSRX — Operational Mode, pre-check do zmiany**
+
+~~~junos
+show version
+show interfaces terse
+show bgp summary
+show route 10.10.10.0/24 exact extensive
+show route advertising-protocol bgp 192.0.2.2
+show configuration protocols bgp | display set
+show configuration policy-options | display set
+show configuration firewall | display set
+show configuration interfaces ge-0/0/2 | display set
+show security zones
+show security policies
+~~~
+
+Zanim napiszesz nową policy, obejrzyj też wszystkie **istniejące punkty odniesienia** do obiektów. Nazwa wspólnego `policy-statement` może być używana przez więcej niż jednego peera lub proces. Zmiana tego obiektu „tylko dla R2” może nieoczekiwanie zmodyfikować zachowanie kilku sąsiadów naraz. Dla bezpiecznej zmiany często lepiej stworzyć nową, jasno nazwaną politykę i podpiąć ją tylko tam, gdzie trzeba.
+
+### Krok drugi: przewiduj wynik przed commit
+
+Jeżeli dodasz na końcu policy `then reject`, spodziewasz się konkretnej rzeczy: żadna niezaakceptowana wcześniej kwalifikowana trasa nie będzie wyeksportowana. Jeżeli dodasz filtr `LAN-IN` z `BLOCK-SPOOF`, spodziewasz się wzrostu licznika po celowo nieprawidłowym pakiecie, ale nie po zwykłym ping z PC-A.
+
+Zapisz takie przewidywania w MOP *przed zmianą*. To nie biurokracja: po wdrożeniu będziesz miał jasne kryterium sukcesu i od razu wykryjesz, że testowałeś nie ten kierunek albo nie ten prefix.
+
+### Krok trzeci: wykorzystaj candidate config i bezpieczny rollback
+
+Junos daje nam ogromną przewagę operacyjną: konfigurację kandydacką, porównywanie diff i commit z możliwością automatycznego cofnięcia. Nie traktuj tych narzędzi jak obowiązkowego rytuału, lecz jak części planu diagnostycznego. Na odizolowanym labie, z kontrolą konsoli, zmianę konfiguracji możesz aktywować warunkowo.
+
+**R1-vSRX — Operational Mode, wejście do konfiguracji**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode, po wprowadzeniu zaplanowanych zmian**
+
+~~~junos
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Tu zatrzymaj się i wykonaj zaplanowane **post-checki**. Nie uruchamiaj automatycznie kolejnego `commit check`, gdy `commit confirmed` już oczekuje: w Junos taka czynność może potwierdzić oczekującą zmianę. W tym czasie powinny dziać się **testy operacyjne**, nie mechaniczne ponawianie walidacji składni.
+
+**R1-vSRX — Operational Mode, po warunkowym wdrożeniu**
+
+~~~junos
+show bgp summary
+show route advertising-protocol bgp 192.0.2.2
+show route 10.10.10.0/24 exact
+show firewall filter LAN-IN
+show security flow session summary
+~~~
+
+Jeżeli wyniki są zgodne z przewidywaniem i wykonano test ruchu, potwierdź zmianę. Jeśli nie — pozostaw mechanizm cofania lub wróć do znanej konfiguracji zgodnie z procedurą i dostępnością sesji. Nigdy nie opieraj rollbacku zmian w zarządzaniu na SSH, które sam możesz właśnie odciąć.
+
+**R1-vSRX — Configuration Mode, tylko po pomyślnym post-check**
+
+~~~junos
+commit
+~~~
+
+### Krok czwarty: dowód dodatni i dowód ujemny
+
+NOC często sprawdza wyłącznie, że po zmianie działa ping. To za mało dla whitelisty. Potrzebujemy dwóch rodzajów dowodu:
+
+**Dodatni:** oczekiwany prefiks LAN-A jest reklamowany, R2 go przyjął, właściwa trasa jest aktywna, a ruch zgodny z wymaganiem przechodzi.
+
+**Ujemny:** nieautoryzowany prefiks **nie** jest reklamowany, a spoofed packet powoduje wzrost właściwego licznika odrzucenia. Bez tego druga połowa wymagań biznesowych pozostaje nieprzetestowana.
+
+Należy również rozróżnić „brak w `advertising-protocol`” od „R2 nie odebrał”. Gdy brak na wysyłającym R1, szukasz problemu eksportu albo kwalifikacji trasy. Gdy R1 reklamuje, a R2 nie ma aktywnej trasy, badanie przechodzi na odbiór, import, hidden status i wybór ścieżki. Brak aplikacji mimo poprawnego BGP kieruje nas do dataplane, filtrów, security sessions i return path.
+
+### Krok piąty: pokaż wynik tak, by kolejny dyżurny nie zgadywał
+
+Dobry work note po zmianie nie brzmi „BGP checked, looks fine”. Brzmi: „R1 direct 10.10.10.0/24 active; R1 advertising-protocol to 192.0.2.2 includes /24 and excludes 198.51.100.0/24; R2 route /24 active; PC-A ↔ PC-B traffic passed; spoof source caused LAN-IN SPOOFED counter increase; commit confirmed finalized”. To jest zestaw dowodów, a nie ocena nastroju administratora.
+
+W następnym rozdziale OSPF i późniejszym BGP użyjemy tej samej dyscypliny. Zmieni się protokół, nie metoda myślenia.
+
+*Źródła: [Junos CLI Configuration Workflow](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-cli-configuration.html), [Routing Policies and Firewall Filters Guide](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-firewall-filters-comparison.html).*
