@@ -144,7 +144,7 @@ show arp
 
 **Gotcha Cisco → Junos:** `show route` może pokazywać wiele tras do jednego prefiksu. Nagłówek `destinations` ≠ `routes`, a gwiazdka `*` na pozycji active ma znaczenie. **`show route | count` liczy linie outputu, a nie prefiksy** — ten błąd wyjaśniliśmy w rozdziale 3. `show route hidden` pozwala zobaczyć trasy ukryte, np. wskutek policy, a nie tylko zwycięzcę procesu wyboru. Dokumentacja: [show route](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route.html), [show route hidden](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-hidden.html).
 
-**Pytanie instruktora:** masz trasę `198.51.100.0/30` w `inet.0`, a ruch nie dochodzi. Co zrobisz? Sprawdzisz, czy jest aktywna, jak rozwiązany jest next-hop, czy poprawna jest tablica (np. `mgmt_junos.inet.0`), a na SRX dodatkowo sesję i security policy. **Nie zatrzymuj się na „route exists”.**
+**Pytanie instruktora:** masz trasę `10.12.0.0/30` w `inet.0`, a ruch nie dochodzi. Co zrobisz? Sprawdzisz, czy jest aktywna, jak rozwiązany jest next-hop, czy poprawna jest tablica (np. `mgmt_junos.inet.0`), a na SRX dodatkowo sesję i security policy. **Nie zatrzymuj się na „route exists”.**
 
 ### 5.1.5. RE, procesy i pamięć: czy CPU 90% musi znaczyć DDoS?
 
@@ -1196,7 +1196,7 @@ Pamiętasz z Cisco rozróżnienie CoPP/traffic to device vs transit? Na SRX szcz
 
 ~~~junos
 show interfaces terse
-show route 203.0.113.10
+show route 198.51.100.10
 show arp
 show security flow session summary
 show security flow session
