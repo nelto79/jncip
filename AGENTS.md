@@ -20,7 +20,7 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 4. labs/ch02-four-vsrx/CODEX_TASK.md — kryteria implementacji i walidacji.
 5. labs/ch03-cli-change-management/README.md — lab z dwiema sesjami administratorów, konsolą i kontrolowanym commit confirmed; status PLANNED, dopóki nie ma rzeczywistych testów.
 6. labs/ch04-initial-config/README.md — nowy izolowany lab z vSRX, Linux bastion i services (NTP, syslog, SNMPv3, SCP, AAA opcjonalnie), status PLANNED.
-7. labs/ch05-operational-monitoring/README.md — nowy izolowany 2×vSRX+2×VPCS lab fault injection, status PLANNED.
+7. labs/ch05-operational-monitoring/README.md — DIAMOND 4×vSRX+2×VPCS, pełna kompatybilność z rozdziałem 5.9, status PLANNED; poprzednia topologia 2×vSRX zachowana w docs/archive.
 
 ## Obowiązkowa topologia DIAMOND w rozdziałach JNCIP
 
