@@ -4,7 +4,7 @@
 
 Powiązanie: [Rozdział 2 — Junos OS Fundamentals](../../docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md) oraz [Unified Blueprint](../../docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md).
 
-**Wspólne źródło prawdy dla całego kursu:** [DIAMOND — 4 vSRX + 2 VPCS, wszystkie CIDR i loopbacki](../reference-diamond-4vsrx-2vpcs/README.md). Ten rozdział jest scenariuszem lekcyjnym, a plik referencyjny definiuje stałą topologię.
+**Wspólne źródło prawdy dla całego kursu:** [diagram DIAMOND w Mermaid — 4 vSRX + 2 VPCS, adresacja IP/CIDR i loopbacki](../reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) oraz [kanoniczna tabela adresacji](../reference-diamond-4vsrx-2vpcs/README.md). Ten rozdział jest scenariuszem lekcyjnym, a dokumenty referencyjne definiują stałą topologię.
 
 
 ## 1. Cel
