@@ -13,7 +13,9 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 2a. docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md — pełny rozdział 3 (3.1–3.11), warstwa CLI/candidate/commit/load/rollback/J-Web. Nie zastępuj streszczeniem i nie przenoś wszystkich gotchas na koniec.
 2b. docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md — pełny rozdział 4 (4.1–4.14 oraz 4.15 LAB), Cisco ↔ Junos, AAA, NTP, SNMPv3, syslog, archival, traceoptions, rescue.
 2c. docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md — pełny rozdział 5 (5.1–5.8 oraz 5.9 LAB), workflow diagnostyki i maintenance, interface counters/DOM, show/monitor, ping/source/VRF, upgrade, reboot/halt i root recovery.
-3. labs/ch02-four-vsrx/README.md — specyfikacja pierwszego większego labu.
+3. **labs/reference-diamond-4vsrx-2vpcs/README.md — KANONICZNA topologia diamentowa: 4 vSRX + 2 VPCS, wszystkie interfejsy, CIDR i loopbacki /32. Nie zmieniaj ich w kolejnych rozdziałach bez jawnego wariantu.**
+3a. labs/reference-diamond-4vsrx-2vpcs/CODEX_GCP_EVE_NG_PROMPT.md — instrukcja wdrożenia na EVE-NG/GCP, bez ingerencji w istniejące laby.
+3b. labs/ch02-four-vsrx/README.md — specyfikacja pierwszego większego labu.
 4. labs/ch02-four-vsrx/CODEX_TASK.md — kryteria implementacji i walidacji.
 5. labs/ch03-cli-change-management/README.md — lab z dwiema sesjami administratorów, konsolą i kontrolowanym commit confirmed; status PLANNED, dopóki nie ma rzeczywistych testów.
 6. labs/ch04-initial-config/README.md — nowy izolowany lab z vSRX, Linux bastion i services (NTP, syslog, SNMPv3, SCP, AAA opcjonalnie), status PLANNED.
@@ -39,6 +41,7 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 - Nie commituj obrazów QCOW2/OVA, backupów, haseł, kluczy, adresów produkcyjnych, tokenów, zrzutów sesji.
 - Zastosuj commit check oraz bezpieczne commit confirmed w konfiguracjach testowych, jeśli konsola jest dostępna.
 - Nie uruchamiaj wszystkich czterech vSRX na niewystarczającym hoście; przeprowadź capacity check.
+- Pułapka failoveru: pojedyncza awaria R1–R2 przy statycznym routingu nie gwarantuje poprawnej drogi zwrotnej z R4; do testu działającego failoveru w baseline izoluj cały górny korytarz R1–R2 i R2–R4. Zdalne loopbacki nie są automatycznie osiągalne bez routingu.
 - Weryfikuj, że mapowanie interfejsów EVE rzeczywiście odpowiada fizycznym interfejsom danych Junos. vSRX może mieć oddzielny port zarządzający.
 
 ## Pierwszy lab
