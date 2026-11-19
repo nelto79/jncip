@@ -1203,3 +1203,619 @@ Na egzaminie i w pracy ważna jest zdolność rozpoznania, kiedy problem leży w
 
 ---
 
+## 9.16. [LAB] Multi-area OSPF z błędem sąsiedztwa i routing policy.
+
+### 9.16.1. Umowa laboratoryjna: tu dowodzimy mechanizmu, nie tylko zgodności składni
+
+**Cel:** zbudować trzy obszary OSPF pomiędzy czterema vSRX, uruchomić OSPFv2 i OSPFv3, zademonstrować role ABR, prefiksy intra/inter-area, rozwiązywanie next-hop, security flow, następnie świadomie wywołać dwa rodzaje problemu: (1) brak adjacency przez błędne Area ID i (2) poprawne Full, lecz zniknięcie międzyobszarowego prefiksu po policy. Dodatkowo wprowadzimy external Type 5, następnie przełączymy typ Area 20 na stub, a po zakończeniu przywrócimy bazowy stan.
+
+**Status:** GENERATED / STATIC TEXT REVIEW ONLY; **NOT RUNTIME VALIDATED**. Konfiguracje nie były weryfikowane przez działające Junos CLI. Zaproponowane adresy **10.9.0.0/16** i **2001:db8:9::/48** są wyłącznie izolowane i przykładowe. W EVE-NG nie używaj bridge do produkcyjnego LAN ani management Cloud. **Nie nadpisuj laboratoriów rozdziałów 2–5.**
+
+**Plan połączeń:** cztery vSRX w linii, dwa hosty Linux. R2 i R3 są ABR; Area 10 jest po lewej, Area 0 w środku, Area 20 po prawej. R3 zostanie później ASBR do ćwiczenia z external prefix.
+
+~~~mermaid
+flowchart LR
+ PA["PC-A Linux\n10.9.101.10 / 2001:db8:9:101::10"] ---|"LAN-A"| R1["R1-vSRX\nInternal Area 10"]
+ R1 ---|"Area 10\n10.9.12.0/30\n2001:db8:9:12::/64"| R2["R2-vSRX\nABR 10/0"]
+ R2 ---|"Area 0\n10.9.23.0/30\n2001:db8:9:23::/64"| R3["R3-vSRX\nABR 0/20"]
+ R3 ---|"Area 20\n10.9.34.0/30\n2001:db8:9:34::/64"| R4["R4-vSRX\nInternal Area 20"]
+ R4 ---|"LAN-B"| PB["PC-B Linux\n10.9.104.10 / 2001:db8:9:104::10"]
+~~~
+
+**Interpretacja:** to **trzy niezależne L2 segmenty WAN** i dwa L2 segmenty LAN. Zapis area na łączu oznacza obszar OSPF, nie dodatkowy VLAN. Każdy link jest dedykowany, dlatego w OSPF stosujemy **interface-type p2p** i nie oczekujemy DR/BDR. R1 i R4 są internal routers; R2 i R3 są Area Border Routers.
+
+**Minimalna platforma:** cztery vSRX z odpowiednimi vCPU/RAM i aktualną licencją trial/lab według warunków producenta oraz dwa hosty Linux. Przed uruchomieniem wykonaj capacity check. vSRX może mieć osobny **fxp0/management** oraz kolejność wirtualnych NIC inną niż zakładamy. **Nie konfiguruj portów na podstawie samego numeru adaptera w EVE.** Najpierw sprawdź **show interfaces terse**, MAC i połączenia. Nazwy **ge-0/0/1.0** i **ge-0/0/2.0** w dokumentacji są planem logicznym do dostosowania, nie gwarancją dla każdego obrazu.
+
+### 9.16.2. Adresacja — wydrukuj tę tabelę przed uruchomieniem
+
+| Router | Interfejs / połączenie | IPv4 | IPv6 | OSPF Area |
+|---|---|---|---|---|
+| R1 | ge-0/0/1 → R2 | 10.9.12.1/30 | 2001:db8:9:12::1/64 | 10 |
+| R1 | ge-0/0/2 → PC-A | 10.9.101.1/24 | 2001:db8:9:101::1/64 | 10 passive |
+| R1 | lo0.0 | 10.9.1.1/32 | 2001:db8:9::1/128 | 10 passive |
+| R2 | ge-0/0/1 → R1 | 10.9.12.2/30 | 2001:db8:9:12::2/64 | 10 |
+| R2 | ge-0/0/2 → R3 | 10.9.23.1/30 | 2001:db8:9:23::1/64 | 0 |
+| R2 | lo0.0 | 10.9.2.2/32 | 2001:db8:9::2/128 | 0 passive |
+| R3 | ge-0/0/1 → R2 | 10.9.23.2/30 | 2001:db8:9:23::2/64 | 0 |
+| R3 | ge-0/0/2 → R4 | 10.9.34.1/30 | 2001:db8:9:34::1/64 | 20 |
+| R3 | lo0.0 | 10.9.3.3/32 | 2001:db8:9::3/128 | 0 passive |
+| R4 | ge-0/0/1 → R3 | 10.9.34.2/30 | 2001:db8:9:34::2/64 | 20 |
+| R4 | ge-0/0/2 → PC-B | 10.9.104.1/24 | 2001:db8:9:104::1/64 | 20 passive |
+| R4 | lo0.0 | 10.9.4.4/32 | 2001:db8:9::4/128 | 20 passive |
+| PC-A | eth0 → R1 | 10.9.101.10/24 | 2001:db8:9:101::10/64 | host |
+| PC-B | eth0 → R4 | 10.9.104.10/24 | 2001:db8:9:104::10/64 | host |
+
+**Router IDs:** R1 10.255.0.1, R2 10.255.0.2, R3 10.255.0.3, R4 10.255.0.4. Nie pomyl RID z adresem lo0.0: w tym labie są różne, aby udowodnić, że Router ID jest identyfikatorem protokołu, a nie wymaganym adresem transportowym.
+
+### 9.16.3. Precheck i ratunkowy punkt odniesienia
+
+Każdy vSRX uruchom z nowego, izolowanego szablonu. Nie zakładamy factory-default status quo, bo dostawca obrazu lub wcześniejsze prace mogły zmienić security zones, NAT, interface family czy management. Zrób odczyt **przed** zmianami i zachowaj w bezpiecznej lokalizacji poza repo wszystkie ewentualne prywatne dane.
+
+**Urządzenie: R1-vSRX — Operational Mode (powtórz na R2, R3, R4)**
+
+~~~junos
+show version
+show chassis hardware
+show interfaces terse
+show interfaces extensive ge-0/0/1
+show interfaces extensive ge-0/0/2
+show configuration interfaces | display set
+show configuration security | display set
+show configuration protocols | display set
+show system storage
+show system commit
+~~~
+
+Przed wykonaniem następnego kroku spisz odpowiednik ge dla każdego linku, w szczególności port rzeczywiście połączony do sąsiada. W razie niezgodności zmień **wszystkie** odniesienia w komendach poniżej — adresy IPv4/IPv6, OSPF i host-inbound. Dla bezpiecznego rollback korzystaj z **commit confirmed 5**, odrębnej konsoli i snapshotu stanu. Nie modyfikuj routingu management przez przypadek.
+
+### 9.16.4. Zbuduj warstwę L3, nie uruchamiając jeszcze OSPF
+
+**Cel:** sprawdzić, czy sąsiednie interfejsy mają właściwe adresy i czy pakiety lokalne przechodzą. Konfiguracja zawiera tylko przypisanie portów i loopbacków; nie robi jeszcze routing advertisements.
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+set routing-options router-id 10.255.0.1
+set interfaces ge-0/0/1 unit 0 family inet address 10.9.12.1/30
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:9:12::1/64
+set interfaces ge-0/0/2 unit 0 family inet address 10.9.101.1/24
+set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:9:101::1/64
+set interfaces lo0 unit 0 family inet address 10.9.1.1/32
+set interfaces lo0 unit 0 family inet6 address 2001:db8:9::1/128
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R2-vSRX — Configuration Mode**
+
+~~~junos
+set routing-options router-id 10.255.0.2
+set interfaces ge-0/0/1 unit 0 family inet address 10.9.12.2/30
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:9:12::2/64
+set interfaces ge-0/0/2 unit 0 family inet address 10.9.23.1/30
+set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:9:23::1/64
+set interfaces lo0 unit 0 family inet address 10.9.2.2/32
+set interfaces lo0 unit 0 family inet6 address 2001:db8:9::2/128
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+set routing-options router-id 10.255.0.3
+set interfaces ge-0/0/1 unit 0 family inet address 10.9.23.2/30
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:9:23::2/64
+set interfaces ge-0/0/2 unit 0 family inet address 10.9.34.1/30
+set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:9:34::1/64
+set interfaces lo0 unit 0 family inet address 10.9.3.3/32
+set interfaces lo0 unit 0 family inet6 address 2001:db8:9::3/128
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R4-vSRX — Configuration Mode**
+
+~~~junos
+set routing-options router-id 10.255.0.4
+set interfaces ge-0/0/1 unit 0 family inet address 10.9.34.2/30
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:9:34::2/64
+set interfaces ge-0/0/2 unit 0 family inet address 10.9.104.1/24
+set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:9:104::1/64
+set interfaces lo0 unit 0 family inet address 10.9.4.4/32
+set interfaces lo0 unit 0 family inet6 address 2001:db8:9::4/128
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Weryfikacja przed OSPF:** każdy router powinien mieć lokalne direct/local routes dla swoich portów, a sąsiednie routery powinny się pingować po adresach **on-link**. Jeśli ICMP do samego SRX nie działa, najpierw skonfiguruj local-inbound z następnego punktu, zanim uznasz za winny L2. Dla IPv6 sprawdź IPv6 interface family, link-local i ND.
+
+### 9.16.5. Zdefiniuj minimalną izolowaną politykę SRX
+
+Tu często kończy się szablon Cisco, a zaczyna praktyka Junos. vSRX jest stateful firewallem; sama trasa nie otwiera ruchu do samego RE ani tranzytu. Dla **wyłącznie izolowanego LAB** wszystkie interfejsy danych umieszczamy w jednej strefie **LAB** i tworzymy świadomą jawnie dopuszczającą politykę **LAB→LAB**. Nie należy kopiować jej do produkcji. Dla protokołu OSPF host-bound pozwalamy na **ospf** i **ospf3** na portach router-router; dla testów do interfejsu lokalnego dopuszczamy ICMP ping.
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf3
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match source-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match destination-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match application any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY then permit
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R2-vSRX — Configuration Mode**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf3
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic protocols ospf
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic protocols ospf3
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match source-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match destination-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match application any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY then permit
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf3
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic protocols ospf
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic protocols ospf3
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match source-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match destination-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match application any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY then permit
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R4-vSRX — Configuration Mode**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf3
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match source-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match destination-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY match application any
+set security policies from-zone LAB to-zone LAB policy LAB-ONLY then permit
+commit check
+commit confirmed 5
+~~~
+
+**Gotcha:** jeżeli port był już przypisany do innej security-zone, **commit check** zgłosi konflikt albo przeniesienie wymaga punktowego usunięcia starego przypisania. W takim przypadku nie wykonuj ślepo globalnego **delete security zones** — odczytaj baseline i rozwiąż konflikt **tylko dla danego labu**. W środowisku produkcyjnym ta policy typu **any-any** byłaby nieakceptowalna bez uzasadnienia i kompensujących kontroli.
+
+**Urządzenie: R2-vSRX — Operational Mode (analogicznie na pozostałych)**
+
+~~~junos
+show configuration security zones | display set
+show security zones
+show security policies
+show configuration security nat | display set
+~~~
+
+Jeżeli zachowały się legacy NAT rules, mogą one zmieniać flow mimo poprawnego OSPF. W izolowanym nowym labie źródłowa konfiguracja nie powinna zawierać reguł NAT obejmujących ten ruch. **Nie kasuj NAT globalnie w cudzym labie.** 
+
+### 9.16.6. Uruchom OSPFv2 i OSPFv3 — oddzielne bazy, ta sama fizyczna topologia
+
+Konfiguracje są symetryczne po stronie danego linku. Loopback i LAN występują jako **passive**, aby ich prefiksy były widoczne w odpowiednim obszarze bez Hellos. Wszystkie aktywne linki otrzymają koszt 10.
+
+**Urządzenie: R1-vSRX — Configuration Mode**
+
+~~~junos
+set protocols ospf area 0.0.0.10 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf area 0.0.0.10 interface ge-0/0/1.0 metric 10
+set protocols ospf area 0.0.0.10 interface ge-0/0/2.0 passive
+set protocols ospf area 0.0.0.10 interface lo0.0 passive
+set protocols ospf3 area 0.0.0.10 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf3 area 0.0.0.10 interface ge-0/0/1.0 metric 10
+set protocols ospf3 area 0.0.0.10 interface ge-0/0/2.0 passive
+set protocols ospf3 area 0.0.0.10 interface lo0.0 passive
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R2-vSRX — Configuration Mode**
+
+~~~junos
+set protocols ospf area 0.0.0.10 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf area 0.0.0.10 interface ge-0/0/1.0 metric 10
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 interface-type p2p
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 metric 10
+set protocols ospf area 0.0.0.0 interface lo0.0 passive
+set protocols ospf3 area 0.0.0.10 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf3 area 0.0.0.10 interface ge-0/0/1.0 metric 10
+set protocols ospf3 area 0.0.0.0 interface ge-0/0/2.0 interface-type p2p
+set protocols ospf3 area 0.0.0.0 interface ge-0/0/2.0 metric 10
+set protocols ospf3 area 0.0.0.0 interface lo0.0 passive
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf area 0.0.0.0 interface ge-0/0/1.0 metric 10
+set protocols ospf area 0.0.0.0 interface lo0.0 passive
+set protocols ospf area 0.0.0.20 interface ge-0/0/2.0 interface-type p2p
+set protocols ospf area 0.0.0.20 interface ge-0/0/2.0 metric 10
+set protocols ospf3 area 0.0.0.0 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf3 area 0.0.0.0 interface ge-0/0/1.0 metric 10
+set protocols ospf3 area 0.0.0.0 interface lo0.0 passive
+set protocols ospf3 area 0.0.0.20 interface ge-0/0/2.0 interface-type p2p
+set protocols ospf3 area 0.0.0.20 interface ge-0/0/2.0 metric 10
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R4-vSRX — Configuration Mode**
+
+~~~junos
+set protocols ospf area 0.0.0.20 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf area 0.0.0.20 interface ge-0/0/1.0 metric 10
+set protocols ospf area 0.0.0.20 interface ge-0/0/2.0 passive
+set protocols ospf area 0.0.0.20 interface lo0.0 passive
+set protocols ospf3 area 0.0.0.20 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf3 area 0.0.0.20 interface ge-0/0/1.0 metric 10
+set protocols ospf3 area 0.0.0.20 interface ge-0/0/2.0 passive
+set protocols ospf3 area 0.0.0.20 interface lo0.0 passive
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Postcheck przed potwierdzeniem commit:** na R1 powinien istnieć R2 Full zarówno OSPFv2, jak i OSPFv3; na R2 — R1 i R3; na R3 — R2 i R4; na R4 — R3. Liczba neighbors w każdej instancji protokołu to odpowiednio 1/2/2/1, a nie cztery pełne sąsiedztwa na każdym routerze. Po potwierdzeniu statusu i smoke tests wykonaj zwykłe **commit** w trybie konfiguracji na każdej konsoli, aby zatwierdzić commit-confirmed.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show ospf neighbor
+show ospf3 neighbor
+show ospf database
+show ospf3 database
+show ospf route
+show ospf3 route
+show route 10.9.104.0/24 exact
+show route table inet6.0 2001:db8:9:104::/64 exact
+~~~
+
+**Interpretacja:** 10.9.104.0/24 i 2001:db8:9:104::/64 powinny być **inter-area** z perspektywy R1, z następnym hopem przez R2. Jeżeli R1 widzi je jako **direct**, pomylono przypisanie adresów lub podłączono nieoczekiwany port. Jeśli brak trasy, idź po kolei przez R2 i R3. Upewnij się też, że Type 3 / inter-area prefix LSA rzeczywiście dotarło do R1, zamiast sprawdzać tylko lokalne Router LSA.
+
+### 9.16.7. Skonfiguruj PC-A i PC-B: test tranzytu, nie tylko ping z routera
+
+Dla IPv6 wybieramy Linux, ponieważ nie każda wersja VPCS w EVE zapewnia wygodne, identyczne funkcje IPv6. Na hoście użyj nazwy NIC rozpoznanej przez **ip link**, nie zawsze będzie to eth0.
+
+**Urządzenie: PC-A-Linux — Shell (świeży izolowany host, do dostosowania NIC)**
+
+~~~bash
+sudo ip address add 10.9.101.10/24 dev eth0
+sudo ip route add default via 10.9.101.1
+sudo ip -6 address add 2001:db8:9:101::10/64 dev eth0
+sudo ip -6 route add default via 2001:db8:9:101::1
+ip address show dev eth0
+ip route
+ip -6 route
+~~~
+
+**Urządzenie: PC-B-Linux — Shell**
+
+~~~bash
+sudo ip address add 10.9.104.10/24 dev eth0
+sudo ip route add default via 10.9.104.1
+sudo ip -6 address add 2001:db8:9:104::10/64 dev eth0
+sudo ip -6 route add default via 2001:db8:9:104::1
+ip address show dev eth0
+ip route
+ip -6 route
+~~~
+
+Używamy adresów dokumentacyjnych **2001:db8::/32**, nigdy routowalnych publicznie. Jeżeli Linux ma już inny default z DHCP, nie dokładaj bezmyślnie kolejnego; sprawdź istniejący **ip route** i izolację segmentu. Na SRX możesz potrzebować jawnej polityki dla tranzytu, którą skonfigurowano w 9.16.5.
+
+**Urządzenie: PC-A-Linux — Shell**
+
+~~~bash
+ping -c 5 10.9.104.10
+ping -6 -c 5 2001:db8:9:104::10
+traceroute -n 10.9.104.10
+tracepath -6 2001:db8:9:104::10
+ip neigh show
+ip -6 neigh show
+~~~
+
+**Oczekiwany wynik:** IPv4 i IPv6 powinny przechodzić PC-A→R1→R2→R3→R4→PC-B oraz z powrotem. Traceroute może nie pokazać wszystkich hopów, jeśli system/flow nie generuje odpowiednich odpowiedzi ICMP, ale końcowy ping jest głównym testem aplikacyjnej drożności. Przy braku pingu **nie zmieniaj automatycznie OSPF**: sprawdź ARP/ND na LAN, security flow, route w obu kierunkach, lokalny firewall Linux i błędy adresacji.
+
+### 9.16.8. Eksperyment A — urwij backbone przez pomylenie Area ID
+
+**Cel:** stworzyć błąd, którego prosty ping między sąsiadami nie musi wykryć.  
+**Stan początkowy:** R2–R3 OSPFv2 Full, OSPFv3 Full; PC-A ping do PC-B działa.  
+**Fault injection:** zmień tylko konfigurację OSPFv2 R2 ge-0/0/2.0 z Area 0 na Area 10; **nie ruszaj IPv4 adresów, L2, OSPFv3 ani security**.
+
+**Urządzenie: R2-vSRX — Configuration Mode**
+
+~~~junos
+delete protocols ospf area 0.0.0.0 interface ge-0/0/2.0
+set protocols ospf area 0.0.0.10 interface ge-0/0/2.0 interface-type p2p
+set protocols ospf area 0.0.0.10 interface ge-0/0/2.0 metric 10
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show ospf neighbor
+show ospf interface detail
+show ospf3 neighbor
+show route 10.9.104.0/24 exact
+ping 10.9.23.2 source 10.9.23.1 count 3
+~~~
+
+**Przewidywanie:** IPv4 on-link ping między R2 i R3 może nadal działać, ale OSPFv2 adjacency R2–R3 nie powinna się zestawić z powodu mismatch Area ID. **OSPFv3 pozostaje Full**, więc dual-stack objawy są rozdzielone. Zdalne IPv4 prefixy mogą zniknąć, a IPv6 nadal działa. Jeśli masz **statyczny** alternate route, obserwuj aktywne źródło — nie zakładaj, że trasa całkowicie zniknie.
+
+**Diagnoza:** porównaj **show ospf interface detail** na obu końcach, zobacz Area ID, dopiero potem logi.  
+**Root cause:** niesymetryczne area na tym samym linku.  
+**Naprawa:** jeśli **commit confirmed** jeszcze trwa, pozwól mu się cofnąć lub wykonaj rollback odpowiednio do sesji. Alternatywnie jawnie usuń Area 10 i przywróć Area 0:
+
+**Urządzenie: R2-vSRX — Configuration Mode (jawna naprawa)**
+
+~~~junos
+delete protocols ospf area 0.0.0.10 interface ge-0/0/2.0
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 interface-type p2p
+set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 metric 10
+commit check
+commit
+~~~
+
+**Postcheck:** ponownie Full na R2–R3 dla IPv4; Type 3 z Area 20, droga do 10.9.104.0/24 i host-host IPv4 powinny wrócić. Zapisz przed i po: neighbor state, liczbę LSA i aktywny next-hop.
+
+### 9.16.9. Eksperyment B — neighbor Full, ale wybrane Type 3 nie dociera
+
+**Cel:** zobaczyć różnicę między routing policy dotyczącą summary a awarią linku.  
+**Stan początkowy:** Full wszędzie, Area 20 normal, brak stub/NSSA, normalne międzyobszarowe trasy.  
+**Fault injection:** zastosuj na ABR R3 politykę **network-summary-export** do Area 20. Dopuść tylko 10.9.101.0/24, odrzuć resztę.
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+set policy-options policy-statement CH09-TYPE3 term ALLOW from route-filter 10.9.101.0/24 exact
+set policy-options policy-statement CH09-TYPE3 term ALLOW then accept
+set policy-options policy-statement CH09-TYPE3 term REST then reject
+set protocols ospf area 0.0.0.20 network-summary-export CH09-TYPE3
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R4-vSRX — Operational Mode**
+
+~~~junos
+show ospf neighbor
+show ospf database netsummary area 0.0.0.20
+show route 10.9.101.0/24 exact
+show route 10.9.2.2/32 exact
+show route 10.9.3.3/32 exact
+~~~
+
+**Przewidywanie:** adjacency R3–R4 zostanie Full, lecz reklamy inter-area, których polityka nie akceptuje, mogą zniknąć z Area 20. Szczególnie 10.9.2.2/32 nie musi być osiągalna, mimo że przed chwilą była. Jeśli R4 zna ten prefiks inną drogą, sprawdź dokładnie source trasy i Type 3; sama obecność route nie dowodzi nieskuteczności filtra.
+
+**Root cause symulowanego incydentu:** niechciana, zbyt wąska allow-list summary LSA.  
+**Naprawa:** usuń politykę na ABR, nie zmieniaj OSPF metric na R4.
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+delete protocols ospf area 0.0.0.20 network-summary-export
+delete policy-options policy-statement CH09-TYPE3
+commit check
+commit
+~~~
+
+**Postcheck:** inter-area LSAs i pełen zestaw tras wracają. Ucz się na tym eksperymencie: **Full nie gwarantuje kompletności reklamy prefiksów** i filtr Type 3 może działać bez zmiany stanu neighbor.
+
+### 9.16.10. Eksperyment C — redystrybucja static jako Type 5 i E1/E2
+
+**Cel:** zobaczyć powstawanie external LSA, a następnie różnicę OSPF/10 vs OSPF/150. Na R3 deklarujemy nieprodukcyjny static discard, aby nie tworzyć pozorów prawdziwej sieci serwisowej. Wytworzymy **LSA Type 5**. W realnym designie ASBR musi mieć **rzeczywiście działający forwarding**, nie tylko trasę do discard.
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+set routing-options static route 172.31.90.0/24 discard
+set policy-options policy-statement CH09-EXTERNAL term ONLY-ONE from protocol static
+set policy-options policy-statement CH09-EXTERNAL term ONLY-ONE from route-filter 172.31.90.0/24 exact
+set policy-options policy-statement CH09-EXTERNAL term ONLY-ONE then metric 30
+set policy-options policy-statement CH09-EXTERNAL term ONLY-ONE then external type 1
+set policy-options policy-statement CH09-EXTERNAL term ONLY-ONE then accept
+set policy-options policy-statement CH09-EXTERNAL term REST then reject
+set protocols ospf export CH09-EXTERNAL
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show ospf database external
+show route 172.31.90.0/24 exact extensive
+show ospf route detail
+~~~
+
+**Przewidywanie:** Type 5 z Advertising Router R3 powinien być w normalnych area; trasa będzie external i z default preference **150**. Sprawdź w output rozróżnienie metric/type. Teraz na R3 zamień **then external type 1** na **type 2**, ponownie zweryfikuj LSA i porównaj metrykę OSPF — nie route preference.
+
+**Urządzenie: R3-vSRX — Configuration Mode (zmiana tylko typu external)**
+
+~~~junos
+delete policy-options policy-statement CH09-EXTERNAL term ONLY-ONE then external type 1
+set policy-options policy-statement CH09-EXTERNAL term ONLY-ONE then external type 2
+commit check
+commit confirmed 5
+~~~
+
+**Gotcha:** ping do 172.31.90.5 ma **nie działać** — trasa na ASBR prowadzi do discard. To zaplanowana demonstracja **LSA≠działający transfer danych**, a nie „problem z OSPF”. Na koniec wycofaj konfigurację.
+
+**Urządzenie: R3-vSRX — Configuration Mode (cleanup)**
+
+~~~junos
+delete protocols ospf export CH09-EXTERNAL
+delete policy-options policy-statement CH09-EXTERNAL
+delete routing-options static route 172.31.90.0/24
+commit check
+commit
+~~~
+
+### 9.16.11. Eksperyment D — stub i default-route generation
+
+**Cel:** rozróżnić normal Area 20 od stub, zaobserwować brak Type 5 i sprawdzić default route z ABR.  
+**Stan początkowy:** po usunięciu CH09-EXTERNAL, normal Area 20, IPv4 OSPFv2 Full.  
+**Fault injection:** konwertujemy Area 20 na **stub** po obu stronach; na ABR R3 jawnie ustawiamy **default-metric 10**.
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+set protocols ospf area 0.0.0.20 stub default-metric 10
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R4-vSRX — Configuration Mode**
+
+~~~junos
+set protocols ospf area 0.0.0.20 stub
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R4-vSRX — Operational Mode**
+
+~~~junos
+show ospf neighbor
+show ospf database
+show ospf database netsummary
+show route 0.0.0.0/0 exact
+show route 10.9.101.0/24 exact
+~~~
+
+Oczekujemy Full i default summary do R3, gdy ABR rzeczywiście generuje default zgodnie z opcją. Nie zakładaj obecności default bez sprawdzenia. Konwertowanie obszaru w różnym czasie może chwilowo zerwać sąsiedztwo — dlatego wyłącznie w izolowanym labie.
+
+**Urządzenie: R3-vSRX — Configuration Mode (powrót do normal area)**
+
+~~~junos
+delete protocols ospf area 0.0.0.20 stub
+commit check
+commit
+~~~
+
+**Urządzenie: R4-vSRX — Configuration Mode**
+
+~~~junos
+delete protocols ospf area 0.0.0.20 stub
+commit check
+commit
+~~~
+
+**Postcheck:** stan Full oraz powrót do baseline Type 3 dla sieci Area 10; brak sztucznej trasy default w Area 20, jeśli nie istnieje inne źródło default.
+
+### 9.16.12. Eksperyment E — OSPFv3 z awarią tylko IPv6
+
+**Cel:** sprawdzić, czy wiesz, że „IPv4 działa” nie znaczy „OSPFv3 działa”.  
+**Fault injection:** na R3 usuń pozwolenie **host-inbound-traffic protocols ospf3** na interfejsie ge-0/0/1.0 w kierunku R2, nie dotykając OSPFv2 i adresów IPv6.
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+delete security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf3
+commit check
+commit confirmed 5
+~~~
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show ospf neighbor
+show ospf3 neighbor
+show ospf3 database
+show route table inet6.0 protocol ospf3
+~~~
+
+Oczekujemy, że OSPFv2 będzie nadal Full, natomiast OSPFv3 R2–R3 przestanie utrzymywać prawidłową adjacency po wygaśnięciu stanu. IPv6 host-to-host może zostać przerwane. **Ważna granica:** bieżące dane forwarding mogą przetrwać przez krótką chwilę; nie zakładaj natychmiastowej utraty każdego pakietu.
+
+**Urządzenie: R3-vSRX — Configuration Mode (naprawa)**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic protocols ospf3
+commit check
+commit
+~~~
+
+**Postcheck:** OSPFv3 Full, poprawne inter-area IPv6 routes, ND na właściwych linkach i ping6 PC-A→PC-B.
+
+### 9.16.13. Opcjonalny mini-lab DR/BDR — nie pomyl go z główną topologią
+
+Jeżeli masz wystarczające zasoby, uruchom **oddzielne** trzy-routerowe środowisko R5/R6/R7 podłączone do jednego switcha L2 EVE w Area 0 jako **broadcast**, z unikalnymi Router IDs, różnymi priorities i bez wymuszenia **p2p**. R5 ustaw priority 0, R6 100, R7 10; sprawdź, kto zostaje DR/BDR, a kto DROther. Następnie uruchom kolejność urządzeń inaczej i zobacz niepreempcję wyboru.
+
+Nie dodawaj tych trzech vSRX do istniejącego labu z czterema, jeżeli nie pozwala na to host. **To ćwiczenie opcjonalne, odrębne, nieprzetestowane runtime**, a same porównania stanu DR/BDR są w sekcji 9.5.
+
+### 9.16.14. Dokumentowanie dowodu i kontrolowany cleanup
+
+Wynik labu jest ukończony dopiero wtedy, gdy zachowasz zestaw obserwacji **before / injected fault / after repair**. Wystarczy zapis tekstowy (bez haseł i kluczy) zawierający: wersję vSRX, mapę rzeczywistych interfejsów, neighbor state dla obu wersji OSPF, fragment LSDB z Type 3, RIB dla wybranych prefixów, test PC-A→PC-B, bezpieczeństwo SRX oraz opis zmiany.
+
+**Urządzenie: R2-vSRX — Operational Mode (analogicznie na R1, R3, R4)**
+
+~~~junos
+show ospf neighbor
+show ospf3 neighbor
+show ospf database
+show ospf3 database
+show route protocol ospf
+show route table inet6.0 protocol ospf3
+show security flow session
+show system commit
+~~~
+
+**Zasady cleanup:** nie usuwaj bazowej adresacji/OSPF, jeśli chcesz zachować lab jako punkt startowy do kolejnych rozdziałów. Usuń wyłącznie fault injection (błędne Area ID, Type 3 policy, external discard, stub, czasowe traceoptions, zmiany hello/dead i auth). Jeśli lab jest jednorazowy, usuń cały **nowo utworzony** projekt .unl po wyeksportowaniu obserwacji — nigdy nie usuwaj starszych laboratoriów 2–5. Zapewnij potwierdzenie **commit** po zakończonych commit-confirmed albo świadomy rollback.
+
+### 9.16.15. Kryteria zaliczenia — sprawdź, czy potrafisz przewidzieć, a nie tylko odtworzyć
+
+| Wymaganie | Dowód | Warunek PASS |
+|---|---|---|
+| Topologia i mapowanie NIC | show interfaces + EVE link map | Zgodność portów, brak produkcyjnego bridge |
+| OSPFv2 sąsiedztwa | show ospf neighbor | Liczba i stan Full zgodne z topologią |
+| OSPFv3 sąsiedztwa | show ospf3 neighbor | Oddzielnie Full na tych samych linkach |
+| LSDB / Type 3 | show ospf database | Właściwy ABR reklamy i Area 20/10 |
+| IPv4 inter-area RIB | show route 10.9.104.0/24 | OSPF inter-area przez R2 |
+| IPv6 inter-area RIB | show route table inet6.0 | OSPF3 przez R2 |
+| Ruch tranzytowy | ping PC-A→PC-B IPv4+IPv6 | Ruch w obie strony, security permitting |
+| Fault A | zmiana Area ID | OSPFv2 Down, OSPFv3 niezależne |
+| Fault B | Type 3 filter | Full trwa, wybrany summary znika |
+| Fault C | Type 5 | External LSA i OSPF/150, discard zatrzymuje data plane |
+| Fault D | Stub | Type 5 nie wchodzi, default tylko przy jawnej generacji |
+| Fault E | blokada ospf3 host-inbound | IPv4 i IPv6 kontrolnie różnią się |
+| Cleanup | show configuration + show commit | Baseline bez fault injection |
+
+**Nie zaznaczaj PASS bez rzeczywistego wyniku.** W obecnym opracowaniu wszystkie punkty mają status **PLANNED**. **Static validated** może oznaczać sprawdzony plik tekstowy/strukturę, ale nie udowadnia zestawienia neighbor ani przechodzenia pakietów.
+
+---
+
