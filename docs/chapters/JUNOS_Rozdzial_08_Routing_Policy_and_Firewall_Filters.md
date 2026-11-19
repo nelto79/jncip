@@ -392,3 +392,149 @@ show route advertising-protocol bgp 192.0.2.2
 Czytaj wynik jako dwa różne dowody: pierwszy i drugi testują logikę dopasowania tras w aktualnej tabeli, trzeci dotyczy faktycznego eksportu BGP do peera. Dopiero ich zestawienie może potwierdzić twoją hipotezę.
 
 *Źródła: [Routing Policy Match Conditions](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-match-conditions-in-routing-policy-terms.html), [Walkup for Route Filters](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/walkup-route-filter-policy-option-overview.html), [Understanding Routing Policy Tests](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-testing-routing-policies.html).*
+
+---
+
+## 8.7. Teraz pakiet naprawdę rusza — skąd nagle firewall filter? [A]
+
+Wyobraź sobie, że naprawiliśmy ogłoszenia BGP. R1 i R2 widzą swoje LAN-y, return path istnieje, a oba routery wybierają aktywne trasy. PC-A nadal nie łączy się z serwerem ERP w centrali. Kolega z drugiej zmiany proponuje: „Zmień export policy, może trzeba dopisać port TCP 443”.
+
+Właśnie w tym miejscu rozdział 8 staje się przydatny w prawdziwej pracy. **Port TCP 443 nie należy do decyzji BGP o reklamowaniu prefiksu.** Jeśli routing jest prawidłowy, a konkretne pakiety są odrzucane, musimy zejść z poziomu informacji routingu na poziom ruchu użytkownika.
+
+Routing policy czyta obiekt typu „sieć 10.20.20.0/24 poznana przez BGP, z takimi atrybutami”. **Firewall filter** czyta konkretne pakiety: źródło 10.10.10.10, cel 10.20.20.20, TCP, port 443, ewentualnie inne pola nagłówków i metadane właściwe rodzinie oraz platformie. To dwa odmienne pytania skierowane do dwóch mechanizmów.
+
+Jeśli pracujesz od lat z Catalystami, odruchowo pomyślisz o IPv4 ACL przypisanej na `in` lub `out`. To dobra intuicja na start. Junos firewall filter jest zwykle **stateless**: ocenia dopasowanie bez konieczności pamiętania, czy dany przepływ został wcześniej zainicjowany. Może jednak pełnić więcej funkcji niż zwykły `permit/deny`: liczyć, logować w odpowiednio wspieranym zakresie, klasyfikować CoS, zastosować policer, chronić Routing Engine, a w specjalnym przypadku skierować ruch do innej instancji routingu (filter-based forwarding, który poznaliśmy w rozdziale 7).
+
+### Jedno słowo „firewall” i dwa różne światy
+
+Na routerze MX, switchu EX/QFX albo klasycznym Junos `firewall family inet filter` to konstrukcja stateless. Na SRX istnieją **dodatkowo** stateful `security policies` powiązane ze strefami i mechanizmem flow. Wygląda to jak zmiana tematu, ale dla kogoś ćwiczącego na vSRX jest absolutnie kluczowe.
+
+Załóżmy, że stateless filter na wejściu R1 przepuszcza SYN z PC-A. Czy to automatycznie dowodzi, że SRX pozwoli mu utworzyć sesję do serwera? Nie. SRX może nadal nie mieć odpowiedniej polityki `from-zone LAN to-zone WAN`. Z drugiej strony dopuszczająca `security policy` nie naprawi pakietu odrzuconego przez skuteczny, wcześniej zastosowany stateless filter. Dokładne etapy przetwarzania zależą od platformy i trybu pracy; przy diagnozie nie wyciągamy wniosku o całej ścieżce na podstawie jednego licznika.
+
+```mermaid
+flowchart LR
+    P["PC-A<br/>wysyła TCP SYN"] --> I["R1: interfejs LAN"]
+    I --> F{"Stateless firewall<br/>filter"}
+    F -->|discard| D["Pakiet odrzucony"]
+    F -->|accept| S{"SRX: routing, zones<br/>i security flow"}
+    S -->|deny| D2["Brak dopuszczonej sesji"]
+    S -->|permit| O["R1 przekazuje dalej"]
+```
+
+*Rysunek 8.5. Tekst alternatywny: pakiet z hosta może zostać odrzucony przez stateless filter albo przez stateful security policy SRX. Schemat jest logiczną mapą diagnostyczną, nie uniwersalnym porządkiem wykonania w każdym PFE i trybie SRX. Diagram autorski.*
+
+Szczególnie ważna jest jeszcze jedna różnica. Pakiet **do własnego adresu routera** nie jest tym samym co pakiet **tranzytowy przez router**. Na SRX routing protocol, SSH i ping do samego urządzenia mogą wymagać właściwego `host-inbound-traffic`, podczas gdy sesja użytkownika przechodząca między strefami wymaga odpowiedniej polityki bezpieczeństwa. Dlatego ping R1 do R2 po WAN nie dowodzi, że PC-A potrafi rozmawiać z PC-B.
+
+*Źródła: [Comparison of Routing Policies and Firewall Filters](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-firewall-filters-comparison.html), [SRX Security Policies](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html), [SRX Security Zones](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/topic-map/security-zone-configuration.html).*
+
+---
+
+## 8.8. Pierwszy stateless filter — jak zatrzymać podszywający się komputer i nie zablokować całego LAN-u [A]
+
+Spróbujmy zbudować filtr z konkretnym zadaniem, zamiast poznawać od razu listę wszystkich match conditions.
+
+Do interfejsu LAN R1 jest podłączona wyłącznie sieć 10.10.10.0/24. Zespół bezpieczeństwa zauważył, że jeden z testowych komputerów potrafi wysyłać pakiety z nieprawidłowym adresem źródłowym 203.0.113.10. Jeśli taki pakiet pojawi się na wejściu LAN, chcemy go zablokować i policzyć. **Zwykły ruch z LAN-A nadal ma działać.**
+
+Nie zaczynamy od składni. Najpierw ustalamy warunek: jeśli źródło pakietu znajduje się w 203.0.113.0/24, uruchom `discard` i zwiększ licznik `SPOOFED`. Jeśli pakiet nie pasuje, pozwól mu przejść przez filtr, aby dalsze etapy — routing i ewentualna security policy — podjęły swoje decyzje. Ten drugi warunek musi być jawny, bo **domyślny koniec zwykłego stateless firewall filter odrzuca pakiety bez dopasowania**.
+
+**R1-vSRX — Configuration Mode, filtr na interfejsie LAN po potwierdzeniu mapowania NIC**
+
+~~~junos
+set firewall family inet filter LAN-IN term BLOCK-SPOOF from source-address 203.0.113.0/24
+set firewall family inet filter LAN-IN term BLOCK-SPOOF then count SPOOFED
+set firewall family inet filter LAN-IN term BLOCK-SPOOF then discard
+set firewall family inet filter LAN-IN term ALLOW-REMAINDER then count OTHER-PACKETS
+set firewall family inet filter LAN-IN term ALLOW-REMAINDER then accept
+set interfaces ge-0/0/2 unit 0 family inet filter input LAN-IN
+~~~
+
+Zauważ różnicę w porównaniu z routing policy. Miejsce definicji to `firewall family inet`, a nie `policy-options`. Dopasowanie to **source-address pakietu**, a nie `route-filter` prefiksu z RIB. I wreszcie filter podpinamy do konkretnego **punktu przepływu**, czyli tutaj `input` na logicznym interfejsie `ge-0/0/2.0`.
+
+Dla EX/QFX/MX konkretne punkty przyłożenia i możliwości sprzętowe zależą od rodziny, ASIC, kierunku oraz `family`. W przykładzie zakładamy vSRX i *zweryfikowane* mapowanie EVE-NG; nie kopiuj nazwy `ge-0/0/2` do swojego labu, jeśli interfejs LAN ma inny numer. Także na vSRX pozostałe zasady security flow nadal obowiązują.
+
+### Dlaczego ostatni term jest tak ważny?
+
+Przewidź, co stałoby się z normalnym pakietem od PC-A, gdybyśmy usunęli `ALLOW-REMAINDER`. Nie pasuje on do `BLOCK-SPOOF`, więc filtr sprawdza następny term. Następnego termu jednak nie ma. Na końcu zwykłego firewall filter jest **implicit discard**. Rezultat: normalny ruch również może zostać utracony.
+
+A teraz druga, mniej intuicyjna sytuacja. Administrator mówi: „Zostawię `then count` w pierwszym termie, żeby tylko zliczać pakiety, a pod spodem dodam `then discard`”. Brzmi rozsądnie, ale **nie jest to bezpieczny sposób tworzenia łańcucha reguł**. W standardowym stateless firewall filter term z `then count`, lecz bez jawnej akcji terminalnej, domyślnie kończy się **accept** dla pasujących pakietów. Taki term może „zasłonić” następny, który nigdy nie zobaczy ruchu.
+
+**R1-vSRX — Configuration Mode, BŁĘDNY przykład wyłącznie do analizy, nie stosować na interfejsie**
+
+~~~junos
+set firewall family inet filter BAD-ORDER term COUNT-ALL then count ALL-PACKETS
+set firewall family inet filter BAD-ORDER term DENY-BLOCKED from source-address 203.0.113.0/24
+set firewall family inet filter BAD-ORDER term DENY-BLOCKED then discard
+~~~
+
+Pierwszy term nie ma `from`, więc dopasowuje wszystko. Ma `count`, ale nie ma jawnego `discard`. W typowej semantyce filtra Junos pasujące pakiety zostaną zliczone i przyjęte. Ostatni term nigdy ich nie zatrzyma. Zdziwiony administrator patrzy na rosnący counter `ALL-PACKETS`, uznaje filtr za aktywny i nie zauważa, że stworzył niezamierzone zezwolenie.
+
+Jeśli naprawdę potrzebujesz liczenia i dalszej oceny termów, użyj świadomie wspieranej konstrukcji `next term` dla odpowiedniej rodziny i platformy, zamiast zakładać, że każdy `count` automatycznie oznacza „continue”. Na Junos Evolved obowiązują dodatkowe ograniczenia dotyczące pozycji `next term`.
+
+```mermaid
+flowchart TD
+  A["Pakiet wpływa do filtra"] --> T1{"Term BLOCK-SPOOF:<br/>source 203.0.113.0/24?"}
+  T1 -->|tak| C["count SPOOFED<br/>discard"]
+  T1 -->|nie| T2["Term ALLOW-REMAINDER:<br/>count OTHER; accept"]
+  C --> D["Koniec: DROP"]
+  T2 --> E["Koniec filtra: PASS"]
+```
+
+*Rysunek 8.6. Tekst alternatywny: odrzucone źródło trafia do licznika SPOOFED i discard, inne pakiety do licznika OTHER i accept. Diagram autorski.*
+
+### Stateless to nie „pozwól na odpowiedź”
+
+Filter nie pamięta połączenia TCP. Jeżeli dopuścisz SYN w jednym kierunku, samo to nie utworzy automatycznej reguły przepuszczającej SYN/ACK w drugim. Na klasycznym routerze albo switchu projektujesz warunki dla odpowiednich kierunków i miejsc filtra. Na SRX stan odpowiedzi może kontrolować oddzielny mechanizm sesji. Nie przenoś więc intuicji z Cisco FTD na `firewall family inet`, ani odwrotnie.
+
+Jest też ważne zagrożenie praktyczne: filtr na `lo0` może chronić Routing Engine, ale błędny term odcinający BGP, OSPF, SSH lub NTP może pogorszyć awarię, zamiast ją naprawić. Nie wprowadzaj takiego filtra zdalnie bez przetestowanego OOB/console i planu rollback. Wersja `family inet` nie rozwiązuje automatycznie filtrowania IPv6; do tego potrzebujesz odpowiedniej `family inet6` i jej punktu zastosowania.
+
+*Źródła: [Stateless Firewall Filter Components](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-components.html), [Firewall Filter Evaluation for EX](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-ex-series-evaluation-understanding.html), [Guidelines for Configuring Firewall Filters](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-stateless-guidelines-for-configuring.html).*
+
+---
+
+## 8.9. Jak znaleźć miejsce, w którym znika pakiet [A]
+
+W naszym oddziale testowy host wysyła nieprawidłowo zaadresowany pakiet. Router R1 ma już filtr `LAN-IN`. Nie chcemy zgadywać, czy działa. Chcemy zobaczyć dowód, że pakiet dotarł do właściwego interfejsu, trafił do oczekiwanego termu, a następnie został odrzucony.
+
+**R1-vSRX — Operational Mode, odczyt konfiguracji i liczników**
+
+~~~junos
+show configuration interfaces ge-0/0/2 | display set
+show configuration firewall family inet filter LAN-IN
+show firewall filter LAN-IN
+show interfaces ge-0/0/2 extensive
+~~~
+
+Pierwsze polecenie potwierdza, czy filter jest faktycznie podpięty do logicznego interfejsu i we właściwym kierunku. Drugie pokazuje kolejność termów. Trzecie — o ile dana implementacja wystawia liczniki w tym widoku — pozwala obserwować `SPOOFED` i `OTHER-PACKETS`. Czwarte daje statystyki interfejsu, ale bez wyciągania pochopnych wniosków: licznik błędów L1 nie jest dowodem odrzucenia przez firewall filter.
+
+A teraz próba kontrolna. Najpierw wysyłamy ruch **dozwolony** z PC-A. Licznik `OTHER-PACKETS` powinien rosnąć, a `SPOOFED` nie. Potem, wyłącznie w odizolowanym labie, testujemy źródło 203.0.113.10 i obserwujemy wzrost `SPOOFED`. Nie musimy przy tym doprowadzić do skutecznego połączenia z serwerem: chcemy wykazać lokalne odrzucenie przez filtr.
+
+Dla EX/QFX przy większych filtrach trzeba uwzględnić **zasoby TCAM/PFE**. Nie wszystkie match conditions i action modifiers są jednakowo wspierane na wszystkich modelach; sam fakt, że przykład istnieje w CLI Reference, nie jest gwarancją jego instalacji na każdym układzie forwarding. Jeśli counter nie rośnie, najpierw sprawdź family, interfejs, kierunek i fizyczną ścieżkę pakietu; dopiero później szukaj problemu z samym termem.
+
+### Krótki przypadek: BGP działa, routing działa, lecz użytkownik nadal nie
+
+Wyobraź sobie teraz trzy wyniki:
+
+- `show route 10.20.20.0/24 exact` na R1 pokazuje aktywne BGP;
+- `show route forwarding-table destination 10.20.20.20` wskazuje właściwy WAN next hop;
+- `show firewall filter LAN-IN` ujawnia rosnący licznik dropów podczas prób PC-A.
+
+Wniosek nie brzmi: „BGP jest zepsuty”. Wniosek brzmi: **mamy dowód, że przynajmniej część pakietów jest odrzucana przed zakończeniem forwarding na R1**. Teraz trzeba potwierdzić, że licznik dotyczy dokładnie testowanego strumienia, a nie równoległego ruchu. W razie potrzeby zbieramy pre/post delta na cichym labie zamiast opierać się na historycznej wartości licznika.
+
+Na vSRX przechodzimy jeszcze jeden poziom. Jeśli filtr dopuszcza pakiet, weryfikujemy `security policies` i stan sesji. Jeśli sesja istnieje i licznik filtrów nie rośnie, sprawdzamy return path, endpoint firewall, NAT oraz przetwarzanie dalszego urządzenia. **Nigdy nie naprawiaj jednego etapu, dopóki nie wiesz, że właśnie w nim występuje usterka.**
+
+**R1-vSRX — Operational Mode, spojrzenie na stateful forwarding**
+
+~~~junos
+show security policies from-zone LAN to-zone WAN
+show security flow session source-prefix 10.10.10.10
+show security flow session summary
+show route 10.20.20.0/24 exact
+~~~
+
+Działająca security policy to nie uniwersalne „permit” dla wszystkiego: liczą się źródło, cel, strefy, kierunek inicjacji, application i realnie dopasowana reguła. Zwróć też uwagę, że sesje w SRX mogą zachowywać się inaczej niż nowo inicjowany ruch po zmianie konfiguracji. Testuj **nowe połączenie** i aktualną politykę.
+
+### Przenosimy tę lekcję do świata Cisco
+
+Na Catalyście zrobiłbyś `show access-lists`, sprawdził ACL na interfejsie i routing w CEF. Na Junos analogiczne pytania realizujesz przez `show firewall filter`, `show configuration interfaces` i `show route forwarding-table`. Dobrze przenosi się **metodologia**, nie nazwy poleceń. A kiedy pracujesz na SRX, dopisz do tej metodologii osobno `security policies`, `security flow session` i `host-inbound-traffic`.
+
+*Źródła: [Firewall Filters Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-overview.html), [Firewall Filter Installation Status](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/display_firewall_filter_installation_status.html), [Security Policies Overview](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html).*
