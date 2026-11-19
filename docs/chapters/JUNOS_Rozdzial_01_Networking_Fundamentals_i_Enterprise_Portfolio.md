@@ -21,6 +21,36 @@ Nie traktuj tabel poniżej jak cennika. **Żaden opis rodziny nie zastępuje spr
 
 ---
 
+## Wspólna topologia szkoleniowa DIAMOND — obowiązująca adresacja
+
+**Źródło prawdy:** [DIAMOND — Mermaid + pełne adresy obu końców każdego łącza](../../labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) oraz [tabela interfejsów i loopbacków](../../labs/reference-diamond-4vsrx-2vpcs/README.md). Diagram poniżej jest ten sam we wszystkich rozdziałach — **4×vSRX + 2×VPCS, sześć segmentów**.
+
+```mermaid
+flowchart LR
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
+```
+
+To jest **stały punkt odniesienia dla przykładów IPv4, ARP, bram, longest-prefix match i przekazywania pakietów** w całym podręczniku. Gdy PC-A (`192.0.2.10/24`) wysyła dane do PC-B (`198.51.100.10/24`), źródłową bramą jest R1 `192.0.2.1`, a docelową R4 `198.51.100.1`; trasy pośrednie biegną przez R2 albo R3. **Diagramy doboru switchy EX, warstw access/distribution/core, Wi-Fi oraz BOM pozostają odrębnymi projektami fizycznymi**: sam vSRX nie jest wiarygodnym modelem ASIC/PoE/VC.
+
+---
+
 ## 1.1. Router czy switch? Zacznij od roli, a nie od obudowy [A]
 
 Na rysunku małego biura masz 48 laptopów, drukarki, AP i telefony. Chcesz, żeby wszystkie urządzenia w jednym VLAN-ie mogły przekazywać ramki bez pytania o trasę IP przy każdym hopie — to przełączanie **Layer 2** na podstawie MAC. Gdy laptop w VLAN 20 chce połączyć się z serwerem w VLAN 30, potrzebujesz decyzji **Layer 3**: bramy, trasy, a potem odpowiedniego local next-hop.
@@ -103,6 +133,8 @@ show ipv6 neighbors
 W Greenfield HLD zapisz jasno, które segmenty mają dual-stack, gdzie działają RA/SLAAC/DHCPv6 i jak NAC/firewall traktują IPv6. **IPv6 wymaga osobnego planu bezpieczeństwa**, nawet jeśli aplikacje używają jeszcze tylko IPv4.
 
 ## 1.7. Subnetting i supernetting — oszczędność IP to nie jedyny cel [A]
+
+**Policz to na naszym DIAMOND.** Połączenie R1–R2 to `10.12.0.0/30`: network `.0`, R1 `10.12.0.1`, R2 `10.12.0.2`, broadcast `.3`. Tak samo dla `10.13.0.0/30`, `10.24.0.0/30` i `10.34.0.0/30`. Dla PC-A mamy `192.0.2.0/24`, bramę R1 `192.0.2.1/24` i host `192.0.2.10/24`. Dla PC-B analogicznie `198.51.100.0/24`, R4 `198.51.100.1/24` i `198.51.100.10/24`. Każdy loopback `lo0.0` jest osobnym `/32` (`10.255.255.1`–`10.255.255.4`). To ćwiczenie pokazuje różnicę między adresem sieci, adresem hosta i route do konkretnego routera.
 
 Wiesz, że /30 daje klasycznie dwa użyteczne adresy w L3 point-to-point, a /31 pozwala oszczędzić przestrzeń na wspieranych platformach. W nowym campuse projektuj jednak adresację tak, by dało się **agregować prefiksy per budynek/site**, ograniczać ilość tras w WAN i stosować czytelne ACL/policies. Dwieście rozsianych po całej korporacji /24 utrudnia późniejszą agregację.
 
