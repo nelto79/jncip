@@ -24,6 +24,10 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 
 ## Obowiązkowa topologia DIAMOND w rozdziałach JNCIP
 
+**Po migracji 2026-11-19** obowiązuje [audyt CH01–CH08](docs/research/DIAMOND_CH01_CH08_MIGRATION_AUDIT_2026-11-19.md). Osiem *głównych* rozdziałów jest w `docs/chapters/JUNOS_Rozdzial_01_...md` do `..._08_...md`; draft `..._08_..._Agent.md` i `..._07_..._v1_ARCHIVE.md` nie są źródłem prawdy. Nie przywracaj dawnych sieci PC-B `192.0.2.11`, bezpośredniego LAN-B na R2, WAN uplink `198.51.100.0/30`, ani labów z Linux UP-A/UP-B w roli urządzeń diamentu.
+
+
+
 - Przy wykładach wykorzystujących kilka routerów (routing statyczny, OSPF, BGP, routing policy, ECMP, troubleshooting) używaj [kanonicznego diagramu Mermaid](labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) i [tabeli adresacji](labs/reference-diamond-4vsrx-2vpcs/README.md) zamiast tworzyć od zera sprzeczne sieci.
 - Identyfikatory w całym kursie: **R1-vSRX, R2-vSRX, R3-vSRX, R4-vSRX, PC-A/VPC1, PC-B/VPC2**. Bazowe segmenty, IP/CIDR, lo0.0 /32 i bramy VPCS są stałe; dla konkretnego ćwiczenia zmieniaj jedynie omawiany routing/policy, a każdy odmienny plan oznacz jako osobny wariant.
 - W tekście przed diagramem postaw problem inżynierski, a po nim opowiedz, którędy płynie pakiet, jak wraca i co zmienia awaria; diagram nie zastępuje dydaktyki.
