@@ -698,3 +698,133 @@ Dobry work note po zmianie nie brzmi „BGP checked, looks fine”. Brzmi: „R1
 W następnym rozdziale OSPF i późniejszym BGP użyjemy tej samej dyscypliny. Zmieni się protokół, nie metoda myślenia.
 
 *Źródła: [Junos CLI Configuration Workflow](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-cli-configuration.html), [Routing Policies and Firewall Filters Guide](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-firewall-filters-comparison.html).*
+
+---
+
+## 8.12. Ta sama policy, trzy różne protokoły: OSPF, IS-IS i BGP [S]
+
+Do tej pory można było odnieść wrażenie, że polityki routingu dotyczą wyłącznie BGP. To dlatego, że BGP bardzo czytelnie pokazuje granicę między informacją przychodzącą a wychodzącą. W Enterprise równie ważne będą jednak OSPF i IS-IS, szczególnie na brzegu pomiędzy siecią kampusową, centrum danych i WAN.
+
+Wyobraź sobie teraz nowy etap naszego projektu. Oddział ma router **R1**, a wewnątrz firmy działa domena OSPF. Zarząd chce, aby zewnętrzny router partnera dowiedział się o sieci aplikacyjnej 10.70.70.0/24, lecz nie otrzymał wszystkich tras statycznych i zarządzających. Pojawia się naturalne pytanie: **który element sieci jest właścicielem tej informacji i kto ma prawo wprowadzić ją do OSPF?**
+
+### OSPF: nie pomyl rozgłaszania topologii z redystrybucją
+
+Najpierw najprostsza sytuacja. R1 ma aktywny interfejs w OSPF area 0. Sąsiad OSPF może dowiedzieć się o stanie tego łącza przez normalne mechanizmy OSPF. Nie potrzebujesz do tego export policy typu „redistribute direct”, aby OSPF zaczął budować własną LSDB.
+
+Teraz zmieniamy scenariusz. R1 ma **trasę statyczną**, której OSPF nie wywodzi ze swojej topologii. Chcemy ją świadomie wprowadzić jako external route. Tu właśnie przydaje się export policy.
+
+**R-OSPF-EDGE — Configuration Mode, odrębny lab z działającym sąsiedztwem OSPF**
+
+~~~junos
+set routing-options static route 10.70.70.0/24 discard
+set policy-options policy-statement REDISTRIBUTE-APP term APPLICATION from protocol static
+set policy-options policy-statement REDISTRIBUTE-APP term APPLICATION from route-filter 10.70.70.0/24 exact
+set policy-options policy-statement REDISTRIBUTE-APP term APPLICATION then metric 50
+set policy-options policy-statement REDISTRIBUTE-APP term APPLICATION then accept
+set policy-options policy-statement REDISTRIBUTE-APP term REST then reject
+set protocols ospf export REDISTRIBUTE-APP
+~~~
+
+Zatrzymajmy się przy jednej pozornie niewinnej linijce. `static route ... discard` tworzy w tym przykładzie **kontrolowany prefix testowy**, który router może posiadać w RIB bez rzeczywistej sieci za nim. To wygodne w izolowanym labie, ale bardzo zły pomysł, jeśli nie rozumiesz konsekwencji: pakiety kierowane do tego prefixu zostaną odrzucone, jeżeli nie ma bardziej szczegółowej trasy. W produkcji wprowadzasz *rzeczywistą, działającą* drogę do aplikacji, a nie sztuczną trasę blackhole tylko po to, żeby OSPF wygenerował LSA.
+
+Co zrobić po konfiguracji? Nie sprawdzaj jedynie, czy polecenie `export` istnieje. Zobacz najpierw aktywny static route, potem sąsiadów OSPF i dopiero wówczas ogłoszone external LSAs.
+
+**R-OSPF-EDGE — Operational Mode, weryfikacja redystrybucji**
+
+~~~junos
+show route 10.70.70.0/24 exact
+show ospf neighbor
+show ospf database external
+show configuration protocols ospf | display set
+~~~
+
+Jeżeli external LSA nie pojawia się, hipotezy dotyczą aktywności static route, poprawności dopasowania policy, procesu OSPF i kontekstu area. Jeżeli sąsiad w ogóle nie istnieje, nie ma sensu zaczynać diagnostyki od zmiany metric w polityce.
+
+#### Dlaczego niektóre import reject w OSPF „nie działają”?
+
+Teraz drugi telefon od administratora: „Chcę usunąć z RIB prefix wewnętrzny OSPF, więc napisałem import policy z `then reject`, ale router ciągle go posiada”.
+
+W normalnym modelu OSPF nie możesz potraktować takiej polityki jak uniwersalnego ACL na dowolną trasę link-state. Junos pozwala wykorzystać OSPF import do pewnych celów, zwłaszcza obsługi **external routes** i priorytetu aktualizacji wybranych prefiksów, ale **reject dla trasy nonexternal może zostać zignorowany**. Producent opisuje to wprost. W ten sposób protokół zachowuje spójność niezbędną dla obliczeń SPF; odmienne decyzje o topologii w różnych routerach mogłyby prowadzić do blackhole.
+
+W tym momencie zaczynasz rozumieć, po co istnieją specjalne mechanizmy między obszarami, agregacja, area types i kontrola external redistribution. Zamiast łamać LSDB import policy, projektujesz właściwy punkt redystrybucji i granice propagacji informacji. Szczegółowa anatomia LSAs i ABR pojawi się w rozdziale 9.
+
+**Most z Cisco:** podobnie jak w Cisco OSPF, redystrybucja `redistribute static` nie jest tym samym co naturalna reklama łączy OSPF. Junos realizuje redystrybucję przez `protocols ospf export POLICY`. Jednak nie zakładaj, że Cisco `distribute-list` ma jeden prosty odpowiednik w dowolnym punkcie OSPF Junos.
+
+*Źródło: [Configuring OSPF Routing Policy](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-routing-policy.html).*
+
+### IS-IS: inny protokół link-state, podobny problem z granicami informacji
+
+Przenieśmy się do kampusu, w którym działa IS-IS Level 1/Level 2. Chcemy wprowadzić do domeny IS-IS tylko wybraną statyczną sieć aplikacyjną. Mechanizm jest znajomy: przygotowujemy nazwany `policy-statement`, a pod `protocols isis` przypinamy go jako export.
+
+**R-ISIS-CORE — Configuration Mode, odrębny przykład na działającym IS-IS**
+
+~~~junos
+set policy-options policy-statement ISIS-APPS term APP from protocol static
+set policy-options policy-statement ISIS-APPS term APP from route-filter 10.80.80.0/24 exact
+set policy-options policy-statement ISIS-APPS term APP then accept
+set policy-options policy-statement ISIS-APPS term REST then reject
+set protocols isis export ISIS-APPS
+~~~
+
+Zwróć uwagę, że tu **nie dodajemy** trasy static ani bazowej konfiguracji IS-IS. Zakładamy, że laboratorium z rozdziału 10 ma aktywny prefix 10.80.80.0/24 i poprawne level, NET, rodziny adresowe oraz interfejsy. Policy nie wytworzy trasy, której nie ma, i nie zestawi za nas adjacency.
+
+**R-ISIS-CORE — Operational Mode, gdzie szukać rezultatu**
+
+~~~junos
+show isis adjacency
+show isis database extensive
+show route 10.80.80.0/24 exact
+show configuration protocols isis | display set
+~~~
+
+Jeśli jesteś zaskoczony obecnością `import` pod IS-IS, to dobrze — w dokumentacji można spotkać starsze opisy, które upraszczały lub negowały praktyczne zastosowania import policy w link-state. **W nowszym Junos istnieje `protocols isis import` (wprowadzony w Junos OS 17.1), z zastosowaniami obejmującymi m.in. kontrolę importu oraz priorytety tras**. Nie oznacza to jednak prawa do dowolnego usuwania tras wewnętrznych z widoku link-state. Producent wprost wskazuje, że `reject` dla non-external IS-IS route może zostać zignorowany. Potwierdź model i wersję zanim użyjesz tej funkcji w produkcji.
+
+To ciekawa różnica między nauką do egzaminu a pracą inżyniera. W pamięci można mieć hasło „IS-IS import/export”. W prawdziwym troubleshooting trzeba wiedzieć **co podlega filtrowaniu, czy instalacja w RIB i spójność LSDB są tym samym oraz jakie ograniczenia ma dane wydanie**.
+
+**Most z Cisco:** podejście z redystrybucją static do IS-IS pozostaje użyteczną analogią; szczegóły Level 1/2, metriki i przechodzenia informacji między poziomami zostawiamy do rozdziału 10.
+
+*Źródła: [import (Protocols IS-IS)](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/import-edit-protocols-isis.html), [Prioritizing IS-IS Routes](https://www.juniper.net/documentation/us/en/software/junos/is-is/topics/example/example-configuring-routing-policy-to-prioritize-isis-routes.html), [Redistributing OSPF Routes into IS-IS](https://www.juniper.net/documentation/us/en/software/junos/is-is/ospf/topics/example/isis-redistributing-ospf-routes.html).*
+
+### BGP: tu granica import/export staje się narzędziem codziennej pracy
+
+W BGP historia wraca do początku rozdziału. R1 ma aktywną LAN-A, a R2 jest sąsiadem eBGP. Na R1 definiujemy **export whitelist**. Na R2 niezależnie od tego możemy stosować **import whitelist**, która pozwoli przyjmować tylko uzgodnione prefiksy. Dlaczego obie strony mogą chcieć własnych reguł? Bo bezpieczeństwo między systemami autonomicznymi nie powinno polegać na założeniu, że partner nigdy się nie pomyli.
+
+**R1-vSRX — Configuration Mode, eksport z oddziału do centrali**
+
+~~~junos
+set policy-options policy-statement WAN-OUT term LAN-A from protocol direct
+set policy-options policy-statement WAN-OUT term LAN-A from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement WAN-OUT term LAN-A then accept
+set policy-options policy-statement WAN-OUT term REST then reject
+set protocols bgp group TO-R2 export WAN-OUT
+~~~
+
+**R2-vSRX — Configuration Mode, odbiór tylko konkretnego prefiksu z oddziału**
+
+~~~junos
+set policy-options policy-statement FROM-R1 term LAN-A from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement FROM-R1 term LAN-A then accept
+set policy-options policy-statement FROM-R1 term REST then reject
+set protocols bgp group TO-R1 import FROM-R1
+~~~
+
+Zauważ dwie ważne rzeczy. Po pierwsze, te polityki są **niezależne**, choć opisują ten sam prefix. Po drugie, BGP może przyjmować policy na różnych poziomach konfiguracji (global, group, neighbor). Trzeba sprawdzić faktycznie obowiązujący kontekst dla konkretnego peera, a nie zakładać, że każdy sąsiad dziedziczy i łączy reguły według dowolnej intuicji.
+
+**R1-vSRX — Operational Mode, dowód wyjścia**
+
+~~~junos
+show bgp summary
+show route advertising-protocol bgp 192.0.2.2
+~~~
+
+**R2-vSRX — Operational Mode, dowód odbioru i użycia**
+
+~~~junos
+show route receive-protocol bgp 192.0.2.1
+show route receive-protocol bgp 192.0.2.1 hidden
+show route 10.10.10.0/24 exact extensive
+~~~
+
+Mamy więc trzy ważne wnioski z tej lekcji. **OSPF** potrafi stosować import/export, ale nie jest to dowolny filtr wewnętrznej LSDB. **IS-IS** ma zbliżone ograniczenia wynikające z charakteru link-state, z różnicami wsparcia zależnymi od wersji. **BGP** szczególnie naturalnie wykorzystuje polityki na granicach wymiany prefiksów i atrybutów. W każdej sytuacji punktem wyjścia powinno być pytanie: *jaki obiekt trasy oceniamy i na którym etapie protokołu?*
+
+*Źródła: [Protocol Support for Import/Export](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-protocol-support-import-export-policies.html), [Basic BGP Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/basic-routing-policies.html).*
