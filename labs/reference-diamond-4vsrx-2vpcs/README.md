@@ -6,27 +6,33 @@ To jest **kanoniczna topologia i adresacja** wspólnych laboratoriów w repozyto
 
 Ważne: wcześniejszy lab [CH02](../ch02-four-vsrx/README.md) używał już tych sześciu prefiksów. Niniejszy dokument **zachowuje je**, jedynie formalizuje cztery nowe loopbacki. To topologia edukacyjna, nie opis wdrożonej instalacji EVE-NG.
 
-## 1. Diagram
+## 1. Diagram Mermaid — pełna adresacja interfejsów i loopbacków
 
-~~~text
-                                  R2-vSRX
-                              lo0: 10.255.255.2/32
-                             /                      \
-                    10.12.0.0/30               10.24.0.0/30
-                           /                          \
-  PC-A (VPC1) --- R1-vSRX                                  R4-vSRX --- PC-B (VPC2)
-  192.0.2.10     lo0: 10.255.255.1/32               lo0: 10.255.255.4/32    198.51.100.10
-                           \                          /
-                    10.13.0.0/30               10.34.0.0/30
-                             \                      /
-                                  R3-vSRX
-                              lo0: 10.255.255.3/32
+**Osobny, gotowy do cytowania diagram:** [DIAMOND_TOPOLOGY.md](DIAMOND_TOPOLOGY.md). Poniższa wersja Mermaid jest jego kopią do szybkiego podglądu na GitHub.
 
-    PC-A--R1: 192.0.2.0/24                 R4--PC-B: 198.51.100.0/24
-    Trasa górna: R1 → R2 → R4              Trasa dolna: R1 → R3 → R4
-~~~
+```mermaid
+flowchart LR
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
 
-Uwaga: **nie ma** łącza R2–R3, R1–R4 ani dodatkowych uplinków. Sześć połączeń jest realizowanych jako sześć izolowanych sieci EVE (dwa segmenty host LAN + cztery segmenty tranzytowe).
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
+```
+
+**Legenda:** Każde łącze podaje prefix segmentu i adresy IP/CIDR obu końców wraz z nazwami interfejsów; w prostokątach routerów znajdują się adresy `lo0.0/32`. Ścieżka preferowana w bazowym labie statycznym przechodzi przez R2, alternatywna przez R3. **Nie ma** połączeń R2–R3 i R1–R4. Wszystkie sześć segmentów jest izolowanych w EVE-NG.
 
 ## 2. Kanoniczna adresacja IPv4 / CIDR i mapowanie portów
 
