@@ -50,6 +50,36 @@ Po nich przejdziesz większe laboratorium **4 × vSRX + 2 × VPCS**, przewidzian
 
 ---
 
+## Wspólna topologia szkoleniowa DIAMOND — obowiązująca adresacja
+
+**Źródło prawdy:** [DIAMOND — Mermaid + pełne adresy obu końców każdego łącza](../../labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) oraz [tabela interfejsów i loopbacków](../../labs/reference-diamond-4vsrx-2vpcs/README.md). Diagram poniżej jest ten sam we wszystkich rozdziałach — **4×vSRX + 2×VPCS, sześć segmentów**.
+
+```mermaid
+flowchart LR
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
+```
+
+W tym rozdziale sprawdzamy na tych samych czterech routerach granice RE, forwarding, ARP i SRX security. Trasa domyślna na R1→R2→R4 jest tylko jedną możliwością; **statyczna pojedyncza awaria R1–R2 nie zapewnia jeszcze spójnej drogi powrotnej z R4**. Dla udanego testu failover odłącz oba łącza górnego korytarza. Adresy loopback są tożsamością routerów, ale zdalne /32 wymagają routingu.
+
+---
+
 ## 2.1. Architektura oprogramowania Junos OS [A]
 
 ### 2.1.1. Problem sprzed rozdzielenia ról: nie każ każdemu samochodowi dzwonić do dyspozytora
@@ -531,6 +561,8 @@ W Junos typowo przygotowujesz **candidate configuration**, sprawdzasz zmiany i d
 ~~~junos
 configure
 set system host-name R1-vSRX
+set interfaces lo0 unit 0 family inet address 10.255.255.1/32
+set routing-options router-id 10.255.255.1
 show | compare
 commit check
 commit confirmed 5
@@ -861,11 +893,7 @@ Wyobraź sobie pytanie instruktora: „R1 zna dwie drogi przez R2 i R3. Czy moż
 
 ### 2.5.1. Kiedy pakiet jest tranzytem?
 
-Załóżmy, że stoi przed Tobą R1 z dwoma sieciami:
-
-- PC-A: 192.0.2.10/24, gateway 192.0.2.1;
-- PC-B: 198.51.100.10/24, gateway 198.51.100.1;
-- R1 łączy obie sieci.
+Załóżmy, że stoi przed Tobą nasz DIAMOND: PC-A `192.0.2.10/24` jest za R1 (`192.0.2.1/24`), PC-B `198.51.100.10/24` jest za R4 (`198.51.100.1/24`), a pomiędzy nimi są dwie drogi: **R1–R2–R4** i **R1–R3–R4**. R1 nie jest bezpośrednią bramą obu LAN-ów.
 
 PC-A chce porozmawiać z PC-B. Adres docelowy **nie należy do R1**. Router powinien przeprowadzić pakiet przez siebie — to **transit traffic**.
 
@@ -890,19 +918,19 @@ To brzmi prosto, ale teraz prześledzimy dokładnie, **co musi się zgadzać**, 
 Możesz to zilustrować tak:
 
 ~~~text
-PC-A                  R1-vSRX                   PC-B
-192.0.2.10       ge-0/0/1  ge-0/0/2        198.51.100.10
-GW 192.0.2.1     192.0.2.1  198.51.100.1 GW 198.51.100.1
-   |                  |           |                |
-   |  L2 DST = R1     |           |                |
-   |  IP DST = PC-B   |           |                |
-   +----------------->|           |                |
-                      |  routing  |                |
-                      |  policy   |                |
-                      |  flow     |                |
-                      +-----------+--------------->|
-                           L2 DST = PC-B            |
-                           IP DST = PC-B            |
+PC-A (192.0.2.10/24)  →  R1 (192.0.2.1/24)
+                               ge-0/0/0.0: 10.12.0.1/30
+                                        ↓  next-hop 10.12.0.2
+                                   R2 (10.12.0.2/30)
+                               ge-0/0/1.0: 10.24.0.1/30
+                                        ↓  next-hop 10.24.0.2
+                                   R4 (10.24.0.2/30)
+                               ge-0/0/2.0: 198.51.100.1/24
+                                        ↓
+                               PC-B (198.51.100.10/24)
+W KAŻDYM hopie zmienia się Ethernet L2 i maleje TTL, ale IP source/dest
+pozostają 192.0.2.10 → 198.51.100.10 (jeśli nie ma NAT).
+Powrót preferowaną ścieżką: PC-B → R4 → R2 → R1 → PC-A.
 ~~~
 
 Nawet prosty ping PC-A → PC-B jest więc małym łańcuchem zależności. **Powód i skutek** są ważniejsze niż mechaniczne wpisywanie komend.
@@ -929,10 +957,10 @@ Na wejściu R1:
 - IP source — 192.0.2.10;
 - IP destination — 198.51.100.10.
 
-Na wyjściu z R1 do sieci PC-B:
+Na wyjściu z R1 w stronę R2 (`ge-0/0/0.0` → `10.12.0.2`):
 
 - L2 source MAC — wyjściowy interfejs R1;
-- L2 destination MAC — MAC PC-B;
+- L2 destination MAC — MAC interfejsu R2 `10.12.0.2`; dopiero R4 ustali na ostatnim odcinku MAC PC-B;
 - IP source — nadal 192.0.2.10;
 - IP destination — nadal 198.51.100.10.
 
@@ -1321,16 +1349,28 @@ Alternatywna:     PC-A → R1 → R3 → R4 → PC-B
 
 ### Obraz topologii: cztery vSRX jako prawdziwe ćwiczenie ścieżek
 
-W przeciwieństwie do powyższej ilustracji Wikimedia tutaj rysujemy już **nasz konkretny lab**. Zielona intuicyjnie „górna” trasa przez R2 jest podstawowa, a „dolna” przez R3 — zapasowa. Zastanów się, **jak zmieni się trasa w R1 i R4, gdy fizycznie zniknie R1–R2**.
+W przeciwieństwie do powyższej ilustracji Wikimedia tutaj rysujemy już **nasz konkretny lab**. Zielona intuicyjnie „górna” trasa przez R2 jest podstawowa, a „dolna” przez R3 — zapasowa. Zastanów się, **jak zmieni się trasa w R1 po zniknięciu R1–R2 i dlaczego R4 może nadal odsyłać odpowiedzi przez R2**. Jeden zerwany link nie gwarantuje poprawnej konwergencji end-to-end przy statycznym routingu.
 
 ~~~mermaid
 flowchart LR
-    PA["PC-A\n192.0.2.10"] --- R1["R1-vSRX"]
-    R1 ---|"10.12.0.0/30 — primary"| R2["R2-vSRX"]
-    R1 ---|"10.13.0.0/30 — backup"| R3["R3-vSRX"]
-    R2 ---|"10.24.0.0/30"| R4["R4-vSRX"]
-    R3 ---|"10.34.0.0/30"| R4
-    R4 --- PB["PC-B\n198.51.100.10"]
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
 ~~~
 
 **Cisco-punkt odniesienia:** myślisz o dwóch statycznych trasach, z których jedna ma wyższy administrative distance (*floating static route*). W Junos do podobnego celu użyjemy podstawowego next-hopu i **qualified-next-hop z inną route preference**. Pamiętaj, że **preferencja Cisco i preferencja Junos nie mają tych samych domyślnych wartości**, a statyczny routing sam nie wykrywa każdej awarii odległego łącza.
@@ -1360,7 +1400,7 @@ Wybieramy następujące łącza:
 
 Adresy 192.0.2.0/24 i 198.51.100.0/24 należą do zakresów dokumentacyjnych RFC 5737. Świadomie izolujemy lab i **nie** projektujemy routingu tych sieci do publicznego Internetu.
 
-Dopiero teraz krótka mapa portów, aby uniknąć zgadywania:
+Dopiero teraz krótka mapa portów, aby uniknąć zgadywania. **Dodatkowo** wszystkie routery mają `lo0.0`: R1 `10.255.255.1/32`, R2 `.2/32`, R3 `.3/32`, R4 `.4/32`, zgodnie z diagramem Mermaid. Zdalne loopbacki nie stają się automatycznie reachable w statycznym baseline:
 
 | Urządzenie | Port 0 | Port 1 | Port 2 |
 |---|---|---|---|
@@ -1458,6 +1498,8 @@ R2 ma dwa łącza: jedno do R1, drugie do R4. Nie musi znać całego Internetu. 
 ~~~junos
 configure
 set system host-name R2-vSRX
+set interfaces lo0 unit 0 family inet address 10.255.255.2/32
+set routing-options router-id 10.255.255.2
 
 set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.2/30
 set interfaces ge-0/0/1 unit 0 family inet address 10.24.0.1/30
@@ -1498,6 +1540,8 @@ R3 z definicji ma być naszą trasą alternatywną, ale to nie oznacza, że w no
 ~~~junos
 configure
 set system host-name R3-vSRX
+set interfaces lo0 unit 0 family inet address 10.255.255.3/32
+set routing-options router-id 10.255.255.3
 
 set interfaces ge-0/0/0 unit 0 family inet address 10.13.0.2/30
 set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.1/30
@@ -1536,6 +1580,8 @@ Pomyśl o R4 jako o bramie do PC-B. Z jednej strony zna LAN-B, z drugiej dostaje
 ~~~junos
 configure
 set system host-name R4-vSRX
+set interfaces lo0 unit 0 family inet address 10.255.255.4/32
+set routing-options router-id 10.255.255.4
 
 set interfaces ge-0/0/0 unit 0 family inet address 10.24.0.2/30
 set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.2/30
