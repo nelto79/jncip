@@ -46,6 +46,36 @@ flowchart LR
 
 ---
 
+## Wspólna topologia szkoleniowa DIAMOND — obowiązująca adresacja
+
+**Źródło prawdy:** [DIAMOND — Mermaid + pełne adresy obu końców każdego łącza](../../labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) oraz [tabela interfejsów i loopbacków](../../labs/reference-diamond-4vsrx-2vpcs/README.md). Diagram poniżej jest ten sam we wszystkich rozdziałach — **4×vSRX + 2×VPCS, sześć segmentów**.
+
+```mermaid
+flowchart LR
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
+```
+
+Wszystkie demonstracje `candidate`, `commit confirmed`, `rollback`, `load set` i `configure private` wykonujemy na **R1-vSRX z tej topologii** albo jego izolowanej kopii. R1 ma uplink do R2 na `ge-0/0/0.0` (`10.12.0.1/30`), uplink do R3 na `ge-0/0/1.0` (`10.13.0.1/30`) i LAN PC-A na `ge-0/0/2.0` (`192.0.2.1/24`). Diagramy procesów konfiguracji i administracji nadal pokazują *workflow*, nie inną sieć fizyczną.
+
+---
+
 ## 3.1. Funkcje CLI i zasady interakcji z systemem [A]
 
 ### 3.1.1. Dlaczego Junos CLI nie przypomina „samego routera z komendami”
@@ -177,8 +207,8 @@ Zobacz najpierw jeden fragment hierarchii. To **przykład struktury**, a nie wyn
 
 ~~~junos
 interfaces {
-    ge-0/0/1 {
-        description "UPLINK-TO-R2";
+    ge-0/0/0 {
+        description "P2P-TO-R2";
         unit 0 {
             family inet {
                 address 10.12.0.1/30;
@@ -188,16 +218,16 @@ interfaces {
 }
 ~~~
 
-`ge-0/0/1` to port fizyczny, `unit 0` to logiczny interfejs, `family inet` określa rodzaj adresowania, a `address` konkretną wartość. Dla Cisco intuicyjnie możesz to porównać do interfejsu z adresem L3, ale **Juniper rozdziela interfejs fizyczny, logiczną jednostkę i family**.
+`ge-0/0/0` to port fizyczny, `unit 0` to logiczny interfejs, `family inet` określa rodzaj adresowania, a `address` konkretną wartość. Dla Cisco intuicyjnie możesz to porównać do interfejsu z adresem L3, ale **Juniper rozdziela interfejs fizyczny, logiczną jednostkę i family**.
 
 Teraz to samo zobaczymy jako polecenia **set**:
 
 **Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
 
 ~~~junos
-set interfaces ge-0/0/1 description "UPLINK-TO-R2"
-set interfaces ge-0/0/1 unit 0 family inet address 10.12.0.1/30
-show interfaces ge-0/0/1
+set interfaces ge-0/0/0 description "P2P-TO-R2"
+set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.1/30
+show interfaces ge-0/0/0
 show | compare
 ~~~
 
@@ -1352,7 +1382,7 @@ sequenceDiagram
 
 ### 3.LAB.1. Dlaczego ten lab potrzebuje dwóch administratorów, a nie czterech routerów?
 
-W rozdziale 2 ćwiczyliśmy topologię diamond 4×vSRX, bo chodziło o ruch i alternatywne ścieżki. Tutaj chodzi o **zarządzanie stanem jednego urządzenia i konflikty operatorów**. Zatem do większości eksperymentów wystarczy jeden vSRX, dwie osobne sesje SSH i niezależna konsola EVE-NG. To nie jest uproszczenie kosztem jakości. To świadome ograniczenie liczby zmiennych.
+W rozdziale 2 ćwiczyliśmy **naszą stałą topologię DIAMOND 4×vSRX + 2×VPCS**. Tu nie zmieniamy żadnego kabla ani CIDR: pracujemy na **konfigurowanym R1-vSRX** (najlepiej w kopii tego samego labu), bo chodzi o ruch i alternatywne ścieżki. Tutaj chodzi o **zarządzanie stanem jednego urządzenia i konflikty operatorów**. Zatem do większości eksperymentów wystarczy jeden vSRX, dwie osobne sesje SSH i niezależna konsola EVE-NG. To nie jest uproszczenie kosztem jakości. To świadome ograniczenie liczby zmiennych.
 
 ~~~mermaid
 flowchart TB
