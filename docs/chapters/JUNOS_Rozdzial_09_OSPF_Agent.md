@@ -971,3 +971,235 @@ Brak sesji może oznaczać blokadę polityki, ruch, który wcale nie dociera, lu
 
 ---
 
+## 9.13. OSPFv2 — koncepcje, działanie, konfiguracja i diagnostyka. [P]
+
+### 9.13.1. OSPFv2 jest protokołem topologii IPv4, ale nie zna całej prawdy o ruchu
+
+Na poziomie Specialist nauczyłeś się włączyć OSPF i rozpoznać Full. Na poziomie Professional trzeba zrobić krok dalej: zobaczyć, jak z konkretnych LSA powstaje ścieżka w RIB, jak weryfikować dopasowanie kosztów i dlaczego zdrowy control plane może prowadzić do czarnej dziury przy błędnej redystrybucji.
+
+W OSPFv2 Router LSA w jednym obszarze, opcjonalne Network LSA od DR i informacje od ABR tworzą bazę, na której działa algorytm SPF. Dijkstra znajduje shortest path tree z perspektywy **danego routera**, a nie „jedną najlepszą ścieżkę dla całej sieci”. To ważne przy asymetrycznych metrykach: R1 może dojść do R4 przez R2, a ruch powrotny z R4 wybrać inny kierunek, ponieważ koszty wyjściowe są liczone z lokalnej perspektywy.
+
+Przypomnijmy ścieżkę preferencji: **intra-area** jest co do zasady lepsza niż **inter-area**, a obie poprzedzają **external** w algorytmie OSPF dla tego samego celu; E1 i E2 mają własne zasady. **Nie myl tego z Junos route preference** OSPF/10 i OSPF external/150, która służy do wyboru między kandydatami w RIB. Prawidłowe przewidywanie drogi wymaga najpierw rozstrzygnięcia przez OSPF, a potem sprawdzenia konkurujących źródeł tras w Junos.
+
+### 9.13.2. Przejdź przez obliczenie, zamiast zapamiętywać jedną metrykę
+
+Rozważ cztery routery w jednym area: R1→R2 cost 10, R2→R4 cost 20, R1→R3 cost 5, R3→R4 cost 40. R4 reklamuje loopback z kosztem 1. Dla R1 droga przez R2 to **10 + 20 + 1 = 31**, droga przez R3 to **5 + 40 + 1 = 46**. Wybieramy R2.
+
+Co, jeśli na R3 zmienimy koszt R3→R4 z 40 na 3? Druga droga kosztuje **5 + 3 + 1 = 9**, więc po rozgłoszeniu odpowiedniego LSA i przeliczeniu SPF R1 może zmienić next-hop na R3. Nie trzeba zmieniać route preference OSPF — cały wybór odbywa się wewnątrz algorytmu OSPF.
+
+~~~mermaid
+flowchart LR
+ R1["R1 root SPF"] -->|10| R2["R2"]
+ R1 -->|5| R3["R3"]
+ R2 -->|20| R4["R4, loopback cost 1"]
+ R3 -->|40 → 3 po zmianie| R4
+~~~
+
+**Interpretacja:** dopóki OSPF reklamy nie zbiegną się w LSDB, nie możesz zakładać, że wszystkie routery jednocześnie zmienią FIB. Konwergencja to proces, nie jedna atomowa operacja w całej domenie.
+
+### 9.13.3. Projekt w sieci Enterprise: OSPF na routed uplinkach i IRB
+
+W firmowym Campus LAN OSPF często działa między distribution/core a WAN edge na interfejsach routowanych, loopbackach (passive) lub określonych IRB. Część sieci dostępu może być czysto L2 i nie mieć OSPF wcale. Każdy dodatkowy segment multiaccess z OSPF to dodatkowa możliwość peeringu i DR election. Dlatego jeżeli dwa urządzenia mają dedykowany routed uplink, **p2p** zwykle upraszcza model.
+
+Na Junos EX/QFX różnice względem vSRX są ważne: sama konfiguracja **protocols ospf** nie wymaga stref security na routerze/switchu bez security flow engine. Na vSRX brak host-inbound może uniemożliwić adjacency. W obu przypadkach trzeba jednak sprawdzić poprawne L3 interfejsy, adresy i licencje/capabilities aktualnej platformy.
+
+**Urządzenie: CORE-EX — Configuration Mode (ilustracja na urządzeniu z IRB)**
+
+~~~junos
+set interfaces irb unit 201 family inet address 10.20.201.1/30
+set protocols ospf area 0.0.0.0 interface irb.201 interface-type p2p
+set protocols ospf area 0.0.0.0 interface irb.201 metric 20
+commit check
+~~~
+
+Jeśli irb.201 istnieje tylko w CLI, ale nie jest poprawnie powiązany z aktywnym VLAN-em/bridge-domain oraz rzeczywistą topologią, OSPF nie zapewni działającego tranzytu. To różnica między **routing configuration** a pełnym designem switchingowym.
+
+### 9.13.4. Co udowadniasz przed uruchomieniem trasy dla klienta?
+
+**Urządzenie: CORE-EX — Operational Mode**
+
+~~~junos
+show ospf interface detail
+show ospf neighbor extensive
+show ospf database
+show ospf route
+show route protocol ospf
+show route forwarding-table
+~~~
+
+Idź w tej kolejności, ale nie ufaj jednemu dowodowi. Przy multi-area analizujesz Type 3 na ABR, a nie oczekujesz Type 1 z każdej zdalnej area w każdym routerze. Przy podejrzeniu problemu z external analizujesz Type 5/7 i położenie ASBR. Na końcu musisz zobaczyć next-hop w routing table i działający ARP dla IPv4. Brak ARP ma znaczenie, gdy next-hop jest on-link, a nie jako uniwersalne kryterium zdrowia OSPF.
+
+**Do przećwiczenia:** przełącz na alternatywną ścieżkę przez zmianę kosztu, policz SPF na kartce, porównaj **show ospf route** ze **show route**, następnie przywróć koszty. To uczy znacznie więcej niż dwukrotne wpisanie „show ospf neighbor”.
+
+---
+
+## 9.14. OSPFv3 — koncepcje, działanie, konfiguracja i diagnostyka. [P]
+
+### 9.14.1. W dual-stack nie wystarczy „te same komendy z IPv6”
+
+OSPFv3 zachowuje filozofię link-state, area, SPF i adjacency, ale zmienia format pakietów, zakres LSA i sposób traktowania prefiksów. Najważniejsze praktyczne różnice dla migracji z Cisco:
+
+- OSPFv3 natywnie wykorzystuje **IPv6 transport**, typowo link-local jako źródło Hello i do next-hop resolution na łączu; sam peering nie wymaga globalnych adresów IPv6 na każdym łączu, ale ich obecność upraszcza LAB i testy.
+- W OSPFv3 pozostaje **32-bitowy Router ID**, niezależnie od wielkości adresu IPv6; dlatego konfigurujemy go jawnie.
+- IPv6 unicast jest domyślną rodziną OSPFv3 w Junos (**inet6.0**); dodatkowe AF wymagają odpowiednich **realms**.
+- LSA Link (8) i Intra-Area-Prefix (9) sprawiają, że „mam adjacency Full” i „mam w inet6.0 oczekiwany prefix” to osobne pytania.
+- OSPFv3 nie korzysta z tej samej prostej struktury authentication header co OSPFv2. Wybór IPsec/odpowiedniego zabezpieczenia kontrolnego musi być zgodny z capabilities i wymaganiami platformy.
+
+~~~mermaid
+flowchart LR
+ I["ge-0/0/1.0, family inet6"] --> H["OSPFv3 Hello z fe80::/10"]
+ H --> N["OSPFv3 neighbor Full"]
+ N --> L["OSPFv3 LSDB: Link + IntraAreaPrefix"]
+ L --> S["SPF + wyliczenie IPv6"]
+ S --> R["inet6.0"]
+ R --> F["IPv6 forwarding / ND"]
+~~~
+
+**Interpretacja:** IPv4 OSPFv2 i IPv6 OSPFv3 mogą mieć **różny stan** na tym samym fizycznym łączu. Włączenie OSPFv2 nie aktywuje automatycznie OSPFv3 i nie zastępuje family inet6.
+
+### 9.14.2. Ta sama topologia, ale osobna konfiguracja
+
+Zakładamy, że R2 i R3 są w Area 0, a interfejsy z 9.9 mają już IPv4. Dokładamy IPv6.
+
+**Urządzenie: R2-vSRX — Configuration Mode**
+
+~~~junos
+set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:9:23::1/64
+set protocols ospf3 area 0.0.0.0 interface ge-0/0/2.0 interface-type p2p
+set protocols ospf3 area 0.0.0.0 interface ge-0/0/2.0 metric 10
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R3-vSRX — Configuration Mode**
+
+~~~junos
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:9:23::2/64
+set protocols ospf3 area 0.0.0.0 interface ge-0/0/1.0 interface-type p2p
+set protocols ospf3 area 0.0.0.0 interface ge-0/0/1.0 metric 10
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+W tym miejscu **host-inbound ospf3** jest równie ważny jak wcześniej OSPFv2 na SRX. Po włączeniu protokołu routery mogą pokazywać sąsiada po **fe80::...**, mimo że operator skonfigurował globalne 2001:db8:9:23::/64. To normalne. Globalny adres IPv6 jest związany z trasami i testami hostów; Hello OSPFv3 nadal używa link-local.
+
+**Urządzenie: R2-vSRX — Operational Mode**
+
+~~~junos
+show interfaces terse ge-0/0/2
+show ipv6 neighbors
+show ospf3 interface detail
+show ospf3 neighbor extensive
+show ospf3 database
+show ospf3 route
+show route table inet6.0
+~~~
+
+Jeśli **show ipv6 neighbors** nie jest obsługiwane w konkretnym Junos, skorzystaj z **show ipv6 neighbors** / pomocy CLI dla release lub z odpowiedniego **show ndp** w danym wydaniu; ten fragment wymaga sprawdzenia na obrazie labu. Odczyt ND jest użyteczny, ale brak wpisu po samym uruchomieniu OSPFv3 nie jest dowodem uszkodzenia protokołu bez obserwacji pakietów i next-hop resolution.
+
+### 9.14.3. Dual-stack failure matrix — jak nie wyciągać fałszywych wniosków
+
+Rozważ cztery kombinacje:
+
+| OSPFv2 IPv4 | OSPFv3 IPv6 | Co wiesz? | Czego nadal nie wiesz? |
+|---|---|---|---|
+| Full | Full | Obie bazy mają adjacencies | Czy właściwe prefiksy, security, FIB i droga powrotna istnieją |
+| Full | Down/none | IPv4 control plane działa | Dlaczego OSPFv3 nie dochodzi: inet6, host-inbound, area/options |
+| Down/none | Full | IPv6 control plane działa | Czy IPv4 link/area/OSPFv2 dostaje Hello |
+| Full | Full, brak prefiksu | Sąsiedztwo nie jest problemem | Czy passive, Type 9, ABR, import/export i RIB są poprawne |
+
+**Szczególny gotcha:** OSPFv3 może reklamować IPv4 przez **realm ipv4-unicast**, więc określenie „OSPFv3 = zawsze wyłącznie IPv6 routes” jest fałszywe. Jednak nie każdy release/model obsługuje każdy dodatkowy realm identycznie, a jego konfiguracja nie jest potrzebna do naszego zwykłego dual-stack LAB. [S12], [S15]
+
+### 9.14.4. Obliczenie IPv6 trasy jest osobną decyzją
+
+R1 ma **2001:db8:9:104::/64** od R4 jako inter-area OSPFv3. W FIB dla inet6.0 router R1 powinien wskazać next-hop powiązany z R2 i właściwym interfejsem wyjściowym. Jeśli IPv6 ping nie działa, to nie musi być problem SPF: mógł nie rozwiązać się NDP, SRX może odrzucić ICMPv6 albo host ma złą bramę domyślną.
+
+**Urządzenie: R1-vSRX — Operational Mode**
+
+~~~junos
+show ospf3 neighbor
+show ospf3 database
+show route table inet6.0 2001:db8:9:104::/64 exact
+ping 2001:db8:9:104::1 source 2001:db8:9:12::1 count 5
+show security flow session
+~~~
+
+**Nota CLI:** składnia polecenia **show route table inet6.0 2001:... exact** oraz **ping ... source** może być dopracowana przez **?** na konkretnym release. Celem jest sprawdzenie wybranego prefiksu w inet6.0, nie routingu IPv4.
+
+---
+
+## 9.15. Routing policy dla IGP — zaawansowane scenariusze. [P]
+
+### 9.15.1. Dwie różne bramki kontrolujące reklamy
+
+Rozdział 8 wyjaśnił silnik Junos policy. Teraz nakładamy go na OSPF i odkrywamy dwa **różne** zastosowania.
+
+**Przypadek pierwszy:** R3 ma static do sieci partnera. Chcemy wprowadzić ją do OSPF, najlepiej jako E1 z kontrolowaną metryką. Używamy globalnego **protocols ospf export POLICY**. Jest to redystrybucja **RIB → external LSA**. Rezultat: ASBR i Type 5 w normalnych obszarach, ewentualnie Type 7 we właściwym NSSA.
+
+**Przypadek drugi:** R3 jako ABR nie chce wpuścić jednej międzyobszarowej sieci biurowej do Area 20. Nie jest to redystrybucja external. Chcemy sterować **network-summary Type 3**. Junos udostępnia specjalne punkty zastosowania **network-summary-export/network-summary-import** (OSPFv2) oraz **inter-area-prefix-export/inter-area-prefix-import** (OSPFv3). **Nie są synonimami** zwykłego OSPF export/import. Producent dokumentuje te operacje osobno. [S23]
+
+~~~mermaid
+flowchart LR
+ S["static/BGP/direct w RIB"] --> EP["protocols ospf export"]
+ EP --> E5["AS-external LSA Type 5 / NSSA Type 7"]
+ A10["Area 10 — trasy internal"] --> ABR["ABR R2"]
+ ABR --> NSP["network-summary-export dla Area 0"]
+ NSP --> A0["Area 0 — wybrane Type 3"]
+~~~
+
+**Interpretacja:** pierwsza gałąź wprowadza **obcą** trasę do domeny; druga steruje **międzyobszarową** informacją OSPF. Nie możesz skutecznie zastąpić Type 3 filtering ogólnym „OSPF import deny” na dowolnym routerze, bo standardowy OSPF import dotyczy external route calculation i nie zmienia flooding LSDB.
+
+### 9.15.2. Polityka dla Type 3 na ABR
+
+R3 bierze udział w Area 0 i Area 20. Chcemy, aby do Area 20 trafiła tylko **10.9.101.0/24** z innych obszarów, ale nie pozostałe inter-area prefiksy. Bezpieczniejsza metoda niż „deny one specific route” w LAB to jawna allow-list plus reject, z pełnym postcheck, bo odrzucenie pozostałych summaries może usunąć również ważne trasy tranzytowe.
+
+**Urządzenie: R3-vSRX — Configuration Mode (wariant diagnostyczny, NIE baseline)**
+
+~~~junos
+set policy-options policy-statement AREA20-SUMMARIES term ALLOW-LAN from route-filter 10.9.101.0/24 exact
+set policy-options policy-statement AREA20-SUMMARIES term ALLOW-LAN then accept
+set policy-options policy-statement AREA20-SUMMARIES term DENY-OTHERS then reject
+set protocols ospf area 0.0.0.20 network-summary-export AREA20-SUMMARIES
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+Przed wprowadzeniem takiej polityki sprawdź, czy R4 nie potrzebuje inter-area tras do backbone loopbacków, serwerów i management. W LAB ona **celowo** pozbawia R4 części informacji, służy do demonstracji. Wycofaj politykę po eksperymencie. Rezultatem powinno być ograniczenie **Type 3 LSA** wysyłanych przez R3 do Area 20, a nie zerwanie adjacency R3–R4. [S23]
+
+**Urządzenie: R4-vSRX — Operational Mode**
+
+~~~junos
+show ospf neighbor
+show ospf database netsummary area 0.0.0.20
+show route 10.9.101.0/24 exact
+show route 10.9.2.2/32 exact
+~~~
+
+Sprawdź, czy **Full** pozostał, czy Type 3 do 10.9.101.0/24 jest obecny, a nieobjęty allow-list loopback 10.9.2.2/32 zniknął. Jeżeli na R4 pozostaje trasa z innego źródła do tego samego prefiksu, filtr może nadal działać, ale sam **show route** nie wystarczy jako dowód — należy porównać LSA i atrybuty trasy.
+
+**Urządzenie: R3-vSRX — Configuration Mode (cleanup)**
+
+~~~junos
+delete protocols ospf area 0.0.0.20 network-summary-export
+delete policy-options policy-statement AREA20-SUMMARIES
+commit check
+commit
+~~~
+
+### 9.15.3. Jeżeli filtrujesz Type 3, możesz zepsuć drogę powrotną
+
+Załóżmy, że serwer w Area 20 wysyła pakiet do klienta w Area 10. Typ 3 do 10.9.101.0/24 jest widoczny, więc pakiet może wyjść. Lecz jeśli po przeciwnej stronie ktoś ukryje 10.9.104.0/24 albo zmieni topologię, odpowiedź z klienta już nie wróci. **Jednostronna kontrola Type 3 nie jest separacją bezpieczeństwa ani ACL.** Przy projektowaniu polityki trzeba sprawdzić oba kierunki, wszystkie ABR oraz ewentualne alternatywne drogi.
+
+Rozwiązanie architektoniczne? W zależności od celu mogą lepsze być osobne VRF/routing instances, route leaking i stateful security controls. OSPF summary filtering jest narzędziem **optymalizacji informacji routingu**, nie sposobem izolowania trust boundaries.
+
+### 9.15.4. Co jest JNCIP, a co już nie należy do tego rozdziału?
+
+Na egzaminie i w pracy ważna jest zdolność rozpoznania, kiedy problem leży w LSDB, area, Type 3/5/7 czy polityce export/import. Dalsze funkcje (LFA, TI-LFA, BFD, graceful restart, NSR/GRES, segment routing, traffic engineering) istnieją i bywają istotne w implementacjach Enterprise/WAN, ale nie udajemy, że wszystkie mają być tu wyczerpująco omówione. Odwołania prowadzą do rozdziałów o HA, routing policy i advanced routing.
+
+**Most z Cisco:** Cisco **area filter-list prefix**, **area range**, **redistribute static route-map** są intuicyjnie sąsiadami tych mechanizmów, ale nie konfigurujemy ich mechanicznie 1:1. W Junos szczególnie ważne jest, czy politykę podpięto **globalnie pod OSPF**, czy **pod konkretną area przy network-summary-export**.
+
+---
+
