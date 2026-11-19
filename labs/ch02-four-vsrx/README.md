@@ -4,6 +4,9 @@
 
 Powiązanie: [Rozdział 2 — Junos OS Fundamentals](../../docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md) oraz [Unified Blueprint](../../docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md).
 
+**Wspólne źródło prawdy dla całego kursu:** [DIAMOND — 4 vSRX + 2 VPCS, wszystkie CIDR i loopbacki](../reference-diamond-4vsrx-2vpcs/README.md). Ten rozdział jest scenariuszem lekcyjnym, a plik referencyjny definiuje stałą topologię.
+
+
 ## 1. Cel
 
 Rozbuduj jedno-routerowe ćwiczenie z podręcznika do topologii, której można używać wielokrotnie. Naucz się w praktyce:
@@ -51,6 +54,8 @@ Uwaga: przy EVE uruchomionym jako VM sprawdź zasoby i nested virtualization. Je
 
 PC-A default gateway: 192.0.2.1. PC-B default gateway: 198.51.100.1. Segmenty 192.0.2.0/24 i 198.51.100.0/24 to prefiksy dokumentacyjne RFC 5737 — **nie używać do Internetu**.
 
+**Loopbacki — standard wspólny dla wszystkich labów:** R1 `lo0.0` **10.255.255.1/32**, R2 **10.255.255.2/32**, R3 **10.255.255.3/32**, R4 **10.255.255.4/32**. Ustaw takie same wartości `routing-options router-id`. W bazowym CH02 z trasami statycznymi nie zakładaj osiągalności loopbacków zdalnych: potrzebne są jawne trasy lub późniejsze OSPF/BGP. Szczegółowa tabela i komendy w [topologii kanonicznej](../reference-diamond-4vsrx-2vpcs/README.md).
+
 ## 4. Routing w wersji bazowej
 
 Użyj tras statycznych, w pełni symetrycznych na poziomie sieci docelowych:
@@ -64,7 +69,7 @@ Użyj tras statycznych, w pełni symetrycznych na poziomie sieci docelowych:
 | R3 | 198.51.100.0/24 | 10.34.0.2 | — |
 | R4 | 192.0.2.0/24 | 10.24.0.1 (via R2) | 10.34.0.1 (via R3) |
 
-W R1/R4 ustaw preferencję primary/backup tak, by normalnie używać R2, a gdy lokalny primary link utraci stan operacyjny — R3. Wyjaśnij, że **zwykła statyczna trasa nie wykryje awarii odległego łącza**, jeśli lokalny next-hop nadal jest osiągalny. Taką awarię odtworzymy później w OSPF lub z RPM/IP monitoring.
+W R1/R4 ustaw preferencję primary/backup tak, by normalnie używać R2, a gdy **lokalny** primary link utraci stan operacyjny — R3. **Uwaga: lokalny wybór backupu nie oznacza automatycznej konwergencji całej sieci.** Jeśli padnie tylko R1–R2, R1 może przełączyć się na R3, ale R4 może nadal wysyłać odpowiedzi do R2 i powstanie blackhole lub problem ze stanem sesji SRX. W scenariuszu *pełnego failoveru* wyłącz oba łącza górnego korytarza (R1–R2 oraz R2–R4); w scenariuszu *pojedynczej awarii* oczekuj diagnostyki problemu, a nie gwarantowanego ping PASS. OSPF, RPM lub inna kontrola reachability to następne etapy szkolenia.
 
 ## 5. SRX security: kontrolowane umożliwienie ruchu
 
@@ -90,7 +95,7 @@ Wartość oczekiwana: PC-A ↔ PC-B działa tylko przy prawidłowym routingu zwr
 
 **LAB-02-05 — Transit blocked by security policy:** celowo zablokuj ICMP forwarding przy zachowaniu host-inbound ping; diagnozuj ruch na wejściu, trasę, session/security. Przywróć stan, nie zostawiaj zablokowanego baseline.
 
-**LAB-02-06 — Preferred path failure:** wyłącz lokalny interfejs R1→R2 lub fizyczny link w EVE, sprawdź przejście na R3 i powrót po naprawie; raportuj ograniczenia tras statycznych i istniejących sesji SRX.
+**LAB-02-06 — Preferred path failure:** (A) w celu potwierdzenia end-to-end failover wyłącz **R1–R2 i R2–R4** i sprawdź, czy obie strony używają R3; (B) wyłącz **tylko R1–R2** i zdiagnozuj możliwy blackhole niespójnej drogi zwrotnej. W obu przypadkach uwzględnij stateful sessions vSRX. Napraw łącza i odtwórz baseline. Nie przedstawiaj (B) jako gwarantowanego PASS.
 
 **LAB-02-07 — Control vs data plane observation:** w bezpieczny sposób obserwuj rpd/mgd/CPU podczas ruchu, bez zabijania procesów albo zrywania sesji zarządzającej.
 
