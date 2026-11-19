@@ -653,3 +653,150 @@ Najpierw \`inet.0\` zna interfejsy i zwykłe trasy. Obok istnieje \`FBF-ALT.inet
 To jest cały mechanizm. Gdy widzisz go jako historię jednej paczki, nazwy \`routing-instances\`, \`rib-groups\` i \`firewall filter\` przestają wyglądać jak losowe trzy sekcje CLI.
 
 *Źródła: [Filter-Based Forwarding Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-option-filter-based-forwarding-overview.html), [Example Configuring FBF](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/example/filter-based-forwarding-example.html), [FBF for EX Series](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/filter-based-forwarding-ex-series.html), [Advanced PBR on SRX](https://www.juniper.net/documentation/us/en/software/junos/application-identification/topics/topic-map/security-application-advanced-policy-based-routing.html).*
+
+---
+
+## 7.7. Troubleshooting: jak znaleźć błędną decyzję, zamiast zmieniać pół konfiguracji [S]
+
+### Incydent: po zmianie PBR działa tylko jeden komputer
+
+Jest wtorek, 10:04. NOC zgłasza nowy problem: PC-A działa przez WAN-B, ale PC-B nagle stracił dostęp do usługi. Ktoś na czacie pisze: „FBF działa, więc może usługa u operatora A padła”. Ktoś inny chce zrobić rollback całego BGP. Ty masz prostszą metodę.
+
+Najpierw ustalasz, **jaki pakiet faktycznie zepsuliśmy**. Oba komputery mają poprawny adres i tę samą bramę. Problem wystąpił po dołożeniu stateless filtra na wejściu OFFICE. PC-A ma pasować do SPECIAL, PC-B nie. Jeśli PC-B zostaje odrzucony, trzeba sprawdzić, czy przypadkiem nie usunięto końcowego \`NORMAL then accept\`. To jest pierwsza rozsądna hipoteza. Ale nie jedyna: może filtr został założony na zły interfejs, normalna tabela utraciła default albo operator A przestał odpowiadać.
+
+Dobra diagnostyka to nie lista dwudziestu komend uruchamianych bezmyślnie. To **kolejne pytania, na które szukasz dowodów**.
+
+### Najpierw ustal wejście pakietu
+
+Czy PC-B rzeczywiście wysyła z 192.0.2.11? Czy brama jest 192.0.2.1? Czy pakiet trafia do \`ge-0/0/1.0\`? Jeśli klient jest w innym VLAN, przez inne IRB albo jego ruch przechodzi wcześniej przez NAT, dopasowanie po source może wyglądać inaczej niż oczekujesz.
+
+**PC-B-LINUX — Linux shell, read-only punkt startowy**
+
+~~~bash
+ip -4 addr show
+ip -4 route
+ping -c 3 192.0.2.1
+~~~
+
+**R1-vSRX — Operational Mode, jaki interfejs i filtr naprawdę działają?**
+
+~~~junos
+show interfaces terse
+show interfaces descriptions
+show configuration interfaces ge-0/0/1 | display set
+show configuration firewall family inet filter OFFICE-FBF | display set
+show system commit
+~~~
+
+Jeśli definicja \`OFFICE-FBF\` istnieje, ale nie jest przypięta do \`family inet filter input\`, to na tym interfejsie nie klasyfikuje pakietów. Jeśli z kolei jest przypięta do niepoprawnego interface unit, możesz analizować zupełnie inny ruch. Widzisz, dlaczego sam \`show configuration firewall\` nie wystarczy.
+
+### Potem sprawdź, z jakiej tabeli router ma skorzystać
+
+Teraz mamy dwa różne przypadki. PC-A pasuje do SPECIAL, więc powinien przejść do \`FBF-ALT.inet.0\`. PC-B powinien korzystać z \`inet.0\`. Jeśli sprawdzisz tylko globalną tablicę, możesz prawidłowo stwierdzić, że WAN-A działa — i całkowicie przegapić brak connected w FBF-ALT.
+
+**R1-vSRX — Operational Mode, dwa konteksty i rozwiązywanie next-hopa**
+
+~~~junos
+show route table inet.0 0.0.0.0/0 exact extensive
+show route table FBF-ALT.inet.0 0.0.0.0/0 exact extensive
+show route table FBF-ALT.inet.0 198.51.100.4/30 exact
+show configuration routing-options rib-groups | display set
+show configuration routing-options interface-routes | display set
+~~~
+
+Pytaj nie tylko „czy trasa istnieje w konfiguracji?”, ale „czy jest aktywna, dokąd prowadzi jej next-hop i czy tabela, z której korzysta pakiet, zna drogę do tego next-hopa?”. Tak rozpoznasz przypadek, w którym zniknęła RIB group, chociaż static default w FBF-ALT nadal wygląda poprawnie.
+
+Na niektórych platformach istnieją specyficzne komendy do przeglądania forwarding table danej instancji. Użyj ich zgodnie z release/CLI Reference. Nie przedstawiaj globalnego \`show route forwarding-table\` jako automatycznego dowodu FBF, bo może pokazywać inny kontekst niż ten, przez który przeszły pakiety PC-A.
+
+**R1-vSRX — Operational Mode, forwarding i kontekst bezpieczeństwa**
+
+~~~junos
+show route forwarding-table destination 203.0.113.10
+show security zones
+show security policies
+show security flow session
+~~~
+
+Jeśli to EX/MX/QFX bez stref SRX, część \`show security\` nie ma zastosowania. Jeśli to vSRX, bardzo możliwe, że właśnie tutaj znajduje się dodatkowy warunek poprawnego przepływu. Nie zmieniaj routingu, dopóki nie ustalisz, czy ruch odrzuca control/filter czy stateful security.
+
+### Trzy krótkie historie z tej samej sieci
+
+**Historia pierwsza: aggregate 10.60.0.0/16 jest aktywny, a aplikacja 10.60.99.25 nie działa.** R1 ma contributors /24, ale ten konkretny adres nie należy do żadnej rzeczywistej sieci. LPM wybiera /16, które domyślnie ma \`reject\`. Ping do adresu może zwrócić unreachable. Poprawną diagnozą nie jest „OSPF przestał działać” — tylko brak bardziej szczegółowej trasy do danego fragmentu summary. Jeśli prefix jest faktycznie potrzebny, trzeba dostarczyć rzeczywistą drogę, nie zmieniać \`reject\` na przypadkowy next-hop.
+
+**Historia druga: PC-A przez WAN-B przestaje działać, PC-B przez A jest zdrowy.** W \`FBF-ALT.inet.0\` zniknęła connected route do 198.51.100.4/30, bo ktoś odpiął RIB group od \`interface-routes\`. BGP i global default są nietknięte. Naprawą jest przywrócenie poprawnej widoczności trasy do next-hopa w secondary RIB, a następnie udowodnienie działania PC-A. Nie trzeba przenosić całego OFFICE do virtual-router.
+
+**Historia trzecia: po skonfigurowaniu \`load-balance per-packet\` WAN-B nadal pokazuje prawie zero ruchu.** W FIB widzisz oba next-hopy, ale testujesz tylko jeden długi TCP transfer, który jest jednym flow. To może być prawidłowy wynik per-flow hashing. Nie ma sensu przełączać łączy ani podnosić drugiej metric tylko po to, by wymusić na routerze „50/50” dla jednego strumienia.
+
+Wszystkie trzy incydenty można podsumować jednym pytaniem: **na którym etapie nastąpiła decyzja, której nie przewidzieliśmy?** Agregat odpowiada na istnienie summary i jego next-hop. RIB group odpowiada na widoczność trasy między tabelami. ECMP odpowiada na liczbę i wykorzystanie forwarding next-hopów. Tych trzech zadań nie naprawia ta sama komenda.
+
+### A jeśli zawiodła generated route?
+
+Mamy \`generate route 10.70.0.0/16\`, zależną od 10.70.10.0/24. Po awarii WAN-A contributor znika, a generated przestaje być aktywna. Operator patrzy tylko na \`show configuration routing-options generate\` i stwierdza: „Konfiguracja jest, system musi być zepsuty”. To klasyczny błąd.
+
+**R1-vSRX — Operational Mode, sprawdzanie przyczyny braku generated**
+
+~~~junos
+show route 10.70.10.0/24 exact extensive
+show route 10.70.0.0/16 exact extensive
+show configuration routing-options generate | display set
+show route protocol aggregate
+show route hidden
+~~~
+
+Pytasz, czy istnieje choć jeden kwalifikujący się, aktywny contributor, czy jego next-hop jest resolved i czy nie ma policy odrzucającej contributora. Przypomnij sobie różnicę między \`aggregate\` a \`generate\`. Jeśli celem było podsumowanie z reject, wygenerowana droga z odziedziczonym next-hopem mogła być od początku niewłaściwym narzędziem.
+
+### Martian i brak pakietu nie należą do tej samej półki
+
+Kiedy peer próbuje przesłać prefiks 127.10.20.0/24, a ty nie widzisz go w normalnym RIB, \`show route martians\` jest naturalnym krokiem. Ale kiedy użytkownik nie może dotrzeć do 10.60.99.25, bo aggregate ma reject next-hop, nie zaczynasz od zmian w martian. Mechanizm kwalifikacji tras i zachowanie FIB to osobne poziomy.
+
+Z kolei odrzucony pakiet PC-B przez brak końcowego \`NORMAL then accept\` nie jest martianem ani brakiem route. To **implicit discard stateless filtra**. Takie różnice mają znaczenie dla RCA: „route exists” nie dowodzi „packet delivered”, a „session established” nie dowodzi „every source uses the intended WAN”.
+
+### Jak przeprowadzić zmianę, nie tworząc P1?
+
+Załóżmy, że w istniejącej lokalizacji chcesz włączyć FBF dla wybranego hosta. Najbezpieczniejsza kolejność ma sens sama w sobie.
+
+Najpierw odczytaj **aktualną** konfigurację: interfejsy, route table, istniejące firewall filters, RIB groups, security policies, NAT i ewentualne forwarding-table export. Zachowaj wersję software i czytelną mapę portów. Następnie przygotuj alternatywną tablicę i sprawdź, czy ma rozwiązany next-hop. Dopiero później przypnij filtr na ingress. Przed aktywacją przewidź dwie rzeczy: droga PC-A ma się **zmienić**, a droga PC-B ma **pozostać bez zmian**.
+
+Na Junos wykorzystaj candidate configuration i mechanizm rollback. Przeprowadź \`show | compare\`, a potem \`commit check\` **przed** warunkową aktywacją. Po \`commit confirmed\` wykonuj wyłącznie post-check i testy. **Nie uruchamiaj kolejnego \`commit check\` podczas oczekującego confirmed commit**, ponieważ może go potwierdzić. Działaj przez niezależną konsolę/OOB tam, gdzie zmiana może odciąć management.
+
+**R1-vSRX — Operational Mode, wejście do prywatnej konfiguracji na izolowanym labie**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], bezpieczna sekwencja przed aktywacją**
+
+~~~junos
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+**R1-vSRX — Operational Mode, po aktywacji: wyłącznie odczyt**
+
+~~~junos
+show system commit
+show route table inet.0 0.0.0.0/0 exact
+show route table FBF-ALT.inet.0 0.0.0.0/0 exact
+show route table FBF-ALT.inet.0 198.51.100.4/30 exact
+show security flow session
+~~~
+
+Jeśli testy klientów zakończą się poprawnie, możesz zatwierdzić zmianę. Jeśli nie, pozwól przewidzianemu rollback zadziałać albo wycofaj ją zgodnie z procedurą. Nie kasuj bez namysłu globalnych \`security policies\` ani nie wykonuj \`load override\` na routerze z konfiguracją klienta.
+
+**R1-vSRX — Configuration Mode [edit private], tylko po potwierdzonym PASS**
+
+~~~junos
+commit
+~~~
+
+### MOP i worknotes, które mają sens następnego dnia
+
+Kiedy zamykasz change, ktoś inny musi umieć odtworzyć jego wynik. Nie wystarczy „PBR configured successfully”. Potrzebujemy wiedzieć: *który źródłowy adres objęto filtrem, na jakim logicznym interfejsie, jakiej instancji użyto, jaka była aktywna default w obu tabelach, czy next-hop WAN-B był rozwiązany oraz czy normalny klient nadal korzystał z WAN-A*. Utrata tego kontekstu powoduje, że każda późniejsza awaria wygląda jak przypadkowa magia.
+
+Pamiętaj o pułapkach testowych. **Ping R1 do UP-B** nie potwierdza FBF z PC-A, bo jest ruchem generowanym przez router, a nie pakietem ingress z OFFICE. **Ping PC-A do samej bramy 192.0.2.1** również nie potwierdza przepływu do usługi WAN-B. Dowodem musi być pakiet z właściwego źródła przez właściwy ingress do docelowego IP, zaobserwowany po wyjściu właściwym uplinkiem i — jeśli testujemy aplikację — z działającą odpowiedzią.
+
+W następnym ćwiczeniu nie będziemy udawać, że któraś z tych komend „zadziałała” bez uruchomienia. Zapiszemy oczekiwane wyniki i sprawdzimy, jak zebrać dowody na odseparowanym labie.
+
+*Źródła: [Junos CLI Configuration and Commit](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-cli-configuration.html), [Filter-Based Forwarding Example](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/example/filter-based-forwarding-example.html), [Static Route Preferences](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html).*
