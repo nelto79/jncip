@@ -17,7 +17,7 @@ Własny podręcznik i repozytorium laboratoriów do nauki **JNCIA-Junos (JN0-106
 11. [Lab rozdziału 2 — 4×vSRX i 2×VPCS](labs/ch02-four-vsrx/README.md)
 12. [Lab rozdziału 3 — Shared/Private Candidate, Load, Commit Confirmed](labs/ch03-cli-change-management/README.md)
 13. [Lab rozdziału 4 — pełny onboarding Junos z bezpiecznym recovery](labs/ch04-initial-config/README.md)
-14. [Lab rozdziału 5 — 2×vSRX: interface fault, missing route i policy deny](labs/ch05-operational-monitoring/README.md)
+14. [Lab rozdziału 5 — DIAMOND 4×vSRX + 2×VPCS: routing, interface fault, flow policy i failover](labs/ch05-operational-monitoring/README.md)
 15. [Instrukcje dla Codexa](AGENTS.md)
 16. [Źródła modeli, wersji Junos i ograniczeń BOM — research 2026-11-16](docs/research/CH01_ENTERPRISE_PORTFOLIO_ZRODLA_2026-11-16.md)
 
