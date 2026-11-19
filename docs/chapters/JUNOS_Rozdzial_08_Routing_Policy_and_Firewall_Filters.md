@@ -246,3 +246,149 @@ show configuration protocols ospf | display set
 Jeśli widzisz wewnętrzną trasę OSPF, nie próbuj na ślepo „naprawiać” problemu przez kolejne import reject. Ustal, czy problem dotyczy redystrybucji, topologii area, agregacji, czy używania trasy do forwardingu.
 
 *Źródła: [Actions in Routing Policy Terms](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-actions-in-routing-policy-terms.html), [Protocol Support for Import and Export Policies](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-protocol-support-import-export-policies.html).*
+
+---
+
+## 8.5. Policy statement i term — jak budować reguły, których nie trzeba się bać [A]
+
+W laboratorium dwie linie `from` i jedno `then accept` wyglądają niewinnie. Ale wyobraź sobie wielką sieć z trzydziestoma oddziałami, dwiema trasami wyjścia do Internetu, osobną siecią zarządzającą i setkami prefiksów BGP. Nikt nie będzie weryfikował bezpieczeństwa takiej sieci, przeglądając po kolei setki przypadkowych `set`.
+
+Potrzebujemy czytelnej polityki. Nie po to, aby nauczyć się składni, lecz po to, żeby podczas awarii móc w kilka sekund odpowiedzieć: **która reguła jest odpowiedzialna za dany prefix?**
+
+W Junos mamy hierarchię, którą można czytać od zewnątrz do środka:
+
+- `policy-options` jest miejscem, gdzie definiujemy obiekty wielokrotnego użytku;
+- `policy-statement` jest nazwanym zestawem zasad;
+- `term` jest kolejnym krokiem tej polityki;
+- `from` opisuje to, co ma pasować do kandydata;
+- `then` mówi, co zrobić z dopasowaną trasą.
+
+Ta struktura ma swoją cenę: bardzo łatwo napisać poprawny składniowo, lecz zbyt szeroki term. Rozważ różnicę między dwiema historiami.
+
+W pierwszej administrator pisze: „Zawsze zezwalaj na reklamy tras direct”. W drugiej: „Zezwalaj wyłącznie na dokładnie zidentyfikowaną sieć użytkowników, a pozostałe odrzucaj”. Pierwsza polityka będzie krótsza. Druga znacznie lepiej zniesie rozbudowę sieci.
+
+**R1-vSRX — Configuration Mode, przykład ryzykownie szerokiej polityki (NIE WDRAŻAJ)**
+
+~~~junos
+set policy-options policy-statement TOO-BROAD term DIRECT from protocol direct
+set policy-options policy-statement TOO-BROAD term DIRECT then accept
+~~~
+
+Co stanie się za pół roku, jeśli R1 dostanie bezpośrednio podłączony segment zarządzający 10.99.99.0/24? Ten sam term może pozwolić BGP ogłosić go na zewnątrz, o ile trasa spełni pozostałe warunki protokołu. Żaden alarm nie musi się pojawić. Z punktu widzenia Junos polityka wykonała poprawnie to, o co ją poproszono.
+
+Właśnie dlatego w produkcyjnych export policies zazwyczaj zaczynam od **świadomej whitelisty**. Nazwa termu powinna mówić, czemu służy: `ALLOW-USER-LAN`, `BLOCK-MGMT`, `DENY-REMAINDER`. To nie poprawia samego algorytmu, ale radykalnie poprawia jakość review i troubleshootingu.
+
+Spójrz jeszcze na dwa przykłady, które pozornie wyglądają podobnie:
+
+**R1-vSRX — Configuration Mode, ilustracja różnicy „brak from”**
+
+~~~junos
+set policy-options policy-statement CHECK-A term ALL then accept
+set policy-options policy-statement CHECK-B term ALL then reject
+~~~
+
+W obu politykach term nie zawiera `from`. To nie znaczy „term nigdy się nie uruchomi”. Taki term **dopasowuje każdą trasę**, która do niego dotrze. W pierwszej polityce otwiera przejście wszystkim kandydatom; w drugiej zamyka je wszystkim. I dlatego końcowe `then reject` jest tak skutecznym mechanizmem domknięcia whitelisty.
+
+W samym Junos możesz łatwo sprawdzić konfigurację w dwóch formatach. `display set` dobrze nadaje się do porównania zmian i wklejenia fragmentów, a hierarchiczny `show` pozwala dostrzec, **co jest wewnątrz czego**. Dobrze jest swobodnie używać obu perspektyw.
+
+**R1-vSRX — Operational Mode, dwie perspektywy tej samej policy**
+
+~~~junos
+show configuration policy-options policy-statement EXPORT-TO-R2
+show configuration policy-options policy-statement EXPORT-TO-R2 | display set
+show configuration protocols bgp | display set
+~~~
+
+Najbardziej użyteczne pytanie przy review brzmi nie „czy syntax jest poprawny?”, ale „**jaki dodatkowy prefix mógłby nieoczekiwanie przejść przez ten term?**”. Pomyśl o sieci zarządzającej, interfejsie tranzytowym, loopbacku, default route lub statycznym blackhole.
+
+---
+
+## 8.6. Jak dobrać trasę: exact, longer, orlonger i pułapka najbardziej szczegółowej reguły [A]
+
+Przychodzi nowe polecenie: oddział ma otrzymać nie tylko 10.10.10.0/24, ale również 10.10.11.0/24. Administrator proponuje prostszy filtr „zaakceptuj 10.10.0.0/16”. Brzmi sensownie. Tyle że wtedy musimy zadać pytanie, którego nie da się uniknąć: **czy chodzi o sam prefiks /16, czy o wszystkie sieci znajdujące się w tej przestrzeni?**
+
+To nie jest różnica kosmetyczna. BGP reklamuje *prefiksy* — pary adres/maska. Router nie może zgadnąć, czy `10.10.0.0/16` jest oczekiwanym sumarycznym ogłoszeniem, czy wygodnym zapisem zbioru /24. Jeżeli w RIB są dwie trasy /24, polityka `route-filter 10.10.0.0/16 exact` **nie dopasuje** żadnej z nich.
+
+### Ta sama sieć, kilka zupełnie różnych pytań
+
+Na przykładzie bazy 10.10.0.0/16, zapamiętaj znaczenie operatorów, a nie ich mechaniczne definicje:
+
+| Zapis | Co naprawdę przepuści jako warunek dopasowania? | Kiedy potrzebujesz |
+|---|---|---|
+| `exact` | Dokładnie 10.10.0.0/16, nie /24 | Gdy reklamujesz konkretny summary |
+| `longer` | Prefiksy bardziej szczegółowe niż /16, bez samego /16 | Gdy interesują Cię wyłącznie podsieci |
+| `orlonger` | Sam /16 **i** wszystkie bardziej szczegółowe w jego zakresie | Gdy świadomie dopuszczasz deagregację |
+| `upto /24` | /16, /17 … aż do /24, lecz nie /25 | Gdy chcesz ograniczyć nadmierną szczegółowość |
+| `prefix-length-range /24-/28` | Tylko podsieci /24–/28 wewnątrz /16 | Gdy wymagany jest przedział długości |
+
+Każda z tych reguł mówi o **długości prefiksu wpisu routingu**, a nie o źródłowym adresie pakietu. Jeśli host 10.10.10.50 otwiera HTTPS, jego źródłowe IP nie jest osobnym prefiksem /32 wysyłanym do BGP tylko dlatego, że w nagłówku ma ten adres.
+
+A teraz wykonajmy ćwiczenie bez urządzeń. Mamy w RIB trzy aktywne trasy: 10.10.0.0/16, 10.10.10.0/24 i 10.10.10.128/25. Filtr `10.10.0.0/16 upto /24` będzie mógł dopasować dwie pierwsze. Trzecia, mimo że mieści się adresowo wewnątrz /16, ma długość **/25**, więc zostanie pominięta. **Routing prefix match nie jest zwykłym sprawdzaniem, czy dany adres IP należy do sieci.**
+
+**R1-vSRX — Configuration Mode, tylko dwa konkretne segmenty LAN**
+
+~~~junos
+set policy-options policy-statement EXPORT-LANS term USERS from protocol direct
+set policy-options policy-statement EXPORT-LANS term USERS from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement EXPORT-LANS term USERS from route-filter 10.10.11.0/24 exact
+set policy-options policy-statement EXPORT-LANS term USERS then accept
+set policy-options policy-statement EXPORT-LANS term REST then reject
+~~~
+
+Dwa `route-filter` w jednym termie reprezentują alternatywne wzorce prefiksów, a `from protocol direct` ogranicza typ źródła. Gdyby trzeba było przechowywać dłuższą, wielokrotnie używaną listę, sięgnęlibyśmy po nazwany obiekt `prefix-list` i dopasowanie `from prefix-list`. Zwykłe `prefix-list` dopasowuje wymienione prefiksy dokładnie; `prefix-list-filter ... orlonger` daje inną semantykę długości. Nie traktuj obu poleceń jak synonimów.
+
+**R1-vSRX — Configuration Mode, wariant z nazwanym zbiorem prefiksów**
+
+~~~junos
+set policy-options prefix-list BRANCH-LANS 10.10.10.0/24
+set policy-options prefix-list BRANCH-LANS 10.10.11.0/24
+set policy-options policy-statement EXPORT-LIST term APPROVED from protocol direct
+set policy-options policy-statement EXPORT-LIST term APPROVED from prefix-list BRANCH-LANS
+set policy-options policy-statement EXPORT-LIST term APPROVED then accept
+set policy-options policy-statement EXPORT-LIST term REST then reject
+~~~
+
+Te dwa warianty realizują podobną intencję biznesową. Nie wdrażaj ich obu równocześnie bez świadomie zaprojektowanej listy polityk; są alternatywnymi sposobami napisania tej samej lekcji.
+
+### Bardzo ważny niuans: policy też używa longest match, ale to nie jest LPM w FIB
+
+Znasz regułę LPM z Cisco CEF i z rozdziału 6. Pakiet do 10.10.10.130 trafi do najbardziej szczegółowej dostępnej trasy w FIB. W routing policy Junos również potrafi szukać najlepszego prefiksowego dopasowania, lecz **szuka wzorca route-filter**, a dopiero potem ocenia przypisany do niego typ dopasowania.
+
+Załóżmy, że w **jednym termie** są dwa warunki:
+
+- 10.0.0.0/8 `orlonger`;
+- 10.10.0.0/16 `exact`.
+
+Przychodzi kandydat **10.10.20.0/24**. Odruchowo chciałoby się powiedzieć: „Reguła /8 orlonger pasuje, więc term pasuje”. W domyślnym zachowaniu Junos najbardziej szczegółowym wzorcem jest jednak /16. Gdy sprawdzi przy nim `exact`, okaże się, że kandydat /24 nie jest /16. Cały term może uzyskać **no match**, mimo że szerszy wzorzec wyglądał na pasujący. To nie jest błędne LPM forwarding — to inny etap i inna semantyka.
+
+```mermaid
+flowchart TD
+    C["Kandydat 10.10.20.0/24"] --> T["Wybór najdłuższego prefiksu wzorca"]
+    T --> X["10.10.0.0/16 exact"]
+    X --> Q{"Czy /24 == /16?"}
+    Q -->|nie| M["Term: NO MATCH"]
+    M --> N["Przejdź do kolejnego termu/policy"]
+    T -.-> Z["10.0.0.0/8 orlonger<br/>nie musi zostać sprawdzony"]
+```
+
+*Rysunek 8.4. Tekst alternatywny: route-filter najpierw wybiera najbardziej szczegółowy wzorzec /16; dopasowanie exact dla kandydata /24 nie udaje się, więc term może nie dopasować. Diagram autorski, ilustruje domyślną semantykę bez funkcji walkup.*
+
+Jeśli chcesz dopuścić także szersze reguły, możesz rozdzielić je na osobne termy lub rozważyć `walkup`, gdzie funkcja jest dostępna i rozumiesz jej wpływ na politykę. Nie włączaj globalnego `walkup` wyłącznie po to, żeby „naprawić jeden prefix” w działającym środowisku — może zmienić wynik także dla innych polityk.
+
+To jeden z tych niuansów Junos, które pokazują różnicę między nauką komend a rozumieniem narzędzia. Wiesz już, **co testować**: trasy /16, /24 i /25 pod konkretnymi zestawami `route-filter`, a nie tylko jedną wygodną trasę pokazową.
+
+### Sprawdź dopasowanie, zanim dotkniesz sąsiada BGP
+
+Junos ma polecenie `test policy`. Nie udaje ono całego eBGP, ale jest pomocne przy analizie samej policy. Dokumentacja producenta ostrzega, że test używa domyślnego **accept**, więc polityka bez jawnego końcowego `reject` może dać wynik zaskakująco szeroki. Z drugiej strony nawet pomyślny `test policy` nie gwarantuje reklamy: BGP może nie zakwalifikować trasy z powodów niezwiązanych z samym termem.
+
+**R1-vSRX — Operational Mode, test lokalnej policy; składnię potwierdź na swoim release**
+
+~~~junos
+test policy EXPORT-LANS 10.10.10.0/24
+test policy EXPORT-LANS 10.10.11.0/24
+show route advertising-protocol bgp 192.0.2.2
+~~~
+
+Czytaj wynik jako dwa różne dowody: pierwszy i drugi testują logikę dopasowania tras w aktualnej tabeli, trzeci dotyczy faktycznego eksportu BGP do peera. Dopiero ich zestawienie może potwierdzić twoją hipotezę.
+
+*Źródła: [Routing Policy Match Conditions](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-match-conditions-in-routing-policy-terms.html), [Walkup for Route Filters](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/walkup-route-filter-policy-option-overview.html), [Understanding Routing Policy Tests](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-testing-routing-policies.html).*
