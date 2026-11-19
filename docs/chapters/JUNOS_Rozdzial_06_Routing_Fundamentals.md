@@ -36,6 +36,34 @@ flowchart LR
 
 ---
 
+## Kanoniczna topologia DIAMOND — nasze wspólne adresy w rozdziale 6
+
+Wykorzystujemy stale [referencyjny diagram Mermaid](../../labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md): PC-A `192.0.2.10/24`, R1 `192.0.2.1/24`, dwa tranzyty R2 i R3, R4 `198.51.100.1/24`, PC-B `198.51.100.10/24`, cztery loopbacki `10.255.255.1–4/32`. **Nie zmieniamy tych subnetów w żadnym ćwiczeniu.** Dodatkowe, niepodłączone prefiksy w mini-przykładach LPM, VRF i agregacji to świadome przykłady *wpisów w tablicach routingu*, a nie dodatkowe połączenia EVE.
+
+```mermaid
+flowchart LR
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
+```
+
+---
+
 ## 6.1. Podstawowe pojęcia przekazywania pakietów IP [A]
 
 ### 6.1.1. Sortownia paczek — po co routerowi next-hop?
@@ -46,31 +74,29 @@ Tak działa routing IP. Router analizuje **adres docelowy**, dopasowuje trasę w
 
 **Gdzie analogia się kończy?** Router ponadto zmniejsza TTL/Hop Limit, w IPv4 aktualizuje checksum nagłówka, stosuje ARP/ND i tworzy nową ramkę L2. Firewall SRX może wykonać NAT i sprawdzić stan sesji.
 
-### 6.1.2. Przejdźmy pakiet PC-A → ERP przez dwa routery
+### 6.1.2. PC-A → PC-B: jeden pakiet, cztery decyzje routingu
 
-W izolowanym labie użyjemy:
-- PC-A `192.0.2.10/24`, gateway `192.0.2.1`;
-- R1 `192.0.2.1/24` po stronie klienta, `198.51.100.1/30` po stronie transit;
-- R2 `198.51.100.2/30`, sieć ERP `203.0.113.0/24`;
-- PC-B/ERP `203.0.113.10/24`, gateway `203.0.113.1`.
+PC-A ma adres `192.0.2.10/24` i gateway R1 `192.0.2.1/24`. PC-B jest za R4: `198.51.100.10/24`, brama `198.51.100.1/24`. To nie jest dwurouterowy łańcuch: pomiędzy R1 a R4 stoją **R2 i R3**, tworzące dwie niezależne drogi.
 
-**Krok 1:** PC-A widzi, że ERP nie należy do jego /24, więc wysyła pakiet do bramy `192.0.2.1`.  
-**Krok 2:** przez ARP ustala MAC R1. **Destination IP pozostaje 203.0.113.10**, ale destination MAC ramki to MAC bramy.  
-**Krok 3:** R1 wybiera aktywny lookup w odpowiedniej RIB/FIB i ma next-hop `198.51.100.2`.  
-**Krok 4:** R1 ustala MAC sąsiada przez ARP, zmniejsza TTL, przepisuje adresy MAC i wysyła pakiet na transit.  
-**Krok 5:** R2 odbiera pakiet, widzi **connected `203.0.113.0/24`**, wykonuje ARP do ERP i przekazuje ruch.  
-**Krok 6:** ERP odpowiada przez swoją bramę. **R2 musi mieć trasę zwrotną do `192.0.2.0/24`**, a R1 bezpośrednią sieć PC-A.  
-**Krok 7:** Na vSRX potrzebna jest także poprawna polityka przepuszczająca nowe sesje; nie pomyl braku policy z brakiem route.
+**Krok 1:** PC-A widzi, że docelowa sieć jest zdalna; przez ARP ustala MAC R1 i wysyła do niego ramkę, zachowując IP destination `198.51.100.10`.
+
+**Krok 2:** R1 ma aktywną trasę `198.51.100.0/24` z next-hopem `10.12.0.2` (R2), egress `ge-0/0/0.0` i lokalnym adresem `10.12.0.1/30`. Po ARP do R2 buduje nową ramkę L2.
+
+**Krok 3:** R2 dostaje pakiet i kieruje go do R4 next-hop `10.24.0.2`; lokalny interfejs R2 to `10.24.0.1/30`. R2 **nie ma** LAN-B jako connected.
+
+**Krok 4:** Dopiero R4 ma direct LAN-B `198.51.100.0/24`. Rozwiązuje ARP PC-B i dostarcza pakiet. PC-B odpowiada przez R4, a R4 w baseline wybiera powrót przez R2 do R1.
 
 ~~~mermaid
 flowchart LR
-  A["PC-A\n192.0.2.10"] -->|"MAC bramy"| R1["R1\n192.0.2.1\n198.51.100.1"]
-  R1 -->|"nowe MAC, ten sam IP dest"| R2["R2\n198.51.100.2\n203.0.113.1"]
-  R2 -->|"MAC serwera"| B["ERP\n203.0.113.10"]
-  B -. "odpowiedź / route powrotny" .-> A
+  A["PC-A<br/>192.0.2.10"] -->|"GW 192.0.2.1"| R1["R1-vSRX<br/>10.12.0.1/30"]
+  R1 -->|"10.12.0.2"| R2["R2-vSRX<br/>10.24.0.1/30"]
+  R2 -->|"10.24.0.2"| R4["R4-vSRX<br/>198.51.100.1/24"]
+  R4 --> B["PC-B<br/>198.51.100.10"]
+  R1 -.->|"backup 10.13.0.2"| R3["R3-vSRX"]
+  R3 -.->|"10.34.0.0/30"| R4
 ~~~
 
-**Most z Cisco:** RIB/CEF + adjacency/rewrite na ISR/Catalyst zaspokaja analogiczne potrzeby jak Junos RE/rpd, KRT/PFE i resolved next-hop, ale implementacje sprzętowe nie są tożsame. Więcej o RE/PFE w rozdziale 2.
+**Co może pójść źle?** Samo zerwanie R1–R2 nie musi spowodować poprawnego end-to-end failoveru: R1 spróbuje R3, lecz R4 może nadal wybierać drogę zwrotną przez R2. Na vSRX do routingu dojdzie stateful session/security. **Most z Cisco:** analogicznie badałbyś RIB/CEF/ARP, ale SRX flow nie jest tym samym co zwykły forwarding Catalyst.
 
 ### 6.1.3. Host-bound vs transit — pułapka przy pingowaniu bramy
 
@@ -234,9 +260,9 @@ Juniper [Day One Troubleshooting](https://www.juniper.net/documentation/en_US/da
 
 ### 6.4.1. Dwie drogi do tego samego prefiksu — tu działa preference
 
-Wyobraź sobie, że R1 zna `203.0.113.0/24` z dwóch źródeł:
-- **Static/5** przez `198.51.100.2`;
-- **OSPF/10** przez `198.51.100.6`.
+Wyobraź sobie, że R1 zna `198.51.100.0/24` z dwóch źródeł:
+- **Static/5** przez `10.12.0.2`;
+- **OSPF/10** przez `10.13.0.2`.
 
 Dla **tego samego prefiksu w tej samej tablicy** Junos musi zdecydować, którego kandydata uznać za aktywnego. Domyślnie niższa **route preference** oznacza większe pierwszeństwo. Static z wartością 5 wygrywa więc z OSPF internal 10, zakładając że obie trasy są poprawne i kwalifikowane.
 
@@ -274,7 +300,7 @@ Mamy trzy różne pojęcia:
 - **OSPF metric/cost** wybiera drogę *wewnątrz OSPF*, zanim wynik zostanie porównany z innym source route.
 - **BGP Local Preference** jest atrybutem BGP, nie synonymem Junos route preference. Junos w szczegółowym outputcie może używać również pola `Preference2` dla tiebreakerów, a nie do tego samego celu co główna preference.
 
-Praktyczny eksperyment myślowy: do `203.0.113.0/24` dociera OSPF route cost 2 i BGP route LocalPref 500. Która wygra? **Bez dodatkowych zmian polityki globalnej preference Junos porównuje OSPF/10 z BGP/170 i zwykle aktywna będzie OSPF**, nawet jeśli BGP LocalPref jest bardzo wysoki. BGP LocalPref rozstrzyga między drogami *BGP*, nie automatycznie między BGP i OSPF.
+Praktyczny eksperyment myślowy: do `198.51.100.0/24` dociera OSPF route cost 2 i BGP route LocalPref 500. Która wygra? **Bez dodatkowych zmian polityki globalnej preference Junos porównuje OSPF/10 z BGP/170 i zwykle aktywna będzie OSPF**, nawet jeśli BGP LocalPref jest bardzo wysoki. BGP LocalPref rozstrzyga między drogami *BGP*, nie automatycznie między BGP i OSPF.
 
 Dodatkowo dopuszczalność route ma znaczenie: nawet z preferencją 5 static route nie wygra, jeśli nie może zostać zakwalifikowana do active. **Niższa preference to nie immunitet na unresolved next-hop**.
 
@@ -285,7 +311,7 @@ Dodatkowo dopuszczalność route ma znaczenie: nawet z preferencją 5 static rou
 **Urządzenie: R1-vSRX — Operational Mode**
 
 ~~~junos
-show route 203.0.113.0/24 extensive
+show route 198.51.100.0/24 extensive
 show route protocol static
 show route protocol ospf
 show route hidden
@@ -296,10 +322,10 @@ W laboratorium ze statycznymi trasami bez uruchomionego OSPF polecenie `show rou
 **Ilustracja formatu, NIE rzeczywisty output:**
 
 ~~~text
-203.0.113.0/24   *[Static/5]  ...
-                    > to 198.51.100.2 via ge-0/0/0.0
+198.51.100.0/24   *[Static/5]  ...
+                    > to 10.12.0.2 via ge-0/0/0.0
                   [OSPF/10]   ...
-                    > to 198.51.100.6 ...
+                    > to 10.13.0.2 ...
 ~~~
 
 W rzeczywistym Junos output zależy od platformy i wersji. Sprawdź, gdzie znajduje się **gwiazdka** i jaki jest next-hop aktywnego route. Jeśli widzisz tylko jedną drogę, nie twórz w głowie nieistniejącej alternatywy.
@@ -308,13 +334,13 @@ W rzeczywistym Junos output zależy od platformy i wersji. Sprawdź, gdzie znajd
 
 W Cisco używasz statycznej trasy z podwyższonym Administrative Distance, żeby pozostawała nieaktywna, gdy lepsze źródło działa. W Junos robisz to przez **`preference`**.
 
-Załóżmy, że OSPF dostarcza `203.0.113.0/24` z default preference 10. Chcesz static jako backup, aktywny dopiero gdy OSPF route zniknie.
+Załóżmy, że OSPF dostarcza `198.51.100.0/24` z default preference 10. Chcesz static jako backup, aktywny dopiero gdy OSPF route zniknie.
 
 **Urządzenie: R1-vSRX — Configuration Mode [edit], ilustracyjna dodatkowa route backupowa w LAB z istniejącym alternatywnym next-hopem**
 
 ~~~junos
-set routing-options static route 203.0.113.0/24 next-hop 198.51.100.2
-set routing-options static route 203.0.113.0/24 preference 200
+set routing-options static route 198.51.100.0/24 next-hop 10.12.0.2
+set routing-options static route 198.51.100.0/24 preference 200
 show | compare
 ~~~
 
@@ -562,7 +588,7 @@ Na Cisco, gdy przypisujesz `10.10.10.1/24` do interfejsu L3, system tworzy conne
 **Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB IPv4**
 
 ~~~junos
-set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24
+set interfaces ge-0/0/2 unit 0 family inet address 192.0.2.1/24
 show | compare
 commit check
 ~~~
@@ -576,7 +602,7 @@ Po prawidłowym commit, gdy logical interface spełnia warunki aktywności, powi
 **Urządzenie: R1-vSRX — Operational Mode, po commit i aktywacji portu**
 
 ~~~junos
-show interfaces ge-0/0/1 terse
+show interfaces ge-0/0/2 terse
 show route protocol direct
 show route protocol local
 show route 192.0.2.0/24
@@ -586,59 +612,51 @@ show arp
 
 Zwróć uwagę, że **interfejs administracyjnie down** może uniemożliwić pojawienie się normalnej aktywnej connected route. Sam adres zapisany w config nie gwarantuje działania.
 
-### 6.7.2. Static route to świadome polecenie administratora
+### 6.7.2. Static route: wybierz next-hop z diamentu
 
-Chcemy osiągnąć sieć `203.0.113.0/24` za sąsiednim R2 o adresie `198.51.100.2`.
+W naszym labie R1 chce osiągnąć LAN-B `198.51.100.0/24`. Ten LAN jest connected dopiero na R4. Sąsiad górny R1 to R2 `10.12.0.2`; dolny to R3 `10.13.0.2`.
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], prosty IPv4 static**
+**R1-vSRX — Configuration Mode [edit private], LAB**
 
 ~~~junos
-set routing-options static route 203.0.113.0/24 next-hop 198.51.100.2
+set routing-options static route 198.51.100.0/24 next-hop 10.12.0.2
+set routing-options static route 198.51.100.0/24 qualified-next-hop 10.13.0.2 preference 15
 show | compare
 commit check
 ~~~
 
-Odpowiednik ideowy Cisco:
-
-**Urządzenie: CISCO-R1 — Cisco IOS XE Global Configuration Mode, porównanie składni**
+**CISCO-R1 — IOS XE, analogiczna intencja primary**
 
 ~~~cisco
-ip route 203.0.113.0 255.255.255.0 198.51.100.2
+ip route 198.51.100.0 255.255.255.0 10.12.0.2
 ~~~
 
-Na Junos konfiguracja trafia do candidate; na typowym Cisco IOS XE polecenie konfiguracji może wpłynąć na running state od razu. To różnica sposobu zarządzania, nie działania IP forwarding.
+Na R2 musi istnieć droga do R4 `via 10.24.0.2`, a na R4 droga powrotna do PC-A. Sama static na R1 nie wyczaruje routingu w środku sieci.
 
-**Gotcha:** static route do next-hop, który nie jest osiągalny jako kwalifikowany next-hop, może nie pojawić się jako active. Junos nie musi od razu powiedzieć „syntax error”; składnia IP jest poprawna, ale logiczna droga może być nieosiągalna. [Configure Static Routes](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/config_static-routes.html).
+### 6.7.3. Default route nie zastępuje bardziej szczegółowego /24
 
-### 6.7.3. Default route to route do wszystkiego — gdy nie znam nic bardziej szczegółowego
+Możemy na R1 **tymczasowo** dodać default przez R3, jednocześnie pozostawiając właściwy route do PC-B przez R2. To eksperyment Longest Prefix Match, nie nowa topologia i nie konfiguracja Internetu.
 
-Wyobraź sobie niewielki oddział, który ma tylko jedno wyjście WAN. Nie musi znać tysiąca prefiksów centrali. Wystarczy default `0.0.0.0/0` do R1.
-
-**Urządzenie: R2-vSRX — Configuration Mode [edit private], IPv4 default przez R1**
+**R1-vSRX — Configuration Mode [edit private], test LAB**
 
 ~~~junos
-set routing-options static route 0.0.0.0/0 next-hop 198.51.100.1
+set routing-options static route 0.0.0.0/0 next-hop 10.13.0.2
 show | compare
 commit check
 ~~~
 
-**Co nie wynika z tego polecenia?** Że R1 zna sieć docelową, że R1 jest Internet gateway albo że R2 będzie miał ruch NATowany. Default route to tylko **instrukcja next-hop** dla prefiksów, które nie mają bardziej szczegółowej trasy. Nie generuje automatycznie security policies ani NAT.
+Nie zmieniaj globalnego default na produkcji. R1 nadal wybierze specyficzne `198.51.100.0/24` do PC-B, jeżeli jest aktywne. Default służy celom bez lepszego match; nie robi NAT i nie tworzy security policy.
 
-### 6.7.4. Brak default u R1, default u R2 — poprawny i często spotykany projekt
+### 6.7.4. LPM na diamentowej ścieżce
 
-W labie R1 pełni rolę „provider side” i ma statyczną drogę **do konkretnej sieci R2**. R2 pełni rolę „branch” i ma default **do R1**. To asymetria konfiguracji routingu, ale **nie problem asymetrycznego forwardingu**, ponieważ obie strony nadal mają poprawne trasy do siebie.
+Dla adresu `198.51.100.10` R1 porównuje `0.0.0.0/0` via R3 i `198.51.100.0/24` via R2. Wybierany jest **dłuższy /24**, nawet jeśli default ma bardzo korzystną preference. Oddzielne routery R2 i R4 nadal muszą wykonać własne lookup i przygotować drogę zwrotną.
 
-**R1:** `203.0.113.0/24 via 198.51.100.2`.  
-**R2:** `0.0.0.0/0 via 198.51.100.1`.
-
-Pamiętaj, że R2 posiada także własną connected `203.0.113.0/24` i transit `198.51.100.0/30` — dla takich destinations LPM preferuje connected, nie default.
-
-**Urządzenie: R2-vSRX — Operational Mode, oczekiwane konsekwencje**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-show route 0.0.0.0/0
-show route 192.0.2.10
-show route 203.0.113.0/24
+show route 0.0.0.0/0 exact
+show route 198.51.100.0/24 exact
+show route forwarding-table destination 198.51.100.10
 ~~~
 
 ### 6.7.5. Dual-stack: static IPv6 to nie dodatkowa opcja na IPv4 route
@@ -905,52 +923,41 @@ Nie twierdzimy, że szczegółowe warianty JNCIP już pojawiają się dosłownie
 
 Ta część to **pomost do JNCIS-ENT**. Zwykłe `set routing-options static route ... next-hop ...` już znasz. Teraz odpowiemy na trudniejsze pytanie: **co stanie się z trasą, kiedy główny link przestanie działać, ktoś doda bardziej szczegółowy prefiks albo upstream blackholuje ruch?**
 
-### 6.10.1. Dwa next-hopy — skąd Junos wie, który jest primary?
+### 6.10.1. Dwa next-hopy R1 — dlaczego nie są to dwie losowe sieci ISP?
 
-Przed sobą masz R1 połączony dwoma niezależnymi drogami do sieci ERP. Jedna idzie przez ISP-A, druga przez ISP-B. Obie prowadzą do tej samej destynacji `203.0.113.0/24`.
+W diamentowym labie WAN-A ma konkretnego sąsiada **R2 `10.12.0.2`**, WAN-B — **R3 `10.13.0.2`**. Obie drogi kończą się na R4 z LAN-B `198.51.100.0/24`.
 
 ~~~mermaid
 flowchart LR
-  R1["R1\nbiuro"] -->|"WAN-A\nnext-hop 198.51.100.2"| A["R2 / ISP-A"]
-  R1 -->|"WAN-B\nnext-hop 198.51.100.6"| B["R3 / ISP-B"]
-  A --> ERP["ERP\n203.0.113.0/24"]
-  B --> ERP
+  R1["R1-vSRX"] -->|"R1 10.12.0.1/30<br/>R2 10.12.0.2/30"| R2["R2-vSRX"]
+  R1 -->|"R1 10.13.0.1/30<br/>R3 10.13.0.2/30"| R3["R3-vSRX"]
+  R2 -->|"10.24.0.0/30"| R4["R4-vSRX<br/>PC-B: 198.51.100.10"]
+  R3 -->|"10.34.0.0/30"| R4
 ~~~
 
-Jeśli tylko dopiszesz dwie równorzędne drogi, możesz uzyskać zachowanie inne niż oczekiwane „primary/backup”. Oficjalna dokumentacja Junipera tłumaczy, że w przypadku kilku next-hopów dla static route bez precyzyjnego ustalenia priorytetu **Junos może wybrać jeden z nich do FIB**, a nie automatycznie stosować deterministyczny primary/standby albo ECMP.
+Dwa next-hopy nie stają się automatycznie deterministycznym primary/backup. [Juniper — qualified next-hop](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html) pozwala nadać zapasowi osobną preference.
 
-Dla świadomego wyboru właściwym mechanizmem jest **`qualified-next-hop`**, który pozwala nadać każdemu next-hopowi oddzielne parametry, m.in. preference. Źródło: [Static Route Preferences and Qualified Next Hops](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html).
+### 6.10.2. `qualified-next-hop` w tej samej sieci
 
-### 6.10.2. `qualified-next-hop` — dwa progi dla jednej drogi
-
-Zakładamy **osobny** laboratorium three-router albo istniejący drugi transit link:
-- WAN-A: R1 `198.51.100.1/30` ↔ R2 `198.51.100.2/30`;
-- WAN-B: R1 `198.51.100.5/30` ↔ R3 `198.51.100.6/30`;
-- za R2/R3 dostępna jest sieć ERP.
-
-**Urządzenie: R1-EDGE — Configuration Mode [edit private], rozszerzony LAB z DWOMA rzeczywistymi next-hopami**
+**R1-vSRX — Configuration Mode [edit private], izolowany LAB**
 
 ~~~junos
-set routing-options static route 203.0.113.0/24 qualified-next-hop 198.51.100.2 preference 5
-set routing-options static route 203.0.113.0/24 qualified-next-hop 198.51.100.6 preference 25
+set routing-options static route 198.51.100.0/24 next-hop 10.12.0.2
+set routing-options static route 198.51.100.0/24 qualified-next-hop 10.13.0.2 preference 15
 show | compare
 commit check
 ~~~
 
-**Co tu się dzieje?** Dla tego samego prefixu preferowany jest kwalifikowany next-hop A o wartości 5, o ile jest eligible. Jeżeli przestanie być kwalifikowany, Junos może wybrać zapasowy B o preference 25. Ale to **nie oznacza**, że test aplikacji ERP automatycznie wykryje awarię gdzieś dalej niż lokalna osiągalność next-hopa.
-
-**Gotcha:** `qualified-next-hop preference 25` to nie to samo co globalna route preference 25 bez przypisania do next-hopa. Możesz ustawić globalną preference dla całej route, a następnie nadpisać ją dla konkretnych next-hopów. Nie mieszaj tych dwóch poziomów.
-
-**Urządzenie: R1-EDGE — Operational Mode, odczyt po zatwierdzeniu w oddzielnym LAB**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-show route 203.0.113.0/24 extensive
-show route forwarding-table destination 203.0.113.10
+show route 198.51.100.0/24 exact extensive
+show route forwarding-table destination 198.51.100.10
 show interfaces terse
 show arp
 ~~~
 
-Jeśli na R1 nie ma WAN-B ani interfejsu z reachability do `198.51.100.6`, **nie commituj przykładu jako testu failover**. Skonfigurowanie abstrakcyjnego backup address bez sieci nie jest prawdziwym scenariuszem redundancy.
+Zobacz, co się dzieje przy local link failure — R1 może przełączyć się na R3. **To nie zapewnia jednak poprawnej drogi zwrotnej R4**, jeśli R4 nadal używa R2. Dla testu działania failover obu kierunków odłącz oba łącza R2 lub przejdź na świadomą detekcję end-to-end; na SRX uwzględnij sesje stateful.
 
 ### 6.10.3. Czy static route potrafi rozpoznać awarię poza bezpośrednim sąsiadem?
 
@@ -1119,654 +1126,447 @@ show security flow session
 
 ---
 
-## 6.11. [LAB] Konfiguracja IPv4/IPv6, tras statycznych i default routes na dwóch vSRX
 
-### 6.11.1. Dlaczego ten lab ma osobne hosty po obu stronach?
+## 6.11. [LAB] IPv4/IPv6 i routing statyczny na referencyjnym DIAMOND
 
-Chcemy przećwiczyć **pełny forwarding end-to-end**, nie tylko ping pomiędzy dwoma adresami tranzytowymi routerów. W rozdziale 2 i 5 dowiedzieliśmy się, że ping generowany przez RE nie jest tym samym testem co ruch klienta. Dlatego instalujemy:
-- **R1-vSRX**, **R2-vSRX** — dwa niezależne routery/firewalle Junos;
-- **PC-A-LINUX** — lekki host Linux w sieci OFFICE;
-- **PC-B-LINUX** — lekki host Linux w sieci ERP;
-- **trzy odizolowane segmenty EVE**: OFFICE, TRANSIT, ERP;
-- dostęp console EVE do każdego z routerów i hostów, **niezależny od interfejsów danych**.
+### 6.11.1. Dlaczego ten lab ma cztery vSRX i dwa VPCS?
 
-Dlaczego Linux, a nie koniecznie dwa VPCS? VPCS świetnie nadaje się do prostych testów IPv4, ale w niektórych buildach obsługa **statycznego IPv6 default gateway** jest ograniczona i wymaga SLAAC. Aby uczciwie testować równoległe IPv4/IPv6, Linux z `ip route` i `ip -6 route` daje większą kontrolę.
+Pod koniec rozdziału nie chcę budować trzeciej sieci, której nie rozpoznamy w kolejnym rozdziale. Pracujemy na tym samym **R1–R2–R4 / R1–R3–R4**. R1 jest bramą PC-A, R4 bramą PC-B, a R2/R3 są transit. To pozwala równocześnie ćwiczyć next-hop, statyczne trasy, preference, LPM, RIB/FIB i drogę powrotną. Poprzedni dwurouterowy wariant IPv6 zachowano wyłącznie w [archiwum](../archive/CH06_ROUTING_FUNDAMENTALS_LEGACY_TWO_ROUTER_LAB.md).
 
-**Status PLANNED.** Nie wykonałem tego labu w Twoim EVE-NG. Nie ma rzeczywistych outputów potwierdzających PASS, nie zakładam też mapowania NIC w konkretnym obrazie vSRX. Nie modyfikujemy CH02/CH03/CH04/CH05 ani istniejących laboratoriów Cisco.
+**Status PLANNED / NOT RUNTIME VALIDATED.** Bez sprawdzenia rzeczywistego obrazu EVE i mapowania NIC nie można deklarować PASS.
 
 ~~~mermaid
 flowchart LR
-  subgraph OFFICE["OFFICE — IPv4 192.0.2.0/24\nIPv6 2001:db8:10::/64"]
-   PC1["PC-A-LINUX\n192.0.2.10\n2001:db8:10::10"]
-  end
-  subgraph TRANSIT["TRANSIT — IPv4 198.51.100.0/30\nIPv6 2001:db8:12::/64"]
-   R1["R1-vSRX\nge-0/0/1 OFFICE\nge-0/0/0 TRANSIT"]
-   R2["R2-vSRX\nge-0/0/0 TRANSIT\nge-0/0/1 ERP"]
-  end
-  subgraph ERP["ERP — IPv4 203.0.113.0/24\nIPv6 2001:db8:20::/64"]
-   PC2["PC-B-LINUX\n203.0.113.10\n2001:db8:20::10"]
-  end
-  PC1 --- R1
-  R1 ---|"198.51.100.1 ↔ .2\n2001:db8:12::1 ↔ ::2"| R2
-  R2 --- PC2
-  OOB["Konsole EVE\nniezależne od data path"] -.-> R1
-  OOB -.-> R2
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
 ~~~
 
-### 6.11.2. Plan adresacji i rola każdej trasy
+### 6.11.2. Plan adresacji: IPv4 to stała umowa wszystkich rozdziałów
 
-| Węzeł | Port / interface | IPv4 | IPv6 | Gateway / funkcja |
-|---|---|---|---|---|
-| PC-A-LINUX | eth0* | `192.0.2.10/24` | `2001:db8:10::10/64` | R1 `.1` / `::1` |
-| R1-vSRX | ge-0/0/1.0 | `192.0.2.1/24` | `2001:db8:10::1/64` | OFFICE |
-| R1-vSRX | ge-0/0/0.0 | `198.51.100.1/30` | `2001:db8:12::1/64` | TRANSIT |
-| R2-vSRX | ge-0/0/0.0 | `198.51.100.2/30` | `2001:db8:12::2/64` | TRANSIT |
-| R2-vSRX | ge-0/0/1.0 | `203.0.113.1/24` | `2001:db8:20::1/64` | ERP |
-| PC-B-LINUX | eth0* | `203.0.113.10/24` | `2001:db8:20::10/64` | R2 `.1` / `::1` |
+| Segment | Network | Pierwszy koniec | Drugi koniec |
+|---|---|---|---|
+| LAN-A | 192.0.2.0/24 | PC-A eth0 = 192.0.2.10/24 | R1 ge-0/0/2.0 = 192.0.2.1/24 |
+| P2P-12 | 10.12.0.0/30 | R1 ge-0/0/0.0 = 10.12.0.1/30 | R2 ge-0/0/0.0 = 10.12.0.2/30 |
+| P2P-13 | 10.13.0.0/30 | R1 ge-0/0/1.0 = 10.13.0.1/30 | R3 ge-0/0/0.0 = 10.13.0.2/30 |
+| P2P-24 | 10.24.0.0/30 | R2 ge-0/0/1.0 = 10.24.0.1/30 | R4 ge-0/0/0.0 = 10.24.0.2/30 |
+| P2P-34 | 10.34.0.0/30 | R3 ge-0/0/1.0 = 10.34.0.1/30 | R4 ge-0/0/1.0 = 10.34.0.2/30 |
+| LAN-B | 198.51.100.0/24 | R4 ge-0/0/2.0 = 198.51.100.1/24 | PC-B eth0 = 198.51.100.10/24 |
 
-*Na Linux interface może nazywać się `ens3`, `ens4` itd. **Najpierw sprawdź `ip -br link` i dopiero potem podmień nazwę w komendach.*** Zakładane `ge-0/0/0` i `ge-0/0/1` także potwierdź na obu routerach. W wielu obrazach vSRX istnieje osobne `fxp0` jako management.
+Każdy vSRX ma ponadto `lo0.0` z `10.255.255.X/32`, gdzie X jest numerem routera. Router ID jest równy loopbackowi. Zdalny ping do tych /32 **nie zadziała automatycznie** bez dodatkowych tras.
 
-**Jeden warunek techniczny:** oba routery mają działać w kontrolowanym, izolowanym środowisku bez produkcyjnego NAT/zewnętrznych łączy. Korzystamy wyłącznie z dokumentacyjnych prefixów IPv4/IPv6 (RFC 5737 i RFC 3849).
+### 6.11.3. IPv6 jako świadomy wariant dual-stack — nie zmieniaj IPv4
 
-### 6.11.3. Preflight — jak wykryć, czy bazowa konfiguracja jest naprawdę świeża
+Adresacja IPv6 jest *dodatkową warstwą* (RFC 3849), której nie było na podstawowym diagramie IPv4: LAN-A `2001:db8:1::/64` (R1 ::1, PC-A ::10), P2P-12 `2001:db8:12::/64` (R1 ::1, R2 ::2), P2P-13 `2001:db8:13::/64` (R1 ::1, R3 ::2), P2P-24 `2001:db8:24::/64` (R2 ::1, R4 ::2), P2P-34 `2001:db8:34::/64` (R3 ::1, R4 ::2), LAN-B `2001:db8:4::/64` (R4 ::1, PC-B ::10).
 
-Nie wolno bez zastanowienia wgrywać konfiguracji na urządzenie, które już ma security zones, fabryczny NAT, DHCP server czy przypisane porty. Zacznij od read-only.
+Te ::1/::2 odnoszą się do prefiksu w tym samym segmencie, a nie do jednej wspólnej podsieci. VPCS zależnie od builda może nie obsługiwać wygodnie ręcznego IPv6 default/ND. Wtedy użyj **oddzielnego wariantu hostów Linux w miejsce obu VPCS**, z tą samą topologią L3 i IPv4. Nie nazywaj wariantu Linux kanonicznym 4×vSRX+2×VPCS i nie deklaruj testów IPv6, których VPCS nie może wykonać.
 
-**Urządzenie: R1-vSRX — Operational Mode, niezależna konsola**
+### 6.11.4. Preflight: before any change
+
+**R1-vSRX, R2-vSRX, R3-vSRX i R4-vSRX — każde urządzenie oddzielnie, Operational Mode**
 
 ~~~junos
 show version
-show chassis hardware
 show interfaces terse
 show configuration interfaces | display set
 show configuration routing-options | display set
-show configuration security | display set
-show system users
+show configuration security zones | display set
+show configuration security nat | display set
 show system commit
 ~~~
 
-**Urządzenie: R2-vSRX — Operational Mode, niezależna konsola**
+Nie używaj odziedziczonych stref, NAT ani przypadkowego factory reset. Potwierdź, że data-plane EVE odpowiada interfejsom `ge-0/0/x` z tabeli, nie `fxp0`. Kopia laba i niezależna konsola są obowiązkowe.
 
-~~~junos
-show version
-show chassis hardware
-show interfaces terse
-show configuration interfaces | display set
-show configuration routing-options | display set
-show configuration security | display set
-show system users
-show system commit
-~~~
+### 6.11.5. Konfiguracja fizycznych odcinków i tras statycznych
 
-Sprawdź, czy porty ge nie są już w strefach typu trust/untrust, czy mają adresy i czy nie występuje fabryczny NAT. Jeśli tak, skoryguj **konkretny obiekt w kopii nowego labu**, nie wykonuj przypadkowego `load factory-default` na istniejącej instancji. Lokalny admin/root i SSH/console zostały omówione w rozdziale 4; to **warunek wcześniejszy**.
+Na R1 wymagamy konkretnego next-hopu do LAN-B przez R2 i zapasu przez R3; na R4 odwrotnie. R2 i R3 nie posiadają sieci PC-B jako connected. Przed wklejeniem sprawdź, czy adresy nie są już skonfigurowane w kopii diamentu.
 
-### 6.11.4. Etap A — konfigurowanie IPv4/IPv6 interface na R1
-
-Zaczynamy od podłączenia R1 do sieci OFFICE i TRANSIT. W Junos IPv4 jest w `family inet`, IPv6 w `family inet6`, a adres wiążemy z **logical unit 0**.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], TYLKO osobna instancja LAB**
+**R1-vSRX — Configuration Mode [edit private], izolowany LAB**
 
 ~~~junos
 set system host-name R1-vSRX
-set interfaces ge-0/0/1 description "CH06-OFFICE-TO-PC-A"
-set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/24
-set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:10::1/64
-set interfaces ge-0/0/0 description "CH06-TRANSIT-TO-R2"
-set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.1/30
-set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:12::1/64
+set interfaces lo0 unit 0 family inet address 10.255.255.1/32
+set routing-options router-id 10.255.255.1
+set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.1/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.13.0.1/30
+set interfaces ge-0/0/2 unit 0 family inet address 192.0.2.1/24
+set routing-options static route 198.51.100.0/24 next-hop 10.12.0.2
+set routing-options static route 198.51.100.0/24 qualified-next-hop 10.13.0.2 preference 15
 show | compare
 commit check
 ~~~
 
-**Dwie ważne rzeczy:** `commit check` potwierdza składnię i część ograniczeń systemu, **nie obecność peer**. Dodanie `2001:db8:12::1/64` nie gwarantuje, że R2 ma już IPv6 ani że ICMPv6 przejdzie policy.
-
-### 6.11.5. Etap B — interfejsy R2
-
-**Urządzenie: R2-vSRX — Configuration Mode [edit private], TYLKO osobna instancja LAB**
+**R2-vSRX — Configuration Mode [edit private], izolowany LAB**
 
 ~~~junos
 set system host-name R2-vSRX
-set interfaces ge-0/0/0 description "CH06-TRANSIT-TO-R1"
-set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.2/30
+set interfaces lo0 unit 0 family inet address 10.255.255.2/32
+set routing-options router-id 10.255.255.2
+set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.24.0.1/30
+set routing-options static route 192.0.2.0/24 next-hop 10.12.0.1
+set routing-options static route 198.51.100.0/24 next-hop 10.24.0.2
+show | compare
+commit check
+~~~
+
+**R3-vSRX — Configuration Mode [edit private], izolowany LAB**
+
+~~~junos
+set system host-name R3-vSRX
+set interfaces lo0 unit 0 family inet address 10.255.255.3/32
+set routing-options router-id 10.255.255.3
+set interfaces ge-0/0/0 unit 0 family inet address 10.13.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.1/30
+set routing-options static route 192.0.2.0/24 next-hop 10.13.0.1
+set routing-options static route 198.51.100.0/24 next-hop 10.34.0.2
+show | compare
+commit check
+~~~
+
+**R4-vSRX — Configuration Mode [edit private], izolowany LAB**
+
+~~~junos
+set system host-name R4-vSRX
+set interfaces lo0 unit 0 family inet address 10.255.255.4/32
+set routing-options router-id 10.255.255.4
+set interfaces ge-0/0/0 unit 0 family inet address 10.24.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.2/30
+set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24
+set routing-options static route 192.0.2.0/24 next-hop 10.24.0.1
+set routing-options static route 192.0.2.0/24 qualified-next-hop 10.34.0.1 preference 15
+show | compare
+commit check
+~~~
+
+
+Po udanym `commit check` wykonaj na każdej instancji ostrożny `commit confirmed 5` z dostępem przez konsolę i potwierdź `commit` tylko po testach. **Nie wykonuj kolejnego commit check w trakcie pending commit confirmed**, ponieważ może on potwierdzić zmianę.
+
+### 6.11.6. Opcjonalne IPv6 na tych samych sześciu odcinkach
+
+**R1-vSRX — Configuration Mode [edit private], tylko wariant dual-stack**
+
+~~~junos
+set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:12::1/64
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:13::1/64
+set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:1::1/64
+set routing-options rib inet6.0 static route 2001:db8:4::/64 next-hop 2001:db8:12::2
+~~~
+
+**R2-vSRX — Configuration Mode [edit private], tylko wariant dual-stack**
+
+~~~junos
 set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:12::2/64
-set interfaces ge-0/0/1 description "CH06-ERP-TO-PC-B"
-set interfaces ge-0/0/1 unit 0 family inet address 203.0.113.1/24
-set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:20::1/64
-show | compare
-commit check
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:24::1/64
+set routing-options rib inet6.0 static route 2001:db8:1::/64 next-hop 2001:db8:12::1
+set routing-options rib inet6.0 static route 2001:db8:4::/64 next-hop 2001:db8:24::2
 ~~~
 
-Po commit i aktywacji interface spodziewamy się connected IPv4 i IPv6:
-- R1: `192.0.2.0/24`, `198.51.100.0/30`, `2001:db8:10::/64`, `2001:db8:12::/64`;
-- R2: `198.51.100.0/30`, `203.0.113.0/24`, `2001:db8:12::/64`, `2001:db8:20::/64`.
-
-Pamiętaj o lokalnych host routes /32 i /128.
-
-### 6.11.6. Etap C — statyczna droga R1 do ERP
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], statyczne trasy IPv4/IPv6**
+**R3-vSRX — Configuration Mode [edit private], tylko wariant dual-stack**
 
 ~~~junos
-set routing-options static route 203.0.113.0/24 next-hop 198.51.100.2
-set routing-options rib inet6.0 static route 2001:db8:20::/64 next-hop 2001:db8:12::2
-show | compare
-commit check
+set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:13::2/64
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:34::1/64
+set routing-options rib inet6.0 static route 2001:db8:1::/64 next-hop 2001:db8:13::1
+set routing-options rib inet6.0 static route 2001:db8:4::/64 next-hop 2001:db8:34::2
 ~~~
 
-To dwie *niezależne* trasy, każda w innej rodzinie. **Nie dodawaj default na R1**, bo w podstawowym scenariuszu R1 zna dokładnie docelową sieć za R2. Ograniczamy złożoność do minimum.
-
-### 6.11.7. Etap D — domyślna droga R2 do R1
-
-**Urządzenie: R2-vSRX — Configuration Mode [edit private], IPv4 i IPv6 default**
+**R4-vSRX — Configuration Mode [edit private], tylko wariant dual-stack**
 
 ~~~junos
-set routing-options static route 0.0.0.0/0 next-hop 198.51.100.1
-set routing-options rib inet6.0 static route ::/0 next-hop 2001:db8:12::1
-show | compare
-commit check
+set interfaces ge-0/0/0 unit 0 family inet6 address 2001:db8:24::2/64
+set interfaces ge-0/0/1 unit 0 family inet6 address 2001:db8:34::2/64
+set interfaces ge-0/0/2 unit 0 family inet6 address 2001:db8:4::1/64
+set routing-options rib inet6.0 static route 2001:db8:1::/64 next-hop 2001:db8:24::1
 ~~~
 
-**Pytanie:** dlaczego R2 nie potrzebuje osobnego static `192.0.2.0/24`? Bo default przez R1 obejmuje tę sieć, jeżeli nie istnieje bardziej szczegółowa konkurencyjna route. W prawdziwym WAN możesz woleć jawny prefix i filtrowanie, ale na tym poziomie pokażemy mechanikę LPM na default.
+To jest **osobny RIB `inet6.0`**. Górna droga ma być preferowana; te przykładowe static IPv6 nie zawierają automatycznego failoveru do R3. Nie wyciągaj więc błędnego wniosku z sukcesu IPv4, że IPv6 potrafi już się przełączyć.
 
-### 6.11.8. Etap E — strefy i polityki SRX: nie pozwól, by firewall udawał problem routingu
+### 6.11.7. Security policy na SRX — route nie oznacza zgody na sesję
 
-Dwa vSRX to **firewalle z routingiem**, a nie neutralne routery IP. Bez security policies pakiety klientów mogą być odrzucane niezależnie od prawidłowego RIB/FIB.
+W nowej kopii laba możemy umieścić data-plane interfaces w jednej strefie `LAB` i jawnie dopuścić `junos-ping`. Konkretny image może mieć inne factory defaults — nie kasuj istniejącej security config na działającym środowisku. IPv6 ICMPv6/ND wymaga dodatkowego sprawdzenia odpowiednich aplikacji, filtrów i host-inbound, nie jest automatycznie objęte samym `junos-ping`.
 
-Dla jasności konfigurujemy dwie strefy na każdym węźle. W odizolowanym, niedostępnym z zewnątrz labie zezwolimy na **ICMP i ICMPv6** między nimi, żeby testować routing w obie strony. Na produkcji musiałbyś ograniczyć adresy, usługi i właściwe role aplikacji.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], strefy oraz minimalne policy dla LAB ICMP**
+**R1-vSRX i R4-vSRX — na każdym z osobna, Configuration Mode [edit private]**
 
 ~~~junos
-set security zones security-zone OFFICE interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
-set security zones security-zone TRANSIT interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
-set security policies from-zone OFFICE to-zone TRANSIT policy CH06-ICMP-FWD match source-address any
-set security policies from-zone OFFICE to-zone TRANSIT policy CH06-ICMP-FWD match destination-address any
-set security policies from-zone OFFICE to-zone TRANSIT policy CH06-ICMP-FWD match application [ junos-ping junos-icmp6-all ]
-set security policies from-zone OFFICE to-zone TRANSIT policy CH06-ICMP-FWD then permit
-set security policies from-zone TRANSIT to-zone OFFICE policy CH06-ICMP-REV match source-address any
-set security policies from-zone TRANSIT to-zone OFFICE policy CH06-ICMP-REV match destination-address any
-set security policies from-zone TRANSIT to-zone OFFICE policy CH06-ICMP-REV match application [ junos-ping junos-icmp6-all ]
-set security policies from-zone TRANSIT to-zone OFFICE policy CH06-ICMP-REV then permit
-show | compare
-commit check
+set security zones security-zone LAB interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match source-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match destination-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match application junos-ping
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB then permit
 ~~~
 
-**Urządzenie: R2-vSRX — Configuration Mode [edit private], strefy oraz polityki LAB**
+**R2-vSRX i R3-vSRX — na każdym z osobna, Configuration Mode [edit private]**
 
 ~~~junos
-set security zones security-zone TRANSIT interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
-set security zones security-zone ERP interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
-set security policies from-zone TRANSIT to-zone ERP policy CH06-ICMP-FWD match source-address any
-set security policies from-zone TRANSIT to-zone ERP policy CH06-ICMP-FWD match destination-address any
-set security policies from-zone TRANSIT to-zone ERP policy CH06-ICMP-FWD match application [ junos-ping junos-icmp6-all ]
-set security policies from-zone TRANSIT to-zone ERP policy CH06-ICMP-FWD then permit
-set security policies from-zone ERP to-zone TRANSIT policy CH06-ICMP-REV match source-address any
-set security policies from-zone ERP to-zone TRANSIT policy CH06-ICMP-REV match destination-address any
-set security policies from-zone ERP to-zone TRANSIT policy CH06-ICMP-REV match application [ junos-ping junos-icmp6-all ]
-set security policies from-zone ERP to-zone TRANSIT policy CH06-ICMP-REV then permit
-show | compare
-commit check
+set security zones security-zone LAB interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone LAB interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match source-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match destination-address any
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB match application junos-ping
+set security policies from-zone LAB to-zone LAB policy ALLOW-LAB then permit
 ~~~
 
-**Zastrzeżenia przed uruchomieniem:** sprawdź w danym obrazie vSRX istnienie predefiniowanych aplikacji `junos-ping` i `junos-icmp6-all` oraz prawidłowe przypisanie portów do zones. Jeśli parser inaczej implementuje dany parametr, nie zastępuj go od razu `application any` na urządzeniu z siecią produkcyjną. Powyższa struktura jest **planowanym LAB baseline**, nie zweryfikowaną konfiguracją uruchomionej instancji.
+Przed commit sprawdź `show | compare`, `commit check`, a następnie z niezależną konsolą kontroluj pending `commit confirmed`. Jeżeli obraz wymaga innego mechanizmu dopuszczenia ICMP, zapisz różnicę w VERIFY.md; nie używaj bezwarunkowego global permit.
 
-### 6.11.9. Commit workflow — czytelny i bezpieczny
+### 6.11.8. VPCS — dowód w obie strony
 
-Na każdej z obu instancji wykonaj **`show | compare` i `commit check` przed warunkową aktywacją**. Nie zaczynaj automatycznej aktywacji, jeśli nie masz poprawnej konsoli i niezależnego kanału odzyskania.
+**PC-A — VPCS console**
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], aktywacja R1 dopiero po preflight**
+~~~text
+ip 192.0.2.10/24 192.0.2.1
+save
+ping 192.0.2.1
+ping 198.51.100.10
+trace 198.51.100.10
+~~~
+
+**PC-B — VPCS console**
+
+~~~text
+ip 198.51.100.10/24 198.51.100.1
+save
+ping 198.51.100.1
+ping 192.0.2.10
+trace 192.0.2.10
+~~~
+
+W baseline ścieżka powinna prowadzić przez R2. Gwiazdka w traceroute może oznaczać brak ICMP response (host-inbound, TTL exceeded, rate limiting), a nie brak tranzytu. Gdy testy nie przechodzą, zacznij od ARP, RIB/FIB, portów, security policies i sesji na każdym vSRX.
+
+### 6.11.9. RIB kontra FIB — pokaż prawdziwy next-hop
+
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-commit confirmed 5
-~~~
-
-**Urządzenie: R2-vSRX — Configuration Mode [edit private], aktywacja R2 dopiero po preflight**
-
-~~~junos
-commit confirmed 5
-~~~
-
-Po aktywacji wykonaj **nową sesję administracyjną**, read-only `show` i testy na interfejsach. **Nie wykonuj kolejnego `commit check` w czasie pending commit confirmed**, bo może on potwierdzić zmianę i wyłączyć timer. Jeśli service działa, potwierdź na każdym urządzeniu.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], świadome potwierdzenie po testach**
-
-~~~junos
-commit
-~~~
-
-**Urządzenie: R2-vSRX — Configuration Mode [edit private], świadome potwierdzenie po testach**
-
-~~~junos
-commit
-~~~
-
-**Jeśli test się nie powiedzie:** nie potwierdzaj zmian. Ustal przyczynę przez konsolę; pozwól na auto-rollback lub świadomie przywróć poprzednią konfigurację zgodnie z procedurą CH03. Przy tym scenariuszu nie wolno polegać wyłącznie na SSH przez port testowy, który może zostać wyłączony.
-
-### 6.11.10. Etap F — konfiguracja hostów Linux
-
-**Najpierw przeczytaj realną nazwę NIC**. Na lekkim Linuxie w EVE może być `eth0`, `ens3` itd. Wykonaj poniższe polecenia z niezależnej konsoli. Używamy zmiennej `IFACE`, żeby nie zakładać nazwy portu. Wartość dostosuj po odczycie.
-
-**Urządzenie: PC-A-LINUX — Linux shell, read-only discovery**
-
-~~~bash
-ip -br link
-ip -br address
-ip -4 route
-ip -6 route
-~~~
-
-**Urządzenie: PC-A-LINUX — Linux shell, tylko świeża odizolowana maszyna; po weryfikacji interfejsu**
-
-~~~bash
-IFACE=eth0
-sudo ip link set "$IFACE" up
-sudo ip -4 address add 192.0.2.10/24 dev "$IFACE"
-sudo ip -6 address add 2001:db8:10::10/64 dev "$IFACE"
-sudo ip -4 route replace default via 192.0.2.1 dev "$IFACE"
-sudo ip -6 route replace default via 2001:db8:10::1 dev "$IFACE"
-~~~
-
-**Urządzenie: PC-B-LINUX — Linux shell, read-only discovery**
-
-~~~bash
-ip -br link
-ip -br address
-ip -4 route
-ip -6 route
-~~~
-
-**Urządzenie: PC-B-LINUX — Linux shell, tylko świeża odizolowana maszyna; po weryfikacji interfejsu**
-
-~~~bash
-IFACE=eth0
-sudo ip link set "$IFACE" up
-sudo ip -4 address add 203.0.113.10/24 dev "$IFACE"
-sudo ip -6 address add 2001:db8:20::10/64 dev "$IFACE"
-sudo ip -4 route replace default via 203.0.113.1 dev "$IFACE"
-sudo ip -6 route replace default via 2001:db8:20::1 dev "$IFACE"
-~~~
-
-**Ważny detal Linux:** te polecenia mają charakter **tymczasowy do reboot** w zależności od dystrybucji. Nie zapisujemy ich jako permanentnego network config dla produkcyjnego hosta. Nie używaj `ip addr flush` bez potrzeby — mógłbyś usunąć istniejącą adresację management VM.
-
-### 6.11.11. Etap G — pierwsze pomiary: zanim popsujemy routing, musimy znać stan dobry
-
-Najpierw testujemy bezpośrednią komunikację PC-A ↔ R1 oraz PC-B ↔ R2.
-
-**Urządzenie: PC-A-LINUX — Linux shell, IPv4/IPv6 gateway**
-
-~~~bash
-ping -c 5 192.0.2.1
-ping -6 -c 5 2001:db8:10::1
-ip -4 neigh show
-ip -6 neigh show
-~~~
-
-**Urządzenie: PC-B-LINUX — Linux shell, IPv4/IPv6 gateway**
-
-~~~bash
-ping -c 5 203.0.113.1
-ping -6 -c 5 2001:db8:20::1
-ip -4 neigh show
-ip -6 neigh show
-~~~
-
-Dopiero potem test tranzytu między R1 a R2.
-
-**Urządzenie: R1-vSRX — Operational Mode, po baseline commit**
-
-~~~junos
-show interfaces terse
-show route 198.51.100.2
-show route 2001:db8:12::2
-ping 198.51.100.2 source 198.51.100.1 count 5
-ping 2001:db8:12::2 source 2001:db8:12::1 count 5
+show route 198.51.100.0/24 exact extensive
+show route forwarding-table destination 198.51.100.10
 show arp
-show ipv6 neighbors
-~~~
-
-**Urządzenie: R2-vSRX — Operational Mode, po baseline commit**
-
-~~~junos
-show route 198.51.100.1
-show route 2001:db8:12::1
-ping 198.51.100.1 source 198.51.100.2 count 5
-ping 2001:db8:12::1 source 2001:db8:12::2 count 5
-~~~
-
-Na końcu pełny test end-to-end.
-
-**Urządzenie: PC-A-LINUX — Linux shell, end-to-end dual stack**
-
-~~~bash
-ping -c 5 203.0.113.10
-ping -6 -c 5 2001:db8:20::10
-ip -4 route get 203.0.113.10
-ip -6 route get 2001:db8:20::10
-~~~
-
-**Urządzenie: PC-B-LINUX — Linux shell, kontrola drogi powrotnej oraz nowego flow w odwrotną stronę**
-
-~~~bash
-ping -c 5 192.0.2.10
-ping -6 -c 5 2001:db8:10::10
-ip -4 route get 192.0.2.10
-ip -6 route get 2001:db8:10::10
-~~~
-
-**Oczekiwany efekt:** IPv4 i IPv6 działają w obie strony. **To prognoza, nie wynik zmierzony w EVE-NG**. Jeżeli którykolwiek ping nie działa, **nie przechodź do fault injection**. Najpierw sprawdź IPv6 ND, host firewall, policies, brakujące adresy/default, port mapping i istniejący fabryczny NAT.
-
-### 6.11.12. Etap H — pokaż rzeczywiste różnice RIB/FIB/ARP/ND
-
-**Urządzenie: R1-vSRX — Operational Mode, snapshot routingu**
-
-~~~junos
-show route summary
-show route protocol direct
-show route protocol local
-show route protocol static
-show route 203.0.113.0/24 extensive
-show route table inet6.0
-show route forwarding-table destination 203.0.113.10
-show route forwarding-table family inet6 destination 2001:db8:20::10
-show arp
-show ipv6 neighbors
 show security flow session
 ~~~
 
-**Pytanie do samodzielnego przewidzenia:**
-- Czy do ERP IPv4 wygrywa R1 connected czy static? **Static**, bo ERP nie jest bezpośrednio w lokalnej sieci R1.
-- Czy na R2 do ERP wygrywa default czy connected? **Connected**, bo /24 jest dłuższy niż /0.
-- Czy na R2 do PC-A wygrywa connected czy default? **Default**, bo R2 nie ma bezpośredniego `192.0.2.0/24`.
-- Czy R1 zna IPv6 `2001:db8:20::/64`? **Tak**, z `inet6.0` static po commit.
-- Czy `show arp` dowodzi stanu IPv6 sąsiadów? **Nie**, do tego jest `show ipv6 neighbors`.
-
-### 6.11.13. LAB-FAULT A — usuwamy trasę R1 do ERP, ale nie uszkadzamy portu
-
-**Cel:** wykazać różnicę między connected interface up a brakującą statyczną RIB route. Przed awarią upewnij się, że **R1 nie ma alternatywnego default** prowadzącego do ERP.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], wyłącznie izolowany LAB, tylko IPv4 static**
+**R4-vSRX — Operational Mode**
 
 ~~~junos
-delete routing-options static route 203.0.113.0/24
-show | compare
-commit check
-commit confirmed 2
-~~~
-
-**Urządzenie: R1-vSRX — Operational Mode przez niezależną konsolę, po fault, bez kolejnego commit/check**
-
-~~~junos
-show interfaces terse
-show route 203.0.113.0/24
-show route forwarding-table destination 203.0.113.10
-show system commit
-~~~
-
-**Urządzenie: PC-A-LINUX — Linux shell, podczas fault**
-
-~~~bash
-ping -c 5 203.0.113.10
-ping -6 -c 5 2001:db8:20::10
-~~~
-
-**Przewidywany wynik:** IPv4 przestanie działać, ponieważ usunięto route, ale **IPv6 może nadal działać**, bo nie zmieniliśmy `inet6.0`. Właśnie pokazaliśmy, że IPv4/IPv6 to dwa niezależne RIB/FIB.
-
-Po upływie timera bez potwierdzenia wróci poprzednia konfiguracja. **Nie wykonuj `commit check` w trakcie oczekiwania.** Sprawdź w historii commit i powtórz obydwa testy.
-
-### 6.11.14. LAB-FAULT B — poprawna składnia, zły next-hop
-
-**Cel:** zobaczyć różnicę między składnią konfiguracji a faktyczną osiągalnością next-hopa. Najpierw poczekaj, aż LAB-FAULT A zakończy auto-rollback.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], tylko LAB**
-
-~~~junos
-delete routing-options static route 203.0.113.0/24 next-hop 198.51.100.2
-set routing-options static route 203.0.113.0/24 next-hop 198.51.100.200
-show | compare
-commit check
-commit confirmed 2
-~~~
-
-Adres `198.51.100.200` nie jest connected do R1 w naszym labie. Junos może nie zakwalifikować tej static route do active i wskazać **unresolved/hidden** w odpowiednim widoku. Przewidywane zachowanie trzeba potwierdzić **na konkretnym release**, nie zgadywać z pamięci.
-
-**Urządzenie: R1-vSRX — Operational Mode przez konsolę, analiza route reason**
-
-~~~junos
-show route 203.0.113.0/24 extensive
-show route hidden
-show route 198.51.100.200
-show interfaces ge-0/0/0 terse
-show system commit
-~~~
-
-**Pytanie:** dlaczego `commit check` przechodzi, skoro ping nie działa? Bo sprawdza **konfigurację**, nie dowodzi reachability do każdego sąsiada.
-
-### 6.11.15. LAB-FAULT C — zniknęła droga powrotna, więc w jedną stronę pakiet może dojść
-
-**Cel:** nauczyć się nie zapominać o return path. Najpierw upewnij się, że R1 i R2 powróciły do baseline. Z R2 usuń IPv4 default.
-
-**Urządzenie: R2-vSRX — Configuration Mode [edit private], tylko izolowany LAB**
-
-~~~junos
-delete routing-options static route 0.0.0.0/0
-show | compare
-commit check
-commit confirmed 2
-~~~
-
-**Urządzenie: R2-vSRX — Operational Mode przez konsolę, odczyt braku return path**
-
-~~~junos
-show route 192.0.2.10
-show route 0.0.0.0/0
-show route 203.0.113.10
-show system commit
-~~~
-
-**Urządzenie: PC-A-LINUX — Linux shell**
-
-~~~bash
-ping -c 5 203.0.113.10
-ping -6 -c 5 2001:db8:20::10
-~~~
-
-**Przewidywany wynik:** IPv4 z PC-A do PC-B przestaje działać, choć R1 może nadal wysłać Echo Request do PC-B. IPv6 może nadal działać, bo `::/0` na R2 nie został usunięty. Nie twierdź, że pakiety IPv4 „na pewno doszły do serwera”, jeśli nie zbierasz dowodu na PC-B, np. krótkim `tcpdump` w izolowanym labie.
-
-**Urządzenie: PC-B-LINUX — Linux shell, opcjonalna obserwacja podczas fault, z odpowiednią autoryzacją**
-
-~~~bash
-sudo tcpdump -ni eth0 icmp -c 20
-~~~
-
-Zatrzymaj po uzyskaniu dowodu. Sprawdź auto-rollback R2 i ponowny ping.
-
-### 6.11.16. LAB-FAULT D — krótsza trasa default nie powinna wygrać z dłuższą /24
-
-**Cel:** pokazać LPM na R2 w praktyce. R2 ma default do R1, a jednak dla **własnej** sieci ERP `203.0.113.0/24` używa connected. Trasa o preference 5 nie „wygrywa” z connected /24 tylko dlatego, że jest static default.
-
-**Urządzenie: R2-vSRX — Operational Mode, bez wykonywania żadnej zmiany**
-
-~~~junos
-show route 0.0.0.0/0
-show route 203.0.113.0/24
-show route forwarding-table destination 203.0.113.10
+show route 192.0.2.0/24 exact extensive
 show route forwarding-table destination 192.0.2.10
+show arp
+show security flow session
 ~~~
 
-**Interpretacja:** w R2 `203.0.113.10` pasuje do connected /24, a `192.0.2.10` do default /0. To jest LPM, bez konieczności zmieniania żadnej wartości preference.
+Samo `show route` nie dowodzi, że forwarding i security dopuściły pakiet; `show arp` do next-hopu mówi o lokalnym L2, a nie o całym łańcuchu R1→R4.
 
-### 6.11.17. LAB-FAULT E — IPv6 independently: pozorna poprawność IPv4 nie wystarcza
+### 6.11.10. LAB-FAULT A — tracimy route, nie port
 
-**Cel:** usuń tylko IPv6 static route R1 do ERP i porównaj wyniki dual-stack. Upewnij się, że wszystkie wcześniejsze confirmed timers są zakończone.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], tylko LAB IPv6**
+**R1-vSRX — Configuration Mode [edit private], tylko kopia LAB**
 
 ~~~junos
-delete routing-options rib inet6.0 static route 2001:db8:20::/64
+delete routing-options static route 198.51.100.0/24
 show | compare
 commit check
 commit confirmed 2
 ~~~
 
-**Urządzenie: R1-vSRX — Operational Mode z konsoli, podczas fault**
+**R1-vSRX — Operational Mode przez konsolę**
+
+~~~junos
+show interfaces terse
+show route 198.51.100.0/24 exact
+show route forwarding-table destination 198.51.100.10
+show system commit
+~~~
+
+Usunięcie całego obiektu usuwa również backup qualified-next-hop. Łącza nadal up/up, a pakiet może nie mieć ścieżki. Nie potwierdzaj zmiany: obserwuj auto-rollback i sprawdź PC-A→PC-B po odzyskaniu.
+
+### 6.11.11. LAB-FAULT B — zły next-hop, dobry parser
+
+**R1-vSRX — Configuration Mode [edit private], tylko kopia LAB**
+
+~~~junos
+delete routing-options static route 198.51.100.0/24
+set routing-options static route 198.51.100.0/24 next-hop 10.12.99.2
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**R1-vSRX — Operational Mode**
+
+~~~junos
+show route 198.51.100.0/24 exact extensive
+show route hidden
+show route forwarding-table destination 198.51.100.10
+~~~
+
+`10.12.99.2` nie jest sąsiadem na żadnym z odcinków diamentu. Błędny next-hop nie musi dawać error składniowego — to mechanika route qualification i resolution. Pozwól na rollback.
+
+### 6.11.12. LAB-FAULT C — dobra droga do PC-B, brak odpowiedzi z R4
+
+**R4-vSRX — Configuration Mode [edit private], tylko kopia LAB**
+
+~~~junos
+delete routing-options static route 192.0.2.0/24
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**R4-vSRX — Operational Mode**
+
+~~~junos
+show route 192.0.2.0/24 exact
+show route forwarding-table destination 192.0.2.10
+show security flow session
+~~~
+
+R1 może wysłać request przez R2 aż do PC-B, ale reply wymaga R4→R2→R1. Zanim stwierdzisz błąd routingu, zweryfikuj powrotny RIB i SRX flow/state. Nie potwierdzaj zmiany.
+
+### 6.11.13. LAB-FAULT D — bardziej szczegółowa trasa wygrywa z default
+
+**R1-vSRX — Configuration Mode [edit private], tylko kopia LAB**
+
+~~~junos
+set routing-options static route 0.0.0.0/0 next-hop 10.13.0.2
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**R1-vSRX — Operational Mode**
+
+~~~junos
+show route 0.0.0.0/0 exact
+show route 198.51.100.0/24 exact
+show route forwarding-table destination 198.51.100.10
+~~~
+
+Dla PC-B adres `198.51.100.10` pasuje do /24 via R2 i /0 via R3, więc wybiera dłuższy **/24** niezależnie od preferencji route sources. Nie pozostawiaj defaultu w bazowym labie.
+
+### 6.11.14. LAB-FAULT E — IPv6 nie odziedziczy drogi z IPv4
+
+Wariant tylko z Linux/IPv6 lub wspieranym VPCS dual-stack: wyłącz na R1 *wyłącznie* static IPv6 do LAN-B. IPv4 powinien pozostawać w swoim RIB.
+
+**R1-vSRX — Configuration Mode [edit private], dual-stack-only**
+
+~~~junos
+delete routing-options rib inet6.0 static route 2001:db8:4::/64
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**R1-vSRX — Operational Mode, dual-stack-only**
 
 ~~~junos
 show route table inet6.0
-show route 2001:db8:20::10
-show ipv6 neighbors
-show system commit
+show route 2001:db8:4::/64 exact
+show route 198.51.100.0/24 exact
 ~~~
 
-**Urządzenie: PC-A-LINUX — Linux shell, porównaj rodziny**
+Nie mów PASS IPv6, jeśli nie masz rzeczywistych IPv6 hostów, ND i dopuszczonego ICMPv6. To osobne od bazowego diamentu.
 
-~~~bash
-ping -c 5 203.0.113.10
-ping -6 -c 5 2001:db8:20::10
-~~~
+### 6.11.15. LAB-FAULT F — dokładny discard /32 wobec zwykłego /24
 
-Jeżeli IPv4 działa, a IPv6 nie, diagnozuj **`inet6.0`, ND i ICMPv6 policy** zamiast podmieniać kabel. To jest bardzo dobry przykład różnicy między dual-stack działającym na jednym fizycznym porcie a **dwoma niezależnymi control-plane routing contexts**.
-
-### 6.11.18. LAB-FAULT F — `discard` bardziej szczegółowy niż normalna static route
-
-**Cel:** przećwicz LPM na statycznej trasie /32. Mamy normalną R1 static `203.0.113.0/24` przez R2. Dodajemy **host-specific discard** dla jednego IP PC-B.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], tylko izolowany LAB**
+**R1-vSRX — Configuration Mode [edit private], tylko kopia LAB**
 
 ~~~junos
-set routing-options static route 203.0.113.10/32 discard
+set routing-options static route 198.51.100.10/32 discard
 show | compare
 commit check
 commit confirmed 2
 ~~~
 
-**Urządzenie: R1-vSRX — Operational Mode przez konsolę, podczas fault**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-show route 203.0.113.10/32
-show route 203.0.113.0/24
-show route forwarding-table destination 203.0.113.10
-show system commit
+show route 198.51.100.10/32 exact
+show route 198.51.100.0/24 exact
+show route forwarding-table destination 198.51.100.10
 ~~~
 
-**Urządzenie: PC-A-LINUX — Linux shell, podczas fault**
+Dłuższa /32 odrzuca konkretny host PC-B, nawet gdy /24 nadal jest w RIB. To klasyczny przykład LPM. Cofnij przez auto-rollback.
 
-~~~bash
-ping -c 5 203.0.113.10
-ping -6 -c 5 2001:db8:20::10
-~~~
+### 6.11.16. LAB-FAULT G — port, ARP i IPv6 ND to nie ta sama rzecz co trasa
 
-**Gotcha:** `discard /32` ma wyższy poziom szczegółowości niż normalna `static /24`. IP `203.0.113.10` zostanie blackholowany, mimo że /24 pozostaje aktywna i sprawna dla innych hostów. Preference **nie służy do porównywania /32 z /24**.
-
-Po upływie timera nie wykonuj żadnego commit. Sprawdź, czy /32 zniknęła i IPv4 ping wrócił.
-
-### 6.11.19. LAB-FAULT G — L2/ND nie jest tym samym co RIB
-
-Chcemy pokazać przypadek, w którym connected i static są prawidłowe, ale **adres MAC sąsiada nie jest dostępny**. Najprostszy bezpieczny sposób na izolowanym labie to administracyjnie zatrzymać kartę testową PC-B-LINUX z **jego lokalnej konsoli**, nie z SSH.
-
-**Urządzenie: PC-B-LINUX — Linux shell / konsola, tylko w izolowanym labie, wyłączenie portu danych**
-
-~~~bash
-sudo ip link set eth0 down
-~~~
-
-**Urządzenie: R2-vSRX — Operational Mode, obserwacja po wyłączeniu hosta**
+**R1-vSRX — Operational Mode**
 
 ~~~junos
-show route 203.0.113.0/24
+show interfaces ge-0/0/0 extensive
 show arp
-show ipv6 neighbors
-show interfaces ge-0/0/1 terse
+ping 10.12.0.2 source 10.12.0.1 count 5
+show route 10.12.0.0/30 exact
 ~~~
 
-Możesz zobaczyć nadal **connected /24 i /64 na R2**, bo routerowy port jest nadal up, ale host `203.0.113.10` nie odpowiada na ARP, a `2001:db8:20::10` nie odpowiada na ND. Sąsiad mógł pozostać chwilowo w cache, więc obserwuj stan i timeout zamiast uznawać pojedynczy odczyt za ostateczny dowód.
+Przerwanie segmentu R1–R2 w EVE zmienia L2 reachability, ale nie usuwa samego tekstu static route. W IPv6 sprawdź ND i link-local sąsiadów; samo istnienie `inet6.0` route nie wystarcza.
 
-**Urządzenie: PC-B-LINUX — Linux shell / konsola, przywrócenie portu po teście**
+### 6.11.17. Jedna awaria linku to nie automatyczny failover end-to-end
 
-~~~bash
-sudo ip link set eth0 up
-~~~
+R1 po utracie R1–R2 może wybrać kwalifikowaną trasę przez R3. Ale **R4 nadal preferuje R2**, więc odpowiedź PC-B może pójść R4→R2 i utknąć. Ponadto SRX jest stateful. To ważniejsza lekcja od samego ping do next-hopa. Dla pełnego testu redundancji wyłącz **R1–R2 i R2–R4**, tak by oba końce wybrały R3. Najpierw sprawdź stan i zakończ stare sesje kontrolowanym sposobem w izolowanym labie, bez destrukcyjnego global clear w sieci produkcyjnej.
 
-Następnie ponownie przetestuj ARP/ND i ping. Jeśli nazwa NIC jest inna, użyj wcześniej ustalonej prawidłowej nazwy. Nie wykonuj tego polecenia na maszynie, której **jedyny dostęp administracyjny** zależy od wyłączanego interfejsu.
+### 6.11.18. Default a routing instance — dłuższy prefix musi znajdować się we właściwej tabeli
 
-### 6.11.20. Oczekiwane wyniki — nie pomyl tabeli „predykcje” z realnym raportem
+`inet.0` i `TENANT.inet.0` są oddzielnymi mapami. Jeśli pakiet zostanie przekierowany do drugiej instancji, nie korzysta automatycznie z tras globalnych. Na DIAMOND eksperyment FBF przygotujemy w rozdziale 7, **bez tworzenia nowych podsieci**. Nie modyfikuj tutaj fizycznych interfejsów diamentu na ślepo.
 
-| Test | Hipoteza | Oczekiwane zachowanie |
+### 6.11.19. Co rzeczywiście udowadnia jedna sesja ICMP?
+
+Może dowieść reachability w konkretnym kierunku, ale nie udowodnić ECMP czy odporności na zanik *odległego* połączenia. Weryfikuj obie strony, trasę zwrotną, RIB/FIB na R1/R4 i security sessions na przechodzonych SRX. Gdy traceroute pokazuje gwiazdki przy działającym PC-A↔PC-B, zacznij od host-inbound/ICMP, nie od zmiany trasy.
+
+### 6.11.20. Macierz przewidywanych skutków
+
+| Zmiana | Oczekiwana przyczyna | Co sprawdzić |
 |---|---|---|
-| Baseline IPv4/IPv6 | Obie strony znają drogę i return path | Ping z PC-A do PC-B w obu rodzinach PASS |
-| A: brak IPv4 route na R1 | Nie ma odpowiedniego LPM do ERP | IPv4 FAIL, IPv6 może działać |
-| B: niedostępny next-hop | Static niekwalifikowana lub niewykonalna | Brak active route / route reason; fizyczny port nadal up |
-| C: brak default IPv4 na R2 | Odpowiedź nie wraca do OFFICE | IPv4 FAIL, IPv6 może działać |
-| D: connected vs default | LPM preferuje /24 nad /0 | Do własnego ERP connected, do OFFICE default |
-| E: brak IPv6 static na R1 | Oddzielna rodzina routingowa | IPv6 FAIL, IPv4 PASS |
-| F: bardziej szczegółowy discard | /32 wygrywa z /24 | IPv4 PC-B jest blackholed |
-| G: PC-B NIC down | RIB nadal może mieć connected | ARP/ND failed i host unreachable |
+| Brak /24 na R1 | brak RIB do PC-B | show route i FIB |
+| Zły next-hop | unresolved/hidden | show route extensive |
+| Brak /24 na R4 | brak drogi zwrotnej | route i session |
+| Dodatkowy default /0 | /24 nadal wygrywa LPM | forwarding-table |
+| Brak IPv6 route | osobny inet6.0 | ND + ping -6 |
+| /32 discard do PC-B | dłuższy prefix | route + FIB |
+| Link R1–R2 down | możliwa niespójna droga zwrotna | R4 route + oba kierunki |
 
-Wszystkie powyższe to **przewidywane wyniki**. Nie stawiaj przy nich statusu PASS, dopóki nie zobaczysz prawdziwego outputu w EVE-NG.
+### 6.11.21. Cleanup — odbuduj dokładnie DIAMOND
 
-### 6.11.21. Cleanup i finalny dowód zakończenia
+Po każdym `commit confirmed 2` nie wykonuj przed końcem timera nowego `commit check`. Potwierdź, że R1 ma trasę do `198.51.100.0/24` via R2 + backup R3, a R4 do `192.0.2.0/24` via R2 + backup R3. Usuń testowy /0 i /32 discard, sprawdź, czy oba górne linki działają.
 
-Po każdej próbie:
-- sprawdź `show system commit`; nie pozostaw żadnego pending `commit confirmed`;
-- potwierdź, że route z baseline jest w właściwej tablicy;
-- sprawdź, czy `203.0.113.10/32 discard` już nie istnieje;
-- sprawdź status portów i sąsiadów;
-- zrób test klienta w obu rodzinach;
-- udokumentuj faktyczną godzinę, wersję Junos i obserwację.
-
-**Urządzenie: R1-vSRX — Operational Mode, finalny odczyt**
+**R1-vSRX i R4-vSRX — każde oddzielnie, Operational Mode**
 
 ~~~junos
 show system commit
 show interfaces terse
-show route 203.0.113.0/24
-show route 203.0.113.10/32
-show route table inet6.0
-show route forwarding-table destination 203.0.113.10
-show arp
-show ipv6 neighbors
+show route
 show security flow session summary
 ~~~
 
-**Urządzenie: R2-vSRX — Operational Mode, finalny odczyt**
+**PC-A — VPCS console**
 
-~~~junos
-show system commit
-show route 0.0.0.0/0
-show route table inet6.0
-show interfaces terse
-show security flow session summary
+~~~text
+ping 198.51.100.10
 ~~~
 
-**Urządzenie: PC-A-LINUX — Linux shell, finalny test**
+**PC-B — VPCS console**
 
-~~~bash
-ping -c 5 203.0.113.10
-ping -6 -c 5 2001:db8:20::10
+~~~text
+ping 192.0.2.10
 ~~~
 
-**Nie wykonuj `rollback 0` w shared candidate zawierającym potencjalne cudze zmiany.** W izolowanym labie możesz przywrócić baseline do właściwej private candidate po potwierdzeniu, że pending timer zakończył się zgodnie z planem.
+### 6.11.22. Evidence package i status walidacji
 
-### 6.11.22. Co wpisujesz do `VERIFY.md` zamiast „it works”?
-
-Dla każdego eksperymentu zapisz:
-- dokładny obraz/vSRX release i ewentualny rodzaj host Linux;
-- rzeczywiste mapowanie QEMU NIC → `fxp0/ge`;
-- timestamp przed i po;
-- baseline `show interfaces`, `show route`, FIB i ARP/ND;
-- dokładne `show | compare` i sposób zatwierdzenia zmiany;
-- odczyt podczas fault oraz jego interpretację;
-- wynik PC-A → PC-B i test zwrotny;
-- czy `commit confirmed` automatycznie przywrócił konfigurację;
-- co nie zadziałało i jaki był root cause;
-- końcowy rezultat PASS / FAIL / NOT TESTED.
-
-**Ważna zasada:** nie publikuj w publicznym repozytorium danych rzeczywistych klientów, kont, haseł, kluczy, tokenów ani całej konfiguracji urządzenia z sekretami.
-
-**Status sekcji 6.11:** **PLANNED / NOT RUNTIME VALIDATED** — czytelnik ma pełny instruktaż, ale potwierdzenie wykonania na konkretnym obrazie jest osobnym zadaniem.
-
-
-
----
+Zapisz wersję QEMU/vSRX, realne port mapping, obie RIB/FIB, sesje, wyniki obu VPCS i wyniki fault→naprawa. Pokaż różnicę między `PLANNED`, `STATIC VALIDATED` i `RUNTIME VALIDATED`. Zdalne lo0 /32 bez tras to nie błąd topologii. Nie publikuj sekretów i nie „zgaduj” outputów.
 
 ## 6.CASE. [EXT] Ćwiczenia operatorskie — siedem błędnych intuicji, które trzeba wyeliminować
 
