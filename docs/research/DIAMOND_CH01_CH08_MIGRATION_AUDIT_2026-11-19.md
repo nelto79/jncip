@@ -20,13 +20,14 @@ Nie powstają dodatkowe fizyczne łącza R2–R3 lub R1–R4. Baseline statyczny
 | [2 — Junos OS Architecture](../chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md) | L2 hop-by-hop przez R1–R2–R4, R3 backup, CLI/FIB i cztery lo0 | diagramy RE/PFE/procesów pozostają schematami mechanizmów, a nie nowymi sieciami |
 | [3 — Junos CLI](../chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md) | R1–R2 na ge-0/0/0.0, R1–R3 na ge-0/0/1.0, workflow candidate/commit na R1 | logika shared/private/commit nie potrzebuje dodatkowych routerów |
 | [4 — Initial Configuration & Services](../chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md) | R1 w bazowym DIAMOND | odizolowany **OOB/services** `172.31.240.0/24` dla NTP/AAA/SNMP/syslog/SCP jest *oddzielnym labem usług*, nie częścią sześciowęzłowej topologii |
-| [5 — Monitoring & Maintenance](../chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md) | laboratorium 5.9 przebudowane na 4 vSRX, 2 VPCS, ścieżka zwrotna i R3 alternate | DOM optyczny, Virtual Chassis i fizyczne wymiany sprzętu wymagają urządzeń rzeczywistych |
+| [5 — Monitoring & Maintenance](../chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md) | laboratorium 5.9 **i specyfikacja labs/ch05** przebudowane na 4 vSRX, 2 VPCS, ścieżka zwrotna i R3 alternate | DOM optyczny, Virtual Chassis i fizyczne wymiany sprzętu wymagają urządzeń rzeczywistych |
 | [6 — Routing Fundamentals](../chapters/JUNOS_Rozdzial_06_Routing_Fundamentals.md) | 4-hop path + obie drogi, static/qualified-next-hop, nowe 6.11, problemy ARP/FIB i reverse route | **dual-stack IPv6** na tych samych linkach w osobnym wariancie; hosty Linux tylko jeśli VPCS IPv6 nieobsługiwane; scenariusz overlapping VRF to osobna *logiczna* ilustracja |
 | [7 — Protocol-Independent Routing](../chapters/JUNOS_Rozdzial_07_Protocol_Independent_Routing.md) | aggregate/generated na sztucznych trasach via R2/R3; RIB group/FBF, ECMP i lab 7.8 na DIAMOND | syntetyczne `10.60.0.0/16` / `10.70.0.0/16` są wpisami RIB, **nie nowymi LAN-ami**; FBF `then routing-instance` zależy od wsparcia platformy vSRX |
 | [8 — Routing Policy & Firewall Filters](../chapters/JUNOS_Rozdzial_08_Routing_Policy_and_Firewall_Filters.md) | cztery eBGP peerings po istniejących odcinkach; R1 LAN-A, R4 LAN-B; export/import, LocalPref, stateless vs stateful i fault lab 8.14 | dodatkowe syntetyczne prefiksy route-filter/uRPF nie stanowią siódmego segmentu; wariant BGP musi usunąć konfliktujące statics na *izolowanym klonie* |
 
 ## Archiwum i wersje niekanoniczne
 
+- [Poprzedni lab CH05 (dwa vSRX, błędne podłączenie PC-B do R2)](../archive/CH05_LEGACY_TWO_VSRX_MONITORING_LAB.md) — **ARCHIVE ONLY**.
 - [Poprzedni lab 6.11 (dwa routery, osobne IPv6)](../archive/CH06_ROUTING_FUNDAMENTALS_LEGACY_TWO_ROUTER_LAB.md) — **ARCHIVE ONLY**.
 - [Poprzedni lab 7.8 (R1 i Linux upstream)](../archive/CH07_LEGACY_LINUX_FBF_LAB.md) — **ARCHIVE ONLY**.
 - [Poprzedni lab 8.14 (dwa routery eBGP)](../archive/CH08_LEGACY_TWO_ROUTER_BGP_LAB.md) — **ARCHIVE ONLY**.
