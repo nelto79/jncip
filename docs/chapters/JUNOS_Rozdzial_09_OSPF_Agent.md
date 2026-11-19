@@ -1502,6 +1502,28 @@ show route 10.9.104.0/24 exact
 show route table inet6.0 2001:db8:9:104::/64 exact
 ~~~
 
+**Urządzenie: R2-vSRX — Operational Mode (SYMULOWANY OUTPUT; układ pól zależy od Junos release)**
+
+~~~text
+user@R2> show ospf neighbor
+Address          Interface       State  ID             Pri  Dead
+10.9.12.1        ge-0/0/1.0      Full   10.255.0.1       0    ...
+10.9.23.2        ge-0/0/2.0      Full   10.255.0.3       0    ...
+~~~
+
+**Interpretacja symulacji:** R2 ma dwa pełne sąsiedztwa p2p, jedno w Area 10 i jedno w Area 0. `Pri 0` na p2p nie jest dowodem blokady adjacency ani dowodem DR election — DR na takim łączu nie występuje. `Dead` zmienia się wraz z odebranymi Hello, dlatego nie wpisujemy tu fikcyjnego stałego czasu.
+
+**Urządzenie: R1-vSRX — Operational Mode (SYMULOWANY OUTPUT: tylko istotny fragment, nie pełny transkrypt)**
+
+~~~text
+user@R1> show route 10.9.104.0/24 exact
+inet.0: ...
+10.9.104.0/24   *[OSPF/10] ...
+                    > to 10.9.12.2 via ge-0/0/1.0
+~~~
+
+**Interpretacja symulacji:** `[OSPF/10]` to route preference OSPF dla tej trasy, a nie suma kosztów łączy. W wyniku widać **aktywną** ścieżkę przez R2. Rzeczywista metryka, wiek trasy i szczegóły wyświetlenia zależą od stanu labu; nie podajemy ich jako rzekomo zmierzonych. Dla IPv6 wykonaj analogiczny odczyt w `inet6.0` i sprawdź osobny next-hop/ND.
+
 **Interpretacja:** 10.9.104.0/24 i 2001:db8:9:104::/64 powinny być **inter-area** z perspektywy R1, z następnym hopem przez R2. Jeżeli R1 widzi je jako **direct**, pomylono przypisanie adresów lub podłączono nieoczekiwany port. Jeśli brak trasy, idź po kolei przez R2 i R3. Upewnij się też, że Type 3 / inter-area prefix LSA rzeczywiście dotarło do R1, zamiast sprawdzać tylko lokalne Router LSA.
 
 ### 9.16.7. Skonfiguruj PC-A i PC-B: test tranzytu, nie tylko ping z routera
@@ -1688,15 +1710,42 @@ commit
 
 ### 9.16.11. Eksperyment D — stub i default-route generation
 
-**Cel:** rozróżnić normal Area 20 od stub, zaobserwować brak Type 5 i sprawdzić default route z ABR.  
-**Stan początkowy:** po usunięciu CH09-EXTERNAL, normal Area 20, IPv4 OSPFv2 Full.  
-**Fault injection:** konwertujemy Area 20 na **stub** po obu stronach; na ABR R3 jawnie ustawiamy **default-metric 10**.
+**Cel:** porównać *przed i po* konkretny zewnętrzny LSA Type 5, a nie wnioskować o poprawności stub z pustej bazy, w której nie istniała żadna trasa external. Następnie sprawdzić, czy R4 ma default od ABR.
+
+**Stan początkowy:** normal Area 20, OSPFv2 Full, brak konfiguracji pozostałej po poprzednich fault injections. Najpierw tworzymy **kontrolną reklamę external** na R2 (router poza Area 20). Adres 172.31.91.0/24 jest świadomie kierowany do **discard** tylko na potrzeby obserwacji LSA — nie należy testować go jako działającej sieci użytkownika.
+
+**Urządzenie: R2-vSRX — Configuration Mode (przygotowanie kontrolnej Type 5)**
+
+~~~junos
+set routing-options static route 172.31.91.0/24 discard
+set policy-options policy-statement CH09-STUB-EXTERNAL term ALLOW from protocol static
+set policy-options policy-statement CH09-STUB-EXTERNAL term ALLOW from route-filter 172.31.91.0/24 exact
+set policy-options policy-statement CH09-STUB-EXTERNAL term ALLOW then accept
+set policy-options policy-statement CH09-STUB-EXTERNAL term REST then reject
+set protocols ospf export CH09-STUB-EXTERNAL
+commit check
+show | compare
+commit confirmed 5
+~~~
+
+**Urządzenie: R4-vSRX — Operational Mode (pomiar „przed”)**
+
+~~~junos
+show ospf neighbor
+show ospf database external
+show route 172.31.91.0/24 exact
+~~~
+
+**Oczekiwany wynik „przed”:** w normal Area 20 R4 powinien otrzymać LSA Type 5 do 172.31.91.0/24 z Advertising Router R2 i wyliczyć trasę OSPF external (jeżeli ma drogę do ASBR). Jeżeli Type 5 nie dociera, **nie przechodź jeszcze** do stub. Najpierw diagnozuj export policy, aktywność static i topologię.
+
+**Fault injection:** przekształcamy Area 20 na stub po obu stronach R3–R4; na ABR R3 jawnie ustawiamy **default-metric 10**. Area 0 i Area 10 pozostają normalne. OSPFv3 jest niezależne i nie zmieniamy go w tym ćwiczeniu.
 
 **Urządzenie: R3-vSRX — Configuration Mode**
 
 ~~~junos
 set protocols ospf area 0.0.0.20 stub default-metric 10
 commit check
+show | compare
 commit confirmed 5
 ~~~
 
@@ -1705,20 +1754,24 @@ commit confirmed 5
 ~~~junos
 set protocols ospf area 0.0.0.20 stub
 commit check
+show | compare
 commit confirmed 5
 ~~~
 
-**Urządzenie: R4-vSRX — Operational Mode**
+**Urządzenie: R4-vSRX — Operational Mode (pomiar „po”)**
 
 ~~~junos
 show ospf neighbor
-show ospf database
+show ospf database external
 show ospf database netsummary
+show route 172.31.91.0/24 exact
 show route 0.0.0.0/0 exact
 show route 10.9.101.0/24 exact
 ~~~
 
-Oczekujemy Full i default summary do R3, gdy ABR rzeczywiście generuje default zgodnie z opcją. Nie zakładaj obecności default bez sprawdzenia. Konwertowanie obszaru w różnym czasie może chwilowo zerwać sąsiedztwo — dlatego wyłącznie w izolowanym labie.
+**Oczekiwany wynik „po”:** adjacency R3–R4 wróci do Full po uzgodnieniu zgodnych parametrów stub. W przeciwieństwie do stanu początkowego R4 **nie powinien otrzymywać external LSA Type 5** z R2. Jeżeli R3 generuje default za pomocą `default-metric`, R4 powinien otrzymać odpowiednią międzyobszarową reklamę 0.0.0.0/0 i wybrać ją w RIB, chyba że istnieje bardziej preferowane źródło tej samej default route. Na R2 reklama external nadal istnieje, więc jej nieobecność na R4 jest **dowodem ograniczenia flooding**, a nie braku ASBR. **Nie myl braku external LSA z brakiem trasy do wszystkich external destinations** — default może nadal zapewniać przekazywanie przez ABR, ale sieć 172.31.91.0/24 kończy się tu na discard.
+
+**Praktyczna pułapka:** podczas przełączania typu area parametry po obu stronach przez chwilę są niezgodne, więc adjacency może się zerwać. To kontrolowany skutek eksperymentu. Poczekaj na nowy Full i dopiero wtedy interpretuj LSDB. Jeśli commit confirmed cofnie którąś stronę, poprawnie odtwórz typ area symetrycznie na obu routerach.
 
 **Urządzenie: R3-vSRX — Configuration Mode (powrót do normal area)**
 
@@ -1728,7 +1781,7 @@ commit check
 commit
 ~~~
 
-**Urządzenie: R4-vSRX — Configuration Mode**
+**Urządzenie: R4-vSRX — Configuration Mode (powrót do normal area)**
 
 ~~~junos
 delete protocols ospf area 0.0.0.20 stub
@@ -1736,7 +1789,17 @@ commit check
 commit
 ~~~
 
-**Postcheck:** stan Full oraz powrót do baseline Type 3 dla sieci Area 10; brak sztucznej trasy default w Area 20, jeśli nie istnieje inne źródło default.
+**Urządzenie: R2-vSRX — Configuration Mode (usunięcie kontrolnego ASBR)**
+
+~~~junos
+delete protocols ospf export CH09-STUB-EXTERNAL
+delete policy-options policy-statement CH09-STUB-EXTERNAL
+delete routing-options static route 172.31.91.0/24
+commit check
+commit
+~~~
+
+**Postcheck:** ponownie Full R3–R4, ponownie normal Area 20, brak kontrolnego Type 5 po usunięciu redystrybucji, powrót do baseline Type 3. Jeśli wcześniej istniała inna rzeczywista default route, oceń jej źródło zamiast zakładać, że `show route 0.0.0.0/0` musi być puste.
 
 ### 9.16.12. Eksperyment E — OSPFv3 z awarią tylko IPv6
 
