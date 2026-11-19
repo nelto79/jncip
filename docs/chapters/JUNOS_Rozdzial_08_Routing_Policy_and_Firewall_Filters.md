@@ -9,35 +9,47 @@
 
 > Przez najbliższe lekcje nie będziemy uczyć się „trzech rodzajów ACL”. Będziemy rozwiązywać jeden problem sieciowy, który początkowo wygląda jak usterka BGP, później jak awaria routingu, a na końcu okaże się także problemem filtrowania pakietów. Tak najłatwiej zobaczyć, dlaczego Junos potrzebuje kilku różnych mechanizmów i dlaczego ich nazwy bywają myląco podobne.
 
-## Przed rozpoczęciem: firma, dwa budynki i telefon z NOC
 
-Jest poniedziałek, 8:15. Firma otworzyła niewielki oddział. W oddziale stoi router **R1**, w centrali router **R2**. Oba działają na Junos i zestawiają eBGP przez połączenie WAN. W oddziale jest sieć użytkowników **10.10.10.0/24**, w centrali — **10.20.20.0/24**. Administrator testuje dostęp do serwera ERP. Sesja BGP jest `Established`, ale połączenie nie działa.
+## Przed rozpoczęciem: dwa LAN-y, cztery routery i jeden pozornie zdrowy BGP
 
-Pierwsza reakcja jest znajoma każdemu inżynierowi Cisco: sprawdzić sąsiada, routing table i ACL. Tyle że tutaj „ACL” może oznaczać trzy bardzo różne rzeczy. Ktoś mógł zabronić **ogłoszenia trasy** z R1 do R2. Ktoś mógł zabronić **przyjęcia trasy** na R2. Albo ścieżka jest prawidłowa, lecz zatrzymywany jest dopiero **pakiet** z komputera użytkownika. Jeśli pracujemy na SRX, dojdzie jeszcze kontrola stanu sesji między strefami bezpieczeństwa.
+Firma łączy LAN-A z LAN-B przez **naszą referencyjną topologię DIAMOND**. PC-A `192.0.2.10/24` ma gateway R1 `192.0.2.1`. PC-B `198.51.100.10/24` jest za R4, gateway `198.51.100.1`. R1–R4 można połączyć drogą górną przez **R2** albo dolną przez **R3**. R2 nie jest bramą PC-B: jest urządzeniem tranzytowym.
 
-Nie rozwiązujmy wszystkich tych problemów od razu. Najpierw zobaczmy, jak wygląda sieć, zanim cokolwiek skonfigurujemy.
-
-```mermaid
+~~~mermaid
 flowchart LR
-    PA["PC-A<br/>10.10.10.10"] --- A["LAN-A<br/>10.10.10.0/24"]
-    A --- R1["R1 — Junos<br/>10.10.10.1<br/>AS 64510"]
-    R1 --- W["WAN 192.0.2.0/30<br/>eBGP"]
-    W --- R2["R2 — Junos<br/>10.20.20.1<br/>AS 64520"]
-    R2 --- B["LAN-B<br/>10.20.20.0/24"]
-    B --- PB["PC-B<br/>10.20.20.20"]
-```
+  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
+  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
+  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
+  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
+  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
+  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
 
-*Rysunek 8.1. Topologia, którą będziemy rozbudowywać. Tekst alternatywny: dwa routery R1 i R2 połączone WAN i eBGP, po jednym LAN oraz komputerze po każdej stronie. Diagram autorski.* WAN: R1 = 192.0.2.1/30, R2 = 192.0.2.2/30. Adresy 192.0.2.0/24 i 198.51.100.0/24 są używane wyłącznie jako przestrzenie dokumentacyjne w izolowanym labie.
+  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
+  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
+  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
+  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
+  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
+  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
 
-Zadaj sobie proste pytanie: **co właściwie musi być prawdą, by PC-A nawiązał połączenie z PC-B?** R1 musi wiedzieć, dokąd wysłać pakiet. R2 musi znać drogę powrotną do PC-A. Oba urządzenia muszą dopuścić ruch na swojej ścieżce forwarding. A komputery muszą mieć właściwe bramy, adresy i lokalne polityki bezpieczeństwa.
+  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
+  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
+  class R1,R2,R3,R4 vsrx;
+  class PCA,PCB vpcs;
+~~~
 
-Zauważ, jak wiele warunków mieści się za zielonym statusem jednego sąsiedztwa BGP.
+*Rysunek 8.1. Kanoniczny DIAMOND — 4×vSRX i 2×VPCS. [Pełne źródło diagramu Mermaid](../../labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) i [tabela adresacji](../../labs/reference-diamond-4vsrx-2vpcs/README.md).*
+
+Dla części wykładu zestawimy **eBGP na istniejących połączeniach**, bez dokładania nowych linków: R1 (AS 64510) ↔ R2 (AS 64520) po `10.12.0.0/30`, R2 ↔ R4 (AS 64540) po `10.24.0.0/30` oraz analogicznie R1 ↔ R3 (AS 64530) po `10.13.0.0/30` i R3 ↔ R4 po `10.34.0.0/30`. To **wariant protokołowy**; domyślny statyczny baseline CH06 musi zostać odłączony w osobnej kopii, inaczej static/5 może wygrać z BGP/170.
+
+W poniedziałek o 8:15 operator z NOC mówi: „BGP Established, a użytkownik PC-A nie widzi PC-B”. Możliwe przyczyny są zupełnie różne: R1 nie ogłasza `192.0.2.0/24`, R2 nie przyjmuje tego prefiksu, R4 nie otrzymuje go przez R2, albo pakiet jest zatrzymywany przez firewall filter/security policy. Nie rozwiązujemy tego globalnym permit ani dopisaniem kolejnego default w ciemno.
+
+Dodatkowe prefiksy pokazywane później przy `route-filter exact/longer/orlonger`, summary oraz uRPF są **syntetycznymi przykładami polityki i tablic routingu**, a nie nowymi podsieciami fizycznego EVE. Jeśli rysunek pokazuje proces import/export lub kolejność filtrowania, jest **diagramem mechanizmu**, a nie inną topologią sprzętową.
 
 ---
+**Stała reguła adresacji dla wszystkich poniższych przykładów:** R1 LAN-A to `192.0.2.0/24` na `ge-0/0/2.0`, PC-A `192.0.2.10`; R1–R2 to `10.12.0.0/30` (R1 `10.12.0.1`, R2 `10.12.0.2`); R4 LAN-B to `198.51.100.0/24` na `ge-0/0/2.0`, PC-B `198.51.100.10`. Gdy sprawdzamy politykę eksportu R1→R2, dowodzimy tylko pierwszego sąsiedztwa BGP: aby PC-B odpowiedział, **R4 również musi poznać LAN-A**. Pozostałe linki i loopbacki są na diagramie referencyjnym; R2 **nie ma** własnego LAN-B.
 
 ## 8.1. Default routing policies — co zrobi router, jeśli mu niczego nie nakażesz? [A]
 
-Zacznijmy od sytuacji sprzed pierwszej zmiany. Interfejs LAN R1 jest skonfigurowany, więc w lokalnym RIB — zwykle `inet.0` — pojawia się trasa **direct 10.10.10.0/24**. Router ma także trasę lokalną do własnego adresu interfejsu. R1 może bez żadnego BGP odpowiadać hostowi PC-A z tej podsieci; oczywiście filtrowanie pakietów lub polityka bezpieczeństwa nadal mogą ograniczać konkretne testy.
+Zacznijmy od sytuacji sprzed pierwszej zmiany. Interfejs LAN R1 jest skonfigurowany, więc w lokalnym RIB — zwykle `inet.0` — pojawia się trasa **direct 192.0.2.0/24**. Router ma także trasę lokalną do własnego adresu interfejsu. R1 może bez żadnego BGP odpowiadać hostowi PC-A z tej podsieci; oczywiście filtrowanie pakietów lub polityka bezpieczeństwa nadal mogą ograniczać konkretne testy.
 
 Konfigurujemy eBGP między R1 i R2. Czy R1 automatycznie zacznie reklamować swoją sieć LAN? Wiele osób odruchowo odpowie „tak, przecież trasa istnieje”. W Junos to błędna intuicja. **Samo posiadanie trasy w RIB nie jest zleceniem rozgłoszenia jej przez dowolny protokół.**
 
@@ -52,9 +64,9 @@ Nie traktuj też default policy jak jednej globalnej zasady `permit any` lub `de
 **R1-vSRX — Operational Mode, obserwacja przed wprowadzeniem policy**
 
 ~~~junos
-show route 10.10.10.0/24 exact
+show route 192.0.2.0/24 exact
 show bgp summary
-show route advertising-protocol bgp 192.0.2.2
+show route advertising-protocol bgp 10.12.0.2
 show configuration protocols bgp | display set
 ~~~
 
@@ -62,7 +74,7 @@ W wynikach z naszego hipotetycznego oddziału znajdziesz aktywną trasę direct 
 
 Jeśli znasz Cisco IOS XE, myśl o tym jak o różnicy między posiadaniem trasy w `show ip route` a celowym `redistribute connected route-map ...`. Analogia dotyczy zamiaru, nie składni ani wszystkich reguł kwalifikacji BGP.
 
-**Przewidź:** gdy R1 nie reklamuje LAN-A, czy PC-A straci ping do 10.10.10.1? Nie z powodu braku eksportu. To problem informacji przekazywanej R2, nie lokalnego połączenia LAN. Gdybyś natomiast odrzucił *trasę potrzebną R1* przez import policy, mógłbyś pośrednio wpłynąć na forwarding. Właśnie na tym polega kolejna lekcja.
+**Przewidź:** gdy R1 nie reklamuje LAN-A, czy PC-A straci ping do 192.0.2.1? Nie z powodu braku eksportu. To problem informacji przekazywanej R2, nie lokalnego połączenia LAN. Gdybyś natomiast odrzucił *trasę potrzebną R1* przez import policy, mógłbyś pośrednio wpłynąć na forwarding. Właśnie na tym polega kolejna lekcja.
 
 *Źródło zachowania: [Juniper — Default Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-actions-defaults.html).*
 
@@ -72,7 +84,7 @@ Jeśli znasz Cisco IOS XE, myśl o tym jak o różnicy między posiadaniem trasy
 
 Teraz operator pyta: „Skoro mówimy o export, to czy import jest ruchem wchodzącym do interfejsu?”. Nie. To bardzo częsta pułapka. Słowa **import** i **export** w `policy-options` opisują ruch *informacji o trasach* między protokołem a tablicą routingu, a nie kierunek pakietów użytkowników na porcie.
 
-Prześledźmy jedną trasę. R1 wysyła wiadomość BGP UPDATE z prefiksem 10.10.10.0/24. R2 ją odbiera i może zastosować BGP **import policy**. Policy sprawdza, co przyszło, i decyduje, czy informacja może stać się kandydatem w tablicy routingu oraz czy należy zmienić atrybuty trasy. Jeżeli import zaakceptuje kandydaturę, R2 porównuje ją z innymi możliwymi drogami. Tylko odpowiednio wybrana i rozwiązana trasa będzie użyteczna dla forwarding.
+Prześledźmy jedną trasę. R1 wysyła wiadomość BGP UPDATE z prefiksem 192.0.2.0/24. R2 ją odbiera i może zastosować BGP **import policy**. Policy sprawdza, co przyszło, i decyduje, czy informacja może stać się kandydatem w tablicy routingu oraz czy należy zmienić atrybuty trasy. Jeżeli import zaakceptuje kandydaturę, R2 porównuje ją z innymi możliwymi drogami. Tylko odpowiednio wybrana i rozwiązana trasa będzie użyteczna dla forwarding.
 
 W drugą stronę R1 patrzy na trasy kwalifikowane do ogłoszenia i stosuje **export policy**: które wolno wysłać R2 i z jakimi atrybutami? To nie jest kopiowanie całej tablicy `inet.0`; obowiązują reguły protokołu, aktywność trasy, rodzina adresów i inne warunki kwalifikacji.
 
@@ -94,10 +106,10 @@ Przy Cisco użyłbyś podobnej intuicji do `neighbor ... route-map ... in` i `ou
 **R2-vSRX — Operational Mode, sprawdzanie odbioru na R2**
 
 ~~~junos
-show bgp neighbor 192.0.2.1
-show route receive-protocol bgp 192.0.2.1
-show route receive-protocol bgp 192.0.2.1 hidden
-show route 10.10.10.0/24 exact extensive
+show bgp neighbor 10.12.0.1
+show route receive-protocol bgp 10.12.0.1
+show route receive-protocol bgp 10.12.0.1 hidden
+show route 192.0.2.0/24 exact extensive
 show route protocol bgp
 ~~~
 
@@ -106,8 +118,8 @@ Co tu jest najważniejsze? `show bgp neighbor` dowodzi stanu protokołu, `receiv
 **R1-vSRX — Operational Mode, sprawdzanie reklamy na R1**
 
 ~~~junos
-show route 10.10.10.0/24 exact extensive
-show route advertising-protocol bgp 192.0.2.2
+show route 192.0.2.0/24 exact extensive
+show route advertising-protocol bgp 10.12.0.2
 ~~~
 
 Teraz możesz prowadzić rozmowę z NOC precyzyjnie: „Trasa jest aktywna na R1, ale nie widzę jej w ogłoszeniach R1” albo „R1 ją reklamuje, R2 widzi ją jako hidden — sprawdzamy import i powód ukrycia”. To dwie różne usterki i dwa różne miejsca naprawy.
@@ -127,13 +139,13 @@ Wiemy już, gdzie polityka jest stosowana. Teraz popatrzmy, jak pracuje. Mamy ko
 
 Najprostsza myśl brzmi: „stworzę listę dozwolonych podsieci”. Ale Junos nie dostaje jedynie listy. Dostaje **program podejmowania decyzji**. Ten program nazywa się `policy-statement`. Wewnątrz mamy uporządkowane kroki — `term`. Każdy krok może zapytać o właściwości trasy w `from` i wykonać działanie w `then`.
 
-Przyjrzyj się pierwszej polityce, zanim ją wpiszemy. Chcemy sprawdzać prefiks **i** pochodzenie. Jeżeli route do 10.10.10.0/24 jest trasą direct, wolno ją ogłosić. Jeżeli ktoś jutro wprowadzi przypadkiem static z tym adresem, nie chcemy, by sama zgodność numerów automatycznie dała mu przepustkę. Pozostałe prefiksy odrzucamy jawnie.
+Przyjrzyj się pierwszej polityce, zanim ją wpiszemy. Chcemy sprawdzać prefiks **i** pochodzenie. Jeżeli route do 192.0.2.0/24 jest trasą direct, wolno ją ogłosić. Jeżeli ktoś jutro wprowadzi przypadkiem static z tym adresem, nie chcemy, by sama zgodność numerów automatycznie dała mu przepustkę. Pozostałe prefiksy odrzucamy jawnie.
 
 **R1-vSRX — Configuration Mode, projekt polityki eksportu**
 
 ~~~junos
 set policy-options policy-statement EXPORT-TO-R2 term USERS from protocol direct
-set policy-options policy-statement EXPORT-TO-R2 term USERS from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement EXPORT-TO-R2 term USERS from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement EXPORT-TO-R2 term USERS then accept
 set policy-options policy-statement EXPORT-TO-R2 term DENY-EVERYTHING-ELSE then reject
 set protocols bgp group TO-R2 export EXPORT-TO-R2
@@ -141,7 +153,7 @@ set protocols bgp group TO-R2 export EXPORT-TO-R2
 
 Czytasz tę konfigurację jak krótką opowieść:
 
-1. „Jeżeli kandydat jest trasą direct, **i** jego prefix to dokładnie 10.10.10.0/24…”.
+1. „Jeżeli kandydat jest trasą direct, **i** jego prefix to dokładnie 192.0.2.0/24…”.
 2. „…zaakceptuj go do dalszego procesu reklamowania BGP i zakończ ocenę polityki”.
 3. „W przeciwnym razie dojdź do ostatniego termu, który odrzuca wszystko inne”.
 
@@ -174,11 +186,11 @@ Załóżmy, że chcemy rozdzielić dwa zadania: najpierw oznaczyć trasę commun
 
 ~~~junos
 set policy-options community BRANCH-ROUTE members 64510:100
-set policy-options policy-statement MARK-ROUTE term USERS from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement MARK-ROUTE term USERS from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement MARK-ROUTE term USERS then community add BRANCH-ROUTE
 set policy-options policy-statement MARK-ROUTE term USERS then next policy
 set policy-options policy-statement FINAL-CHECK term USERS from protocol direct
-set policy-options policy-statement FINAL-CHECK term USERS from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement FINAL-CHECK term USERS from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement FINAL-CHECK term USERS then accept
 set policy-options policy-statement FINAL-CHECK term REST then reject
 set protocols bgp group TO-R2 export [ MARK-ROUTE FINAL-CHECK ]
@@ -221,9 +233,9 @@ Wyobraź sobie dwóch kierowców oferujących przewiezienie paczki. Ochrona rece
 **R2-vSRX — Operational Mode, trzy kolejne pytania o trasę**
 
 ~~~junos
-show route 10.10.10.0/24 exact extensive
+show route 192.0.2.0/24 exact extensive
 show route protocol bgp
-show route forwarding-table destination 10.10.10.10
+show route forwarding-table destination 192.0.2.10
 ~~~
 
 Pierwsze pokazuje stan prefiksu i możliwe konkurujące drogi, drugie pozwala rozpoznać BGP jako źródło kandydatów, a trzecie daje perspektywę forwardingu do konkretnego adresu. RIB i FIB nie muszą prezentować identycznej liczby rekordów ani identycznego poziomu szczegółowości. W prawdziwym incydencie sprawdzisz także tablicę `inet6.0` lub odpowiednią routing instance, jeżeli pracujesz poza podstawowym IPv4 `inet.0`.
@@ -305,7 +317,7 @@ Najbardziej użyteczne pytanie przy review brzmi nie „czy syntax jest poprawny
 
 ## 8.6. Jak dobrać trasę: exact, longer, orlonger i pułapka najbardziej szczegółowej reguły [A]
 
-Przychodzi nowe polecenie: oddział ma otrzymać nie tylko 10.10.10.0/24, ale również 10.10.11.0/24. Administrator proponuje prostszy filtr „zaakceptuj 10.10.0.0/16”. Brzmi sensownie. Tyle że wtedy musimy zadać pytanie, którego nie da się uniknąć: **czy chodzi o sam prefiks /16, czy o wszystkie sieci znajdujące się w tej przestrzeni?**
+Przychodzi nowe polecenie: oddział ma otrzymać nie tylko 192.0.2.0/24, ale również 10.10.11.0/24. Administrator proponuje prostszy filtr „zaakceptuj 10.10.0.0/16”. Brzmi sensownie. Tyle że wtedy musimy zadać pytanie, którego nie da się uniknąć: **czy chodzi o sam prefiks /16, czy o wszystkie sieci znajdujące się w tej przestrzeni?**
 
 To nie jest różnica kosmetyczna. BGP reklamuje *prefiksy* — pary adres/maska. Router nie może zgadnąć, czy `10.10.0.0/16` jest oczekiwanym sumarycznym ogłoszeniem, czy wygodnym zapisem zbioru /24. Jeżeli w RIB są dwie trasy /24, polityka `route-filter 10.10.0.0/16 exact` **nie dopasuje** żadnej z nich.
 
@@ -321,15 +333,15 @@ Na przykładzie bazy 10.10.0.0/16, zapamiętaj znaczenie operatorów, a nie ich 
 | `upto /24` | /16, /17 … aż do /24, lecz nie /25 | Gdy chcesz ograniczyć nadmierną szczegółowość |
 | `prefix-length-range /24-/28` | Tylko podsieci /24–/28 wewnątrz /16 | Gdy wymagany jest przedział długości |
 
-Każda z tych reguł mówi o **długości prefiksu wpisu routingu**, a nie o źródłowym adresie pakietu. Jeśli host 10.10.10.50 otwiera HTTPS, jego źródłowe IP nie jest osobnym prefiksem /32 wysyłanym do BGP tylko dlatego, że w nagłówku ma ten adres.
+Każda z tych reguł mówi o **długości prefiksu wpisu routingu**, a nie o źródłowym adresie pakietu. Jeśli host 192.0.2.50 otwiera HTTPS, jego źródłowe IP nie jest osobnym prefiksem /32 wysyłanym do BGP tylko dlatego, że w nagłówku ma ten adres.
 
-A teraz wykonajmy ćwiczenie bez urządzeń. Mamy w RIB trzy aktywne trasy: 10.10.0.0/16, 10.10.10.0/24 i 10.10.10.128/25. Filtr `10.10.0.0/16 upto /24` będzie mógł dopasować dwie pierwsze. Trzecia, mimo że mieści się adresowo wewnątrz /16, ma długość **/25**, więc zostanie pominięta. **Routing prefix match nie jest zwykłym sprawdzaniem, czy dany adres IP należy do sieci.**
+A teraz wykonajmy ćwiczenie bez urządzeń. Mamy w RIB trzy aktywne trasy: 10.10.0.0/16, 192.0.2.0/24 i 192.0.2.128/25. Filtr `10.10.0.0/16 upto /24` będzie mógł dopasować dwie pierwsze. Trzecia, mimo że mieści się adresowo wewnątrz /16, ma długość **/25**, więc zostanie pominięta. **Routing prefix match nie jest zwykłym sprawdzaniem, czy dany adres IP należy do sieci.**
 
 **R1-vSRX — Configuration Mode, tylko dwa konkretne segmenty LAN**
 
 ~~~junos
 set policy-options policy-statement EXPORT-LANS term USERS from protocol direct
-set policy-options policy-statement EXPORT-LANS term USERS from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement EXPORT-LANS term USERS from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement EXPORT-LANS term USERS from route-filter 10.10.11.0/24 exact
 set policy-options policy-statement EXPORT-LANS term USERS then accept
 set policy-options policy-statement EXPORT-LANS term REST then reject
@@ -340,7 +352,7 @@ Dwa `route-filter` w jednym termie reprezentują alternatywne wzorce prefiksów,
 **R1-vSRX — Configuration Mode, wariant z nazwanym zbiorem prefiksów**
 
 ~~~junos
-set policy-options prefix-list BRANCH-LANS 10.10.10.0/24
+set policy-options prefix-list BRANCH-LANS 192.0.2.0/24
 set policy-options prefix-list BRANCH-LANS 10.10.11.0/24
 set policy-options policy-statement EXPORT-LIST term APPROVED from protocol direct
 set policy-options policy-statement EXPORT-LIST term APPROVED from prefix-list BRANCH-LANS
@@ -352,7 +364,7 @@ Te dwa warianty realizują podobną intencję biznesową. Nie wdrażaj ich obu r
 
 ### Bardzo ważny niuans: policy też używa longest match, ale to nie jest LPM w FIB
 
-Znasz regułę LPM z Cisco CEF i z rozdziału 6. Pakiet do 10.10.10.130 trafi do najbardziej szczegółowej dostępnej trasy w FIB. W routing policy Junos również potrafi szukać najlepszego prefiksowego dopasowania, lecz **szuka wzorca route-filter**, a dopiero potem ocenia przypisany do niego typ dopasowania.
+Znasz regułę LPM z Cisco CEF i z rozdziału 6. Pakiet do 192.0.2.130 trafi do najbardziej szczegółowej dostępnej trasy w FIB. W routing policy Junos również potrafi szukać najlepszego prefiksowego dopasowania, lecz **szuka wzorca route-filter**, a dopiero potem ocenia przypisany do niego typ dopasowania.
 
 Załóżmy, że w **jednym termie** są dwa warunki:
 
@@ -384,9 +396,9 @@ Junos ma polecenie `test policy`. Nie udaje ono całego eBGP, ale jest pomocne p
 **R1-vSRX — Operational Mode, test lokalnej policy; składnię potwierdź na swoim release**
 
 ~~~junos
-test policy EXPORT-LANS 10.10.10.0/24
+test policy EXPORT-LANS 192.0.2.0/24
 test policy EXPORT-LANS 10.10.11.0/24
-show route advertising-protocol bgp 192.0.2.2
+show route advertising-protocol bgp 10.12.0.2
 ~~~
 
 Czytaj wynik jako dwa różne dowody: pierwszy i drugi testują logikę dopasowania tras w aktualnej tabeli, trzeci dotyczy faktycznego eksportu BGP do peera. Dopiero ich zestawienie może potwierdzić twoją hipotezę.
@@ -401,7 +413,7 @@ Wyobraź sobie, że naprawiliśmy ogłoszenia BGP. R1 i R2 widzą swoje LAN-y, r
 
 Właśnie w tym miejscu rozdział 8 staje się przydatny w prawdziwej pracy. **Port TCP 443 nie należy do decyzji BGP o reklamowaniu prefiksu.** Jeśli routing jest prawidłowy, a konkretne pakiety są odrzucane, musimy zejść z poziomu informacji routingu na poziom ruchu użytkownika.
 
-Routing policy czyta obiekt typu „sieć 10.20.20.0/24 poznana przez BGP, z takimi atrybutami”. **Firewall filter** czyta konkretne pakiety: źródło 10.10.10.10, cel 10.20.20.20, TCP, port 443, ewentualnie inne pola nagłówków i metadane właściwe rodzinie oraz platformie. To dwa odmienne pytania skierowane do dwóch mechanizmów.
+Routing policy czyta obiekt typu „sieć 198.51.100.0/24 poznana przez BGP, z takimi atrybutami”. **Firewall filter** czyta konkretne pakiety: źródło 192.0.2.10, cel 198.51.100.10, TCP, port 443, ewentualnie inne pola nagłówków i metadane właściwe rodzinie oraz platformie. To dwa odmienne pytania skierowane do dwóch mechanizmów.
 
 Jeśli pracujesz od lat z Catalystami, odruchowo pomyślisz o IPv4 ACL przypisanej na `in` lub `out`. To dobra intuicja na start. Junos firewall filter jest zwykle **stateless**: ocenia dopasowanie bez konieczności pamiętania, czy dany przepływ został wcześniej zainicjowany. Może jednak pełnić więcej funkcji niż zwykły `permit/deny`: liczyć, logować w odpowiednio wspieranym zakresie, klasyfikować CoS, zastosować policer, chronić Routing Engine, a w specjalnym przypadku skierować ruch do innej instancji routingu (filter-based forwarding, który poznaliśmy w rozdziale 7).
 
@@ -433,7 +445,7 @@ Szczególnie ważna jest jeszcze jedna różnica. Pakiet **do własnego adresu r
 
 Spróbujmy zbudować filtr z konkretnym zadaniem, zamiast poznawać od razu listę wszystkich match conditions.
 
-Do interfejsu LAN R1 jest podłączona wyłącznie sieć 10.10.10.0/24. Zespół bezpieczeństwa zauważył, że jeden z testowych komputerów potrafi wysyłać pakiety z nieprawidłowym adresem źródłowym 203.0.113.10. Jeśli taki pakiet pojawi się na wejściu LAN, chcemy go zablokować i policzyć. **Zwykły ruch z LAN-A nadal ma działać.**
+Do interfejsu LAN R1 jest podłączona wyłącznie sieć 192.0.2.0/24. Zespół bezpieczeństwa zauważył, że jeden z testowych komputerów potrafi wysyłać pakiety z nieprawidłowym adresem źródłowym 203.0.113.10. Jeśli taki pakiet pojawi się na wejściu LAN, chcemy go zablokować i policzyć. **Zwykły ruch z LAN-A nadal ma działać.**
 
 Nie zaczynamy od składni. Najpierw ustalamy warunek: jeśli źródło pakietu znajduje się w 203.0.113.0/24, uruchom `discard` i zwiększ licznik `SPOOFED`. Jeśli pakiet nie pasuje, pozwól mu przejść przez filtr, aby dalsze etapy — routing i ewentualna security policy — podjęły swoje decyzje. Ten drugi warunek musi być jawny, bo **domyślny koniec zwykłego stateless firewall filter odrzuca pakiety bez dopasowania**.
 
@@ -514,8 +526,8 @@ Dla EX/QFX przy większych filtrach trzeba uwzględnić **zasoby TCAM/PFE**. Nie
 
 Wyobraź sobie teraz trzy wyniki:
 
-- `show route 10.20.20.0/24 exact` na R1 pokazuje aktywne BGP;
-- `show route forwarding-table destination 10.20.20.20` wskazuje właściwy WAN next hop;
+- `show route 198.51.100.0/24 exact` na R1 pokazuje aktywne BGP;
+- `show route forwarding-table destination 198.51.100.10` wskazuje właściwy WAN next hop;
 - `show firewall filter LAN-IN` ujawnia rosnący licznik dropów podczas prób PC-A.
 
 Wniosek nie brzmi: „BGP jest zepsuty”. Wniosek brzmi: **mamy dowód, że przynajmniej część pakietów jest odrzucana przed zakończeniem forwarding na R1**. Teraz trzeba potwierdzić, że licznik dotyczy dokładnie testowanego strumienia, a nie równoległego ruchu. W razie potrzeby zbieramy pre/post delta na cichym labie zamiast opierać się na historycznej wartości licznika.
@@ -526,9 +538,9 @@ Na vSRX przechodzimy jeszcze jeden poziom. Jeśli filtr dopuszcza pakiet, weryfi
 
 ~~~junos
 show security policies from-zone LAN to-zone WAN
-show security flow session source-prefix 10.10.10.10
+show security flow session source-prefix 192.0.2.10
 show security flow session summary
-show route 10.20.20.0/24 exact
+show route 198.51.100.0/24 exact
 ~~~
 
 Działająca security policy to nie uniwersalne „permit” dla wszystkiego: liczą się źródło, cel, strefy, kierunek inicjacji, application i realnie dopasowana reguła. Zwróć też uwagę, że sesje w SRX mogą zachowywać się inaczej niż nowo inicjowany ruch po zmianie konfiguracji. Testuj **nowe połączenie** i aktualną politykę.
@@ -547,7 +559,7 @@ Dotąd rozmawialiśmy głównie o adresie docelowym. Router patrzy na destinatio
 
 Tu pojawia się **Unicast Reverse Path Forwarding (uRPF)**. Nie jest protokołem routingu ani kolejną BGP policy. To sposób sprawdzenia wiarygodności **źródła pakietu** na podstawie informacji o drodze powrotnej. Router niejako pyta: „Gdybym chciał wysłać coś do tego adresu źródłowego, którędy powinienem to zrobić?”.
 
-W bardzo prostej sieci odpowiedź często zdradza oszustwo. Jeśli pakiet od źródła 10.10.10.50 przyszedł na WAN, ale droga do sieci 10.10.10.0/24 prowadzi przez lokalny LAN, źródło nie pasuje do oczekiwanej strony sieci.
+W bardzo prostej sieci odpowiedź często zdradza oszustwo. Jeśli pakiet od źródła 192.0.2.50 przyszedł na WAN, ale droga do sieci 192.0.2.0/24 prowadzi przez lokalny LAN, źródło nie pasuje do oczekiwanej strony sieci.
 
 ### Strict — „przyszedłeś właściwymi drzwiami?”
 
@@ -625,8 +637,8 @@ Najpierw pytasz: co dziś działa? Sprawdzasz istniejące BGP, aktywne trasy i r
 show version
 show interfaces terse
 show bgp summary
-show route 10.10.10.0/24 exact extensive
-show route advertising-protocol bgp 192.0.2.2
+show route 192.0.2.0/24 exact extensive
+show route advertising-protocol bgp 10.12.0.2
 show configuration protocols bgp | display set
 show configuration policy-options | display set
 show configuration firewall | display set
@@ -667,8 +679,8 @@ Tu zatrzymaj się i wykonaj zaplanowane **post-checki**. Nie uruchamiaj automaty
 
 ~~~junos
 show bgp summary
-show route advertising-protocol bgp 192.0.2.2
-show route 10.10.10.0/24 exact
+show route advertising-protocol bgp 10.12.0.2
+show route 192.0.2.0/24 exact
 show firewall filter LAN-IN
 show security flow session summary
 ~~~
@@ -693,7 +705,7 @@ Należy również rozróżnić „brak w `advertising-protocol`” od „R2 nie 
 
 ### Krok piąty: pokaż wynik tak, by kolejny dyżurny nie zgadywał
 
-Dobry work note po zmianie nie brzmi „BGP checked, looks fine”. Brzmi: „R1 direct 10.10.10.0/24 active; R1 advertising-protocol to 192.0.2.2 includes /24 and excludes 198.51.100.0/24; R2 route /24 active; PC-A ↔ PC-B traffic passed; spoof source caused LAN-IN SPOOFED counter increase; commit confirmed finalized”. To jest zestaw dowodów, a nie ocena nastroju administratora.
+Dobry work note po zmianie nie brzmi „BGP checked, looks fine”. Brzmi: „R1 direct 192.0.2.0/24 active; R1 advertising-protocol to 10.12.0.2 includes /24 and excludes 198.51.100.0/24; R2 route /24 active; PC-A ↔ PC-B traffic passed; spoof source caused LAN-IN SPOOFED counter increase; commit confirmed finalized”. To jest zestaw dowodów, a nie ocena nastroju administratora.
 
 W następnym rozdziale OSPF i późniejszym BGP użyjemy tej samej dyscypliny. Zmieni się protokół, nie metoda myślenia.
 
@@ -793,7 +805,7 @@ W BGP historia wraca do początku rozdziału. R1 ma aktywną LAN-A, a R2 jest s�
 
 ~~~junos
 set policy-options policy-statement WAN-OUT term LAN-A from protocol direct
-set policy-options policy-statement WAN-OUT term LAN-A from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement WAN-OUT term LAN-A from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement WAN-OUT term LAN-A then accept
 set policy-options policy-statement WAN-OUT term REST then reject
 set protocols bgp group TO-R2 export WAN-OUT
@@ -802,7 +814,7 @@ set protocols bgp group TO-R2 export WAN-OUT
 **R2-vSRX — Configuration Mode, odbiór tylko konkretnego prefiksu z oddziału**
 
 ~~~junos
-set policy-options policy-statement FROM-R1 term LAN-A from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement FROM-R1 term LAN-A from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement FROM-R1 term LAN-A then accept
 set policy-options policy-statement FROM-R1 term REST then reject
 set protocols bgp group TO-R1 import FROM-R1
@@ -814,15 +826,15 @@ Zauważ dwie ważne rzeczy. Po pierwsze, te polityki są **niezależne**, choć 
 
 ~~~junos
 show bgp summary
-show route advertising-protocol bgp 192.0.2.2
+show route advertising-protocol bgp 10.12.0.2
 ~~~
 
 **R2-vSRX — Operational Mode, dowód odbioru i użycia**
 
 ~~~junos
-show route receive-protocol bgp 192.0.2.1
-show route receive-protocol bgp 192.0.2.1 hidden
-show route 10.10.10.0/24 exact extensive
+show route receive-protocol bgp 10.12.0.1
+show route receive-protocol bgp 10.12.0.1 hidden
+show route 192.0.2.0/24 exact extensive
 ~~~
 
 Mamy więc trzy ważne wnioski z tej lekcji. **OSPF** potrafi stosować import/export, ale nie jest to dowolny filtr wewnętrznej LSDB. **IS-IS** ma zbliżone ograniczenia wynikające z charakteru link-state, z różnicami wsparcia zależnymi od wersji. **BGP** szczególnie naturalnie wykorzystuje polityki na granicach wymiany prefiksów i atrybutów. W każdej sytuacji punktem wyjścia powinno być pytanie: *jaki obiekt trasy oceniamy i na którym etapie protokołu?*
@@ -879,7 +891,7 @@ Tutaj wielu inżynierów — również z Cisco — wpada w pułapkę podobnych n
 
 ### Ruch przychodzący: chcemy zasugerować, nie możemy rozkazać
 
-Załóżmy teraz, że zewnętrzna firma wybiera, jak dotrzeć do naszego 10.10.10.0/24. Chcielibyśmy, żeby korzystała z ISP-A. Tutaj sytuacja jest trudniejsza, ponieważ to *obce* routery wykonują BGP best-path selection.
+Załóżmy teraz, że zewnętrzna firma wybiera, jak dotrzeć do naszego 192.0.2.0/24. Chcielibyśmy, żeby korzystała z ISP-A. Tutaj sytuacja jest trudniejsza, ponieważ to *obce* routery wykonują BGP best-path selection.
 
 Możemy ogłaszać trasę przez obu operatorów, ale do ISP-B dodać **AS-PATH prepend**, aby backup wyglądał na dłuższą drogę. Możemy użyć uzgodnionych **BGP communities**, które operator interpretuje zgodnie z własną polityką. W niektórych scenariuszach dwustronnego połączenia do tego samego AS pomocny jest **MED**, o ile sąsiad go bierze pod uwagę.
 
@@ -888,7 +900,7 @@ Możemy ogłaszać trasę przez obu operatorów, ale do ISP-B dodać **AS-PATH p
 **R-WAN-DUAL — Configuration Mode, koncepcyjny eksport przez łącze zapasowe**
 
 ~~~junos
-set policy-options policy-statement BACKUP-OUT term LAN from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement BACKUP-OUT term LAN from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement BACKUP-OUT term LAN then as-path-prepend "64510 64510"
 set policy-options policy-statement BACKUP-OUT term LAN then accept
 set policy-options policy-statement BACKUP-OUT term REST then reject
@@ -900,11 +912,11 @@ Ten przykład zakłada odrębną, poprawną konfigurację BGP do operatora oraz 
 **R-WAN-DUAL — Operational Mode, obserwacja rzeczywistego ogłoszenia**
 
 ~~~junos
-show route advertising-protocol bgp 192.0.2.6 detail
-show bgp neighbor 192.0.2.6
+show route advertising-protocol bgp 10.13.0.2 detail
+show bgp neighbor 10.13.0.2
 ~~~
 
-Tutaj 192.0.2.6 jest **przykładowym adresem drugiego peera z odrębnego scenariusza**, nie sąsiadem 192.0.2.2 z bazowej topologii. Nie ma sensu kopiować tej komendy bez zmiany adresacji i pełnej konfiguracji ISP-B. W prawdziwej sieci o wyborze trasy przychodzącej ostatecznie świadczy obserwacja po stronie operatora lub zewnętrznego punktu widzenia.
+Tutaj 10.13.0.2 jest rzeczywistym interfejsem **R3 na dolnej gałęzi DIAMOND**, a 10.12.0.2 interfejsem **R2 na górnej gałęzi**. Oba peery mogą być zestawione w odrębnym wariancie eBGP całego diamentu. Nie ma sensu kopiować tej komendy bez zmiany adresacji i pełnej konfiguracji ISP-B. W prawdziwej sieci o wyborze trasy przychodzącej ostatecznie świadczy obserwacja po stronie operatora lub zewnętrznego punktu widzenia.
 
 ### Community: znacznik, którego znaczenie nadaje polityka
 
@@ -918,17 +930,17 @@ Wyobraź sobie, że R1 ma dwie warstwy polityki: pierwsza dodaje etykietę, drug
 
 ~~~junos
 set policy-options community SITE-BRANCH members 64510:100
-set policy-options policy-statement MARK-BRANCH term LAN from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement MARK-BRANCH term LAN from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement MARK-BRANCH term LAN then community add SITE-BRANCH
 set policy-options policy-statement MARK-BRANCH term LAN then next policy
 set policy-options policy-statement CHECK-EXPORT term LAN from protocol direct
-set policy-options policy-statement CHECK-EXPORT term LAN from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement CHECK-EXPORT term LAN from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement CHECK-EXPORT term LAN then accept
 set policy-options policy-statement CHECK-EXPORT term REST then reject
 set protocols bgp group TO-R2 export [ MARK-BRANCH CHECK-EXPORT ]
 ~~~
 
-Patrzymy na tę konfigurację jak na zdarzenie. Prefix przechodzi przez `MARK-BRANCH`, otrzymuje community, a dzięki `next policy` trafia jeszcze do `CHECK-EXPORT`. Tylko dopasowanie `direct 10.10.10.0/24` kończy się akceptacją. Zmiana `next policy` na `accept` w pierwszej polityce pozwoliłaby ominąć ostateczny filtr — to nie kosmetyka.
+Patrzymy na tę konfigurację jak na zdarzenie. Prefix przechodzi przez `MARK-BRANCH`, otrzymuje community, a dzięki `next policy` trafia jeszcze do `CHECK-EXPORT`. Tylko dopasowanie `direct 192.0.2.0/24` kończy się akceptacją. Zmiana `next policy` na `accept` w pierwszej polityce pozwoliłaby ominąć ostateczny filtr — to nie kosmetyka.
 
 Na R2 moglibyśmy dopasowywać nazwane community w `from community` i na tej podstawie ustawiać LOCAL_PREF albo decydować o dalszej redystrybucji. **Nie traktuj jednak otrzymanej community jako uwierzytelnienia prefiksu.** Sąsiad, który jest w stanie wysyłać NLRI, może również wysłać atrybut community. Dobra import policy łączy właściwy kontekst peera, prefix whitelistę, sensowną kontrolę atrybutów i wymagania dotyczące liczby tras.
 
@@ -937,7 +949,7 @@ Na R2 moglibyśmy dopasowywać nazwane community w `from community` i na tej pod
 ~~~junos
 set policy-options community SITE-BRANCH members 64510:100
 set policy-options policy-statement FROM-BRANCH term APPROVED from community SITE-BRANCH
-set policy-options policy-statement FROM-BRANCH term APPROVED from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement FROM-BRANCH term APPROVED from route-filter 192.0.2.0/24 exact
 set policy-options policy-statement FROM-BRANCH term APPROVED then local-preference 180
 set policy-options policy-statement FROM-BRANCH term APPROVED then accept
 set policy-options policy-statement FROM-BRANCH term REST then reject
