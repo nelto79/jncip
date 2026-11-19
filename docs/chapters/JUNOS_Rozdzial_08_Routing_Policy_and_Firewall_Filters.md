@@ -988,3 +988,272 @@ Gdy trafia się prefiks ze złym next hop, community i lokalnym priorytetem, nie
 To jest sedno bardziej zaawansowanego routingu: **umiejętność lokalizacji decyzji**, nie pamięciowe posiadanie dziesięciu parametrów `then`.
 
 *Źródła: [Actions in Routing Policy Terms](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-actions-in-routing-policy-terms.html), [Route Preferences Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-protocols-route-preferences-overview.html), [BGP Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/basic-routing-policies.html), [AS-Path Prepending](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/autonomous-systems.html).*
+
+---
+
+## 8.14. Laboratorium — jedna sieć, cztery kontrolowane awarie [LAB]
+
+To jest miejsce, w którym teoria ma przestać być teorią. Nie będziesz kopiować konfiguracji po to, żeby na końcu zobaczyć zielony ping. Najpierw sprawdzisz, **jaki wynik przewidujesz**, następnie sam wywołasz błąd, rozpoznasz go w CLI i naprawisz, nie usuwając przy okazji mechanizmów bezpieczeństwa.
+
+**Status laboratorium: PLANNED / NOT RUNTIME VALIDATED.** Poniższa procedura jest kompletnym scenariuszem do uruchomienia w izolowanym EVE-NG, ale nie była wykonana na konkretnej wersji vSRX. Nie deklarujemy testów runtime PASS. Przed startem sprawdź dostępne zasoby hosta, wersję vSRX, mapowanie wirtualnych NIC, licencje/funkcje i aktualną konfigurację. Nie używaj sieci firmowej, Internet/cloud bridge ani istniejących segmentów innego laboratorium. Nie modyfikuj obecnych labów Cisco. W konfiguracjach poniżej adresy 192.0.2.0/30 i 198.51.100.0/24 są wyłącznie dokumentacyjnymi, izolowanymi przykładami.
+
+### Co budujemy?
+
+Potrzebujemy tylko dwóch vSRX i dwóch hostów Linux. Trzy wirtualne segmenty Ethernet: LAN-A, WAN oraz LAN-B. R1 i R2 łączą się przez eBGP. Każda strona ma własny LAN i komputer. Do końca pierwszej fazy chcemy doprowadzić do prawidłowej komunikacji PC-A ↔ PC-B; dopiero potem będziemy świadomie ją psuć.
+
+```mermaid
+flowchart LR
+  P1["PC-A Linux<br/>10.10.10.10/24<br/>GW 10.10.10.1"] --- S1["LAN-A"]
+  S1 --- R1["R1-vSRX<br/>AS 64510<br/>LAN: ge-0/0/2.0"]
+  R1 --- W["WAN<br/>192.0.2.0/30<br/>eBGP"]
+  W --- R2["R2-vSRX<br/>AS 64520<br/>LAN: ge-0/0/2.0"]
+  R2 --- S2["LAN-B"]
+  S2 --- P2["PC-B Linux<br/>10.20.20.20/24<br/>GW 10.20.20.1"]
+```
+
+*Rysunek 8.9. Tekst alternatywny: PC-A poprzez LAN-A do R1, połączenie WAN między R1 i R2, następnie LAN-B do PC-B. Obie jednostki vSRX rozgłaszają swoje LAN przez eBGP. Oryginalny diagram labu.*
+
+| Węzeł | Interfejs po weryfikacji mapping | Adres | Rola |
+|---|---|---|---|
+| R1-vSRX | `ge-0/0/1.0` | 192.0.2.1/30 | BGP/WAN |
+| R1-vSRX | `ge-0/0/2.0` | 10.10.10.1/24 | Brama LAN-A |
+| R2-vSRX | `ge-0/0/1.0` | 192.0.2.2/30 | BGP/WAN |
+| R2-vSRX | `ge-0/0/2.0` | 10.20.20.1/24 | Brama LAN-B |
+| PC-A Linux | `eth0` lub faktyczny NIC | 10.10.10.10/24 | Klient |
+| PC-B Linux | `eth0` lub faktyczny NIC | 10.20.20.20/24 | Serwer testowy |
+
+**Zasada przed pierwszym poleceniem:** interfejsy są przykładami. Rzeczywista numeracja vSRX w EVE-NG zależy od obrazu, template i kolejności podłączenia NIC. Management może być oddzielony jako `fxp0`. Najpierw obejrzyj system, potem **podstaw prawidłowe interfejsy we wszystkich komendach**. Niczego nie „naprawiaj” przez factory reset, a tym bardziej przez skasowanie działającego management.
+
+### Faza 0 — discovery: zanim zbudujemy sieć
+
+Uruchom oba vSRX i dwa hosty. Zobacz, czy wolne interfejsy są rzeczywiście tymi, których chcemy użyć. Jeżeli Junos zawiera fabryczne albo odziedziczone security zones, uwzględnij je: logiczny interfejs nie może należeć do dwóch sprzecznych stref jednocześnie.
+
+**R1-vSRX — Operational Mode**
+
+~~~junos
+show version
+show interfaces terse
+show chassis hardware
+show configuration interfaces | display set
+show configuration security zones | display set
+show configuration security policies | display set
+show configuration protocols bgp | display set
+show route
+~~~
+
+**R2-vSRX — Operational Mode**
+
+~~~junos
+show version
+show interfaces terse
+show chassis hardware
+show configuration interfaces | display set
+show configuration security zones | display set
+show configuration security policies | display set
+show route
+~~~
+
+Wynik nie jest jeszcze „PASS”. Chcemy uzyskać trzy konkretne informacje: mapowanie interfejsów do LAN/WAN, rzeczywistą wersję Junos i zgodność adresacji/stref z dalszym planem. Jeśli coś nie pasuje, popraw **plan konfiguracji**, nie przypadkowy interfejs w EVE. Zapisz bezpieczny baseline poza publicznym repo; nie commituj sekretów, kluczy ani historii konsoli.
+
+### Faza 1 — adresujemy routery i świadomie dopuszczamy ruch
+
+Dlaczego zaczynamy od security zones, skoro uczymy się routing policy? Ponieważ na vSRX możesz doskonale skonfigurować BGP i wciąż nie przepuszczać ruchu hostów. W tej fazie tymczasowo dopuszczamy legalny ruch pomiędzy LAN i WAN na obu urządzeniach, żeby móc izolować problemy routingu. To **wyłącznie konfiguracja odseparowanego laboratorium**, nie wzorzec firewall dla produkcji.
+
+**R1-vSRX — Operational Mode, wejście do konfiguracji**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode, po sprawdzeniu interfejsów i konfliktów konfiguracji**
+
+~~~junos
+set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.1/30
+set interfaces ge-0/0/2 unit 0 family inet address 10.10.10.1/24
+set security zones security-zone WAN interfaces ge-0/0/1.0 host-inbound-traffic protocols bgp
+set security zones security-zone WAN interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone LAN interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+set security policies from-zone LAN to-zone WAN policy LAB-LAN-OUT match source-address any
+set security policies from-zone LAN to-zone WAN policy LAB-LAN-OUT match destination-address any
+set security policies from-zone LAN to-zone WAN policy LAB-LAN-OUT match application any
+set security policies from-zone LAN to-zone WAN policy LAB-LAN-OUT then permit
+set security policies from-zone WAN to-zone LAN policy LAB-WAN-IN match source-address any
+set security policies from-zone WAN to-zone LAN policy LAB-WAN-IN match destination-address any
+set security policies from-zone WAN to-zone LAN policy LAB-WAN-IN match application any
+set security policies from-zone WAN to-zone LAN policy LAB-WAN-IN then permit
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+**R2-vSRX — Operational Mode, wejście do konfiguracji**
+
+~~~junos
+configure private
+~~~
+
+**R2-vSRX — Configuration Mode, odpowiednia adresacja drugiej strony**
+
+~~~junos
+set interfaces ge-0/0/1 unit 0 family inet address 192.0.2.2/30
+set interfaces ge-0/0/2 unit 0 family inet address 10.20.20.1/24
+set security zones security-zone WAN interfaces ge-0/0/1.0 host-inbound-traffic protocols bgp
+set security zones security-zone WAN interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone LAN interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+set security policies from-zone LAN to-zone WAN policy LAB-LAN-OUT match source-address any
+set security policies from-zone LAN to-zone WAN policy LAB-LAN-OUT match destination-address any
+set security policies from-zone LAN to-zone WAN policy LAB-LAN-OUT match application any
+set security policies from-zone LAN to-zone WAN policy LAB-LAN-OUT then permit
+set security policies from-zone WAN to-zone LAN policy LAB-WAN-IN match source-address any
+set security policies from-zone WAN to-zone LAN policy LAB-WAN-IN match destination-address any
+set security policies from-zone WAN to-zone LAN policy LAB-WAN-IN match application any
+set security policies from-zone WAN to-zone LAN policy LAB-WAN-IN then permit
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+Jeżeli commit zgłasza konflikt istniejącej security configuration, nie ignoruj go. Usuń konflikt **świadomie w odseparowanym labie**, zgodnie z rzeczywistym baseline; nie używaj masowego `delete security` ani `load override` z niepełnym fragmentem. Interfejsy w poszczególnych strefach wymagają też odpowiedniego typu adresacji i konfiguracji, więc samo zapisanie policy nie zastępuje poprawnego przypisania.
+
+**PC-A — Linux shell, po sprawdzeniu istniejącej adresacji hosta**
+
+~~~bash
+ip addr show dev eth0
+ip addr add 10.10.10.10/24 dev eth0
+ip route replace default via 10.10.10.1
+ping -c 3 10.10.10.1
+~~~
+
+**PC-B — Linux shell, po sprawdzeniu istniejącej adresacji hosta**
+
+~~~bash
+ip addr show dev eth0
+ip addr add 10.20.20.20/24 dev eth0
+ip route replace default via 10.20.20.1
+ping -c 3 10.20.20.1
+~~~
+
+Nie dodawaj adresu ponownie, jeśli już jest skonfigurowany, i nie zakładaj, że Linux używa `eth0` — niektóre obrazy stosują nazwy typu `ens3`. Jeśli adresowanie LAN działa, przejdź do testu WAN. W tej fazie brak host-to-host komunikacji przez dwa routery jest **oczekiwany**: jeszcze nie skonfigurowaliśmy wymiany tras LAN między nimi.
+
+**R1-vSRX — Operational Mode**
+
+~~~junos
+ping 192.0.2.2 source 192.0.2.1 count 3
+show route 10.10.10.0/24 exact
+show route 192.0.2.0/30 exact
+show security zones
+~~~
+
+**R2-vSRX — Operational Mode**
+
+~~~junos
+ping 192.0.2.1 source 192.0.2.2 count 3
+show route 10.20.20.0/24 exact
+show route 192.0.2.0/30 exact
+show security zones
+~~~
+
+Jeśli testy kończą się sukcesem, potwierdź zmianę **z sesji Configuration Mode**, zanim upłynie okres rollback. Jeżeli test nie przejdzie, pozostaw cofnięcie lub wycofaj konfigurację zgodnie z bezpiecznym planem. Nie uruchamiaj dodatkowego `commit check` w czasie oczekiwania.
+
+**R1-vSRX — Configuration Mode, wyłącznie po PASS**
+
+~~~junos
+commit
+~~~
+
+**R2-vSRX — Configuration Mode, wyłącznie po PASS**
+
+~~~junos
+commit
+~~~
+
+### Faza 2 — BGP ma się zestawić, ale nie wolno mu reklamować wszystkiego
+
+Mamy routing connected po WAN i po jednym LAN. Uruchamiamy dwie sesje eBGP, osobno na każdym routerze. Zanim wprowadzimy export policy, warto zatrzymać się na chwilę i przewidzieć, że samo `Established` nie rozwiąże kwestii reklamowania tras direct.
+
+**R1-vSRX — Configuration Mode, eBGP i whitelist eksportu**
+
+~~~junos
+set routing-options autonomous-system 64510
+set protocols bgp group TO-R2 type external
+set protocols bgp group TO-R2 peer-as 64520
+set protocols bgp group TO-R2 family inet unicast
+set protocols bgp group TO-R2 neighbor 192.0.2.2
+set policy-options policy-statement EXPORT-R1 term LAN-A from protocol direct
+set policy-options policy-statement EXPORT-R1 term LAN-A from route-filter 10.10.10.0/24 exact
+set policy-options policy-statement EXPORT-R1 term LAN-A then accept
+set policy-options policy-statement EXPORT-R1 term REST then reject
+set protocols bgp group TO-R2 export EXPORT-R1
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+**R2-vSRX — Configuration Mode, eBGP i własna whitelist**
+
+~~~junos
+set routing-options autonomous-system 64520
+set protocols bgp group TO-R1 type external
+set protocols bgp group TO-R1 peer-as 64510
+set protocols bgp group TO-R1 family inet unicast
+set protocols bgp group TO-R1 neighbor 192.0.2.1
+set policy-options policy-statement EXPORT-R2 term LAN-B from protocol direct
+set policy-options policy-statement EXPORT-R2 term LAN-B from route-filter 10.20.20.0/24 exact
+set policy-options policy-statement EXPORT-R2 term LAN-B then accept
+set policy-options policy-statement EXPORT-R2 term REST then reject
+set protocols bgp group TO-R1 export EXPORT-R2
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+Nie sprawdzaj wyłącznie `show bgp summary`. Po zestawieniu sesji trzeba jeszcze zobaczyć, że R1 wysyła LAN-A, R2 wysyła LAN-B i każda strona **ma aktywną trasę do obcego LAN**. Jeśli route nie jest aktywna, diagnoza musi wrócić do import, preferencji i next-hop resolution.
+
+**R1-vSRX — Operational Mode, weryfikacja BGP i forwarding**
+
+~~~junos
+show bgp summary
+show route advertising-protocol bgp 192.0.2.2
+show route 10.20.20.0/24 exact extensive
+show route forwarding-table destination 10.20.20.20
+~~~
+
+**R2-vSRX — Operational Mode, druga strona ogłoszenia**
+
+~~~junos
+show bgp summary
+show route receive-protocol bgp 192.0.2.1
+show route advertising-protocol bgp 192.0.2.1
+show route 10.10.10.0/24 exact extensive
+~~~
+
+**Wynik oczekiwany, SYMULOWANY:** BGP `Established` na obu routerach; R1 ogłasza 10.10.10.0/24, R2 ogłasza 10.20.20.0/24; `inet.0` na obu urządzeniach zawiera aktywny route BGP do drugiego LAN, a lokalna sieć każdego routera nadal jest `Direct`. Nigdzie nie twierdzimy, że te wyniki zostały rzeczywiście zmierzone.
+
+**PC-A — Linux shell, test end-to-end**
+
+~~~bash
+ping -c 3 10.20.20.20
+traceroute -n 10.20.20.20
+~~~
+
+**PC-B — Linux shell, test return path**
+
+~~~bash
+ping -c 3 10.10.10.10
+~~~
+
+`traceroute` może nie być zainstalowany w minimalnym obrazie Linux; użyj dostępnego odpowiednika w tym samym labie, zamiast wprowadzać zależność od Internetu. Jeśli pakiety nie przechodzą, rozdziel diagnozę na routing i SRX flow. Sprawdź, czy adresy Linux są poprawne i czy lokalne firewalle hostów nie odrzucają ICMP. Dopiero po pełnym PASS potwierdź oba `commit confirmed`.
+
+**R1-vSRX — Configuration Mode, potwierdzenie po PASS**
+
+~~~junos
+commit
+~~~
+
+**R2-vSRX — Configuration Mode, potwierdzenie po PASS**
+
+~~~junos
+commit
+~~~
+
+Teraz mamy działający **stan odniesienia**. To bardzo ważne: bez sprawdzonego baseline dalsze fault injection nie dowodzi niczego. Jeżeli labu jeszcze nie uruchomiłeś, masz wyłącznie projekt, a nie prawo do wpisania „PASS” do notatek.
