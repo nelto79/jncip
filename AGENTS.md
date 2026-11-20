@@ -13,7 +13,7 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 2a. docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md — pełny rozdział 3 (3.1–3.11), warstwa CLI/candidate/commit/load/rollback/J-Web. Nie zastępuj streszczeniem i nie przenoś wszystkich gotchas na koniec.
 2b. docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md — pełny rozdział 4 (4.1–4.14 oraz 4.15 LAB), Cisco ↔ Junos, AAA, NTP, SNMPv3, syslog, archival, traceoptions, rescue.
 2c. docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md — pełny rozdział 5 (5.1–5.8 oraz 5.9 LAB), workflow diagnostyki i maintenance, interface counters/DOM, show/monitor, ping/source/VRF, upgrade, reboot/halt i root recovery.
-3. **labs/reference-diamond-4vsrx-2vpcs/README.md — KANONICZNA topologia diamentowa: 4 vSRX + 2 VPCS, wszystkie interfejsy, CIDR i loopbacki /32. Nie zmieniaj ich w kolejnych rozdziałach bez jawnego wariantu.**
+3. **labs/reference-diamond-4vsrx-2vpcs/README.md — baza CH01–CH07: 4 vSRX + 2 VPCS, interfejsy, CIDR i loopbacki /32. Dla CH08 stosuj jawny wariant DIAMOND-6R opisany wyżej.**
 3a. **labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md — diagram Mermaid do osadzania i linkowania w podręczniku (sześć łączy, oba IP/CIDR każdego segmentu, wszystkie loopbacki).** W rozdziałach wykorzystuj ten sam model, a w razie korekty diagramu aktualizuj również jego kopię w referencyjnym README.
 3a. labs/reference-diamond-4vsrx-2vpcs/CODEX_GCP_EVE_NG_PROMPT.md — instrukcja wdrożenia na EVE-NG/GCP, bez ingerencji w istniejące laby.
 3b. labs/ch02-four-vsrx/README.md — specyfikacja pierwszego większego labu.
@@ -22,13 +22,23 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 6. labs/ch04-initial-config/README.md — nowy izolowany lab z vSRX, Linux bastion i services (NTP, syslog, SNMPv3, SCP, AAA opcjonalnie), status PLANNED.
 7. labs/ch05-operational-monitoring/README.md — DIAMOND 4×vSRX+2×VPCS, pełna kompatybilność z rozdziałem 5.9, status PLANNED; poprzednia topologia 2×vSRX zachowana w docs/archive.
 
-## Obowiązkowa topologia DIAMOND w rozdziałach JNCIP
+## Aktualizacja 2026-11-20 — rozdział 8 używa DIAMOND-6R (decyzja właściciela projektu)
+
+**Rozdział 8** ma teraz wariant z **6 × vSRX**: R5 jako CE-A na LAN-A (192.0.2.10/24) i R6 jako CE-B na LAN-B (198.51.100.10/24). R1–R4 oraz cztery segmenty 10.12.0.0/30, 10.13.0.0/30, 10.24.0.0/30 i 10.34.0.0/30 pozostają bez zmian. Kanoniczna referencja tego wariantu: **[labs/reference-diamond-6vsrx/README.md](labs/reference-diamond-6vsrx/README.md)** i [DIAMOND_TOPOLOGY.md](labs/reference-diamond-6vsrx/DIAMOND_TOPOLOGY.md).
+
+- Rozdział 8: `docs/chapters/JUNOS_Rozdzial_08_Routing_Policy_and_Firewall_Filters.md` (nowa wersja v3); wcześniejszą v2 zachowano w `..._v2_ARCHIVE.md`.
+- Rozdziały 2–7 mogą dalej korzystać z referencyjnego DIAMOND 4 vSRX + 2 VPCS. Nie utożsamiaj testu ping z routera R5/R6 z ruchem tranzytowym z VPCS bez odpowiedniego komentarza. Nie migruj po cichu starszych labów.
+- Dalsze rozdziały korzystające z BGP mogą rozwinąć DIAMOND-6R, ale zawsze sprawdzaj czy ćwiczenie wymaga właśnie tego wariantu.
+- Redakcja: punkt wyjścia to jasna reguła Junos, jej uzasadnienie, przykład na R1–R6, konsekwencja i diagnostyka. Unikaj wymuszonych historyjek, dramatyzowania oraz przypadkowego mieszania topologii. Wzorcem stylu jest dostarczony przez użytkownika rozdział 8 innego agenta, po korektach faktograficznych.
+- Status runtime pozostaje PLANNED, dopóki nie ma rzeczywistych wyników z EVE-NG. Szczegóły: `docs/research/CH08_V3_DIAMOND6R_EDITORIAL_AND_TECHNICAL_REVIEW_2026-11-20.md`.
+
+## Topologia DIAMOND: stary wariant w CH01–CH07 i rozszerzony DIAMOND-6R w CH08
 
 **Po migracji 2026-11-19** obowiązuje [audyt CH01–CH08](docs/research/DIAMOND_CH01_CH08_MIGRATION_AUDIT_2026-11-19.md). Osiem *głównych* rozdziałów jest w `docs/chapters/JUNOS_Rozdzial_01_...md` do `..._08_...md`; draft `..._08_..._Agent.md` i `..._07_..._v1_ARCHIVE.md` nie są źródłem prawdy. Nie przywracaj dawnych sieci PC-B `192.0.2.11`, bezpośredniego LAN-B na R2, WAN uplink `198.51.100.0/30`, ani labów z Linux UP-A/UP-B w roli urządzeń diamentu.
 
 
 
-- Przy wykładach wykorzystujących kilka routerów (routing statyczny, OSPF, BGP, routing policy, ECMP, troubleshooting) używaj [kanonicznego diagramu Mermaid](labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) i [tabeli adresacji](labs/reference-diamond-4vsrx-2vpcs/README.md) zamiast tworzyć od zera sprzeczne sieci.
+- Przy wykładach CH01–CH07 używaj [bazowego diagramu 4vSRX+2VPCS](labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md). W CH08 używaj [diagramu DIAMOND-6R](labs/reference-diamond-6vsrx/DIAMOND_TOPOLOGY.md) i [adresacji](labs/reference-diamond-6vsrx/README.md); w kolejnych rozdziałach jawnie wskaż wariant.
 - Identyfikatory w całym kursie: **R1-vSRX, R2-vSRX, R3-vSRX, R4-vSRX, PC-A/VPC1, PC-B/VPC2**. Bazowe segmenty, IP/CIDR, lo0.0 /32 i bramy VPCS są stałe; dla konkretnego ćwiczenia zmieniaj jedynie omawiany routing/policy, a każdy odmienny plan oznacz jako osobny wariant.
 - W tekście przed diagramem postaw problem inżynierski, a po nim opowiedz, którędy płynie pakiet, jak wraca i co zmienia awaria; diagram nie zastępuje dydaktyki.
 - W scenariuszach statycznych nie obiecuj pełnej automatycznej konwergencji po awarii tylko R1–R2; loopbacki innych routerów nie są reachable bez jawnego routingu. Na vSRX uwzględnij security policies oraz stan sesji.
