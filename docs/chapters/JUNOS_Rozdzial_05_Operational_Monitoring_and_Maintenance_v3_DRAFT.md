@@ -445,3 +445,231 @@ Nie zawsze trzeba wykonywać wszystkie testy. Najlepszy test to taki, którego w
 
 **Źródła:** [ping](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/ping.html), [traceroute](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/traceroute.html), [monitor traffic](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-traffic.html).
 
+
+---
+
+## 5.5. Instalowanie i aktualizowanie Junos OS — dlaczego upgrade zaczyna się od projektu, nie od komendy? [A → S/P]
+
+### Co naprawdę aktualizujemy?
+
+Urządzenie sieciowe składa się z wielu warstw: sprzętu lub maszyny wirtualnej, systemu operacyjnego, konfiguracji oraz danych działających procesów. Kiedy wykonujemy **upgrade Junos OS**, zmieniamy oprogramowanie urządzenia. Nie jest to to samo co zmiana jednej linii konfiguracji ani zapisanie nowej kopii `rescue`.
+
+W firmie możesz otrzymać zadanie: „Na tych routerach jest podatność. Trzeba je zaktualizować”. To nie jest wystarczająca informacja, żeby wybrać plik i zacząć instalację.
+
+Najpierw ustal:
+- jakiego **dokładnie modelu lub wirtualnej platformy** dotyczy informacja;
+- jaka **wersja Junos** jest obecnie zainstalowana;
+- czy konkretna podatność i jej warunki dotyczą **tego modelu i konfiguracji**;
+- która wersja usuwa problem i czy jest wspierana dla danej platformy;
+- jakie są zależności i dopuszczalne **ścieżki aktualizacji** między wersjami;
+- jaki będzie wpływ na użytkowników, sąsiedztwa routingu, klastry i system zarządzania;
+- jak przywrócić urządzenie, jeśli nowy system nie uruchomi się prawidłowo.
+
+Dlatego dobry proces aktualizacji jest bardziej podobny do planowania operacji technicznej niż do instalowania nowej aplikacji na laptopie.
+
+### Co oznaczają release, maintenance i service release?
+
+W oznaczeniach Junos spotkasz numery wersji oraz symbole literowe, np. `R` czy `S`. Reprezentują one określone rodzaje wydań i poprawki serwisowe. Nie musisz jeszcze znać każdej historycznej konwencji, ale musisz wiedzieć, że **„najnowsza dostępna” nie oznacza zawsze „najlepsza dla tego routera”**.
+
+Producenci publikują zalecane wydania i release notes. Dla części środowisk istotne będzie wybranie wersji rekomendowanej przez JTAC i sprawdzenie wsparcia sprzętu, interfejsów oraz funkcji wykorzystywanych w sieci. Nie podam w podręczniku jednej „zalecanej wersji Junos na listopad 2026”, bo różne rodziny urządzeń mają różne cykle wsparcia i taki numer szybko mógłby stać się nieaktualny.
+
+**Źródłami decyzji** powinny być oficjalne release notes, lista zalecanych wersji dla właściwej platformy, dokumentacja ścieżki upgrade i aktualne advisory. W sytuacji krytycznej należy zweryfikować też możliwość wsparcia przez producenta.
+
+### Najpierw identyfikacja urządzenia
+
+**R1-vSRX — Operational Mode, pre-check modelu i obecnej wersji**
+
+~~~junos
+show version
+show chassis hardware
+show system uptime
+show system storage
+show system alarms
+show system commit
+~~~
+
+`show chassis hardware` na vSRX nie pokazuje fizycznych modułów w taki sam sposób jak na EX czy MX. Na urządzeniu fizycznym interesują Cię m.in. rzeczywiste podzespoły, wkładki, Routing Engines i dostępne miejsce w storage. Na wirtualnym vSRX sprawdź również wymagania obrazu co do hypervisora, zasobów RAM, CPU i dysku.
+
+Sam numer Junos z `show version` nie jest kompletną informacją o zgodności package. Musisz znać również **rodzinę i model platformy**.
+
+### Software package, konfiguracja i snapshot — trzy rzeczy, których nie wolno pomylić
+
+**Software package** to obraz lub pakiet Junos przeznaczony dla określonej rodziny urządzeń. **Configuration** to zapis tego, co urządzenie ma robić. **Snapshot** to mechanizm tworzenia odpowiedniej kopii instalacji lub systemu, zależny od platformy.
+
+Wyobraź sobie, że poprawnie cofnąłeś konfigurację do wczorajszej wersji. Czy system operacyjny wrócił do poprzedniego wydania? Nie. `rollback 1` dotyczy konfiguracji. Nie zmienia automatycznie plików systemu operacyjnego.
+
+Podobnie snapshot wykonany na fizycznym urządzeniu lub w środowisku wirtualnym ma określoną rolę. Nie jest zawsze tym samym, co backup konfiguracji na osobnym serwerze. Na pewnych platformach wykonanie nowego **system snapshot** po aktualizacji może nadpisać poprzednią instalację w obszarze zapasowym. Wówczas utracisz prostą możliwość bootowania ze starego obrazu, choć sam snapshot pozornie wygląda na dodatkowe zabezpieczenie.
+
+Dlatego przed poleceniem snapshot sprawdź model, układ partycji i faktyczny efekt opisywany w dokumentacji danej wersji Junos.
+
+### Dlaczego nie wolno brać dowolnego pliku Junos ze strony producenta?
+
+EX, QFX, MX, SRX i vSRX mają różne obrazy, ograniczenia oraz procedury aktualizacji. To nie są wymienne „instalatory Junipera”. Wiele urządzeń ma też specjalne wymagania dla instalacji systemu, Virtual Chassis, redundantnych RE, VMHost czy klastrów bezpieczeństwa.
+
+Nie wykonuj upgrade na obrazie, którego źródło, nazwa, checksum i zgodność z platformą są nieznane. Plik pobrany z niezweryfikowanego forum albo z innego modelu może być niewłaściwy. W produkcji wymagamy **oficjalnego pochodzenia, sprawdzenia integralności i zgodności z planowaną ścieżką**.
+
+### Pre-check: co zapisujemy, zanim coś zepsujemy?
+
+Dla pojedynczego R1 w laboratorium wygląda to jeszcze prosto. W środowisku Enterprise router może być połączony z wieloma sąsiadami, obsługiwać OSPF/BGP, NAT, security policies, tunelowanie i dostęp administracyjny.
+
+Przed upgrade zapisz:
+1. Dokładną wersję i model; potwierdź, który image jest wspierany.
+2. Uptime, alarmy, storage i stan systemu.
+3. Stan wszystkich istotnych interfejsów i tras.
+4. Kluczowe sąsiedztwa routing protocols, gdy są uruchomione.
+5. Działanie usług zarządzania: SSH, AAA, NTP, syslog, SNMP, backup.
+6. Istnienie aktualnego, **niezależnego** backupu konfiguracji i sprawdzony plan przywrócenia.
+7. Dostęp do konsoli oraz ustalone okno serwisowe i warunki rollback.
+8. Informację, kto sprawdza działanie aplikacji i kto podejmuje decyzję o wycofaniu.
+
+Nie wystarczy zapisać „prechecks OK”. Warto zachować konkretne wyniki, aby później porównać ten sam stan.
+
+**R1-vSRX — Operational Mode, zestaw read-only przed rozważaniem upgrade**
+
+~~~junos
+show version
+show chassis hardware
+show interfaces terse
+show system alarms
+show system uptime
+show system storage
+show system processes extensive
+show route table inet.0
+show security flow session summary
+show system commit
+~~~
+
+Nie zawsze będziesz potrzebować wszystkich tych poleceń w małym labie. Na urządzeniach niebędących SRX polecenie security flow może nie istnieć. W środowisku z protokołami dynamicznymi dodasz odczyty ich sąsiedztw i tras. Chodzi o **reprezentatywny stan przed zmianą**, nie przypadkową liczbę komend w runbooku.
+
+### Czy niewystarczająca przestrzeń dyskowa jest drobiazgiem?
+
+Instalator potrzebuje odpowiedniej ilości miejsca, a na urządzeniu mogą zalegać stare obrazy, pliki logów lub core dumps. To jednak nie oznacza, że należy usuwać je natychmiast — mogą być potrzebne do diagnozy incydentu, dokumentacji lub powrotu do poprzedniego oprogramowania.
+
+Sprawdź najpierw wykorzystanie storage i listę plików, które system proponuje do cleanup. Wspierane wydania Junos udostępniają **dry-run**, czyli próbę bez faktycznego usuwania.
+
+**R1-vSRX — Operational Mode, bezpieczny przegląd storage**
+
+~~~junos
+show system storage
+request system storage cleanup dry-run
+~~~
+
+`dry-run` nie jest zleceniem faktycznego usunięcia danych. Natomiast właściwe `request system storage cleanup` już zmienia zawartość urządzenia. Nie wykonuj go bez przeczytania listy proponowanych plików i ustalenia, czy mogą być potrzebne do rollback lub support case.
+
+### Dlaczego `no-validate` nie jest wygodnym skrótem?
+
+Normalny proces instalacji może sprawdzać zgodność konfiguracji i platformy. Opcja `no-validate` pomija część takiej weryfikacji. Jeśli instalacja zatrzymuje się z błędem, użycie `no-validate` bez zrozumienia przyczyny nie jest naprawą problemu.
+
+Istnieją **udokumentowane wyjątki** dla określonych modeli i przejść między konkretnymi wersjami Junos. Oficjalna dokumentacja `request system software add` opisuje m.in. wymagania specjalnej składni dla wybranych SRX300-series podczas specyficznego upgrade. To dobry przykład, dlaczego nie wolno uczyć jednej „zawsze poprawnej” kombinacji parametrów. Wyjątek ma zastosowanie tylko do modelu i ścieżki, dla których producent go zaleca.
+
+### Co robi `request system software add`?
+
+To jedna z rodzin komend Junos używanych do instalacji pakietów. Sama nazwa polecenia nie przesądza jeszcze, czy upgrade wymaga osobnego reboot, jak działa walidacja i czy dany wariant jest właściwy dla urządzenia.
+
+Nie podajemy tutaj wykonywalnego polecenia z wymyśloną nazwą pakietu jako „uniwersalnego MOP”. Plik do instalacji musi być konkretny, legalnie uzyskany, zweryfikowany i zgodny z platformą. Dla Junos OS Evolved oraz urządzeń z VMHost lub HA szczegóły mogą się znacznie różnić.
+
+Na poziomie początkującym zrozum **kolejność**: wybór i walidacja pakietu → przygotowanie backupu → pre-check → staging → okno serwisowe → właściwa procedura instalacji → wymagane przełączenie/boot → post-check → decyzja o zamknięciu lub wycofaniu.
+
+### Redundancja to nie gwarancja „zero outage”
+
+W dużych sieciach spotkasz różne mechanizmy wysokiej dostępności:
+
+**Redundant Routing Engines** oznaczają dwa elementy sterujące w pewnych platformach. **Virtual Chassis** łączy wybrane switche w logiczne urządzenie. **SRX chassis cluster** może wykorzystywać redundancję węzłów i obsługi ruchu. Nie są to jednak rozwiązania identyczne, a procedury upgrade nie zawsze są takie same.
+
+Jeżeli urządzenie ma dwa RE, nie oznacza to, że aktualizacja dowolnym poleceniem będzie bezprzerwowa. Sprawdź wsparcie ISSU, kompatybilność wersji, zachowanie protokołów i wymaganą sekwencję. Podobnie w klastrze SRX potrzebujesz właściwego runbooka dla stanu klastra, sesji i przełączania węzłów.
+
+**Nie uczymy się upgrade na wyłączaniu elementów HA w produkcyjnej sieci.** Na początku wystarczy rozpoznać, że sposób utrzymania zależy od architektury.
+
+### Co znaczy „upgrade się udał”?
+
+Urządzenie wróciło przez SSH i pokazuje oczekiwaną wersję Junos. Czy można zamknąć change? Jeszcze nie. Trzeba sprawdzić, czy interfejsy, trasy i usługi zarządzania powróciły do oczekiwanego stanu, a także czy użytkownicy mają dostęp do wymaganych aplikacji.
+
+**R1-vSRX — Operational Mode, read-only post-check po autoryzowanym upgrade**
+
+~~~junos
+show version
+show system uptime
+show system alarms
+show interfaces terse
+show route table inet.0
+show security flow session summary
+show log messages | last 50
+~~~
+
+Porównaj je z rzeczywistym pre-check. Jeżeli po upgrade zmieniły się modele interfejsów, brak części połączeń albo logi wskazują awarie procesów, nie zamykaj change z samym „version OK”.
+
+### Configuration rollback, software rollback i disaster recovery
+
+To trzy różne pojęcia.
+
+`rollback 1` w trybie konfiguracji ładuje wcześniejszą **konfigurację** do candidate. `request system software rollback`, jeśli wspierane na danej platformie, dotyczy próby powrotu do poprzedniego **oprogramowania**. Natomiast **disaster recovery** może wymagać odtworzenia urządzenia z niezależnego backupu, przywrócenia systemu i testów całej usługi.
+
+Nie każde cofnięcie wersji Junos jest wspierane. Czasem konieczne są specjalne kroki i zachowanie odpowiedniego obrazu. Dlatego plan rollback musi zostać zaakceptowany **przed upgrade**, a nie napisany dopiero po nieudanym uruchomieniu.
+
+### Nasz pierwszy MOP — bez instalacji ani restartu
+
+**MOP (Method of Procedure)** to opis kontrolowanych kroków operacji, w tym weryfikacji i powrotu. Dla poziomu podstawowego przygotuj MOP *na papierze* do aktualizacji klona R1:
+
+| Faza | Co ustalamy? | Dowód |
+|---|---|---|
+| Scope | Model, Junos release, powód zmiany | Inventory i advisory |
+| Compliance | Obraz, checksum, release notes, ścieżka upgrade | Dokument producenta |
+| Preparation | Backup, storage, console, snapshots | Pre-check i zewnętrzna kopia |
+| Execution | Właściwa procedura dla platformy | Change-approved MOP |
+| Validation | System, routing, usługi i test użytkownika | Post-check porównany z baseline |
+| Recovery | Cofnięcie software lub odtworzenie | Osobny, wcześniej uzgodniony plan |
+| Closure | Wersja, wyniki, anomalie, czas | Raport bez sekretów |
+
+W laboratorium V **nie wykonujemy faktycznej instalacji Junos**. Jeżeli będziesz kiedyś chciał przećwiczyć upgrade na własnym klonie vSRX, potrzebny jest zgodny obraz i osobna instrukcja dla jego wydania.
+
+**Źródła:** [Junos Install & Upgrade Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/software-install-and-upgrade-overview.html), [request system software add](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add.html), [Storage Cleanup](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-storage-cleanup.html), [Snapshots](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/backing-up-install-using-snapshot.html), [Software rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-rollback.html).
+
+---
+
+## 5.6. Uruchamianie, restart i bezpieczne wyłączanie urządzeń [A]
+
+### Dlaczego restart jest działaniem, a nie diagnozą?
+
+Czasami aplikacja nie działa, urządzenie zużywa dużo pamięci albo administrator stracił do niego SSH. Może pojawić się pomysł: „Zrestartujmy router, może pomoże”. Restart bywa potrzebny — na przykład po instalacji oprogramowania — ale **sam nie wyjaśnia przyczyny**.
+
+Jeśli R1 przekazuje ruch dla R5, a R6 znajduje się po drugiej stronie core, to restart R1 może przerwać komunikację nie tylko z jednym użytkownikiem. Zależnie od topologii może odciąć cały ruch lokalizacji CE-A. Na switchu access podobna decyzja wpływa na użytkowników podłączonych do jego portów.
+
+Zanim planujesz restart, ustal, jaki ruch przechodzi przez urządzenie, czy istnieje droga zapasowa, kto korzysta z sesji i ile czasu zajmie powrót systemu.
+
+### Różnica między reboot, halt i odcięciem zasilania
+
+**Reboot** oznacza kontrolowane ponowne uruchomienie systemu. **Halt** oznacza kontrolowane zatrzymanie systemu. Nie jest to to samo co natychmiastowe wyciągnięcie przewodu zasilającego.
+
+Nagłe przerwanie zasilania może pozostawić dane w niespójnym stanie, przerwać operację zapisu lub spowodować utratę logów. W systemach z dwoma zasilaczami lub różnymi RE dodatkowo trzeba rozpoznać, **co faktycznie wyłączasz**.
+
+Polecenia `request system reboot` i `request system halt` nie są poleceniami do próbnej diagnostyki. W tym rozdziale **nie umieszczamy ich w blokach przeznaczonych do skopiowania na produkcyjny router**, ponieważ wymagają uzgodnionego okna i szczegółowego MOP.
+
+### Jak rozpoznać, czy restart był niedawno?
+
+**R1-vSRX — Operational Mode, read-only historia i status przed planowaniem restartu**
+
+~~~junos
+show system uptime
+show system reboot
+show log messages | last 50
+show system alarms
+~~~
+
+`show system reboot` może pomóc sprawdzić informacje o zaplanowanym restarcie na wspieranych platformach. `show system uptime` i logi pomagają zauważyć, czy urządzenie niedawno uruchamiało się ponownie.
+
+Jeżeli uptime wynosi pięć minut, a użytkownik zgłasza przerwę od pięciu minut, jest to ważny trop. Ale nadal trzeba ustalić, **dlaczego** nastąpił restart i czy jego przyczyna została usunięta.
+
+### A co z restartowaniem pojedynczego procesu?
+
+Na niektórych urządzeniach można restartować określone procesy systemowe. Bywa to mniej inwazyjne niż reboot całej platformy, lecz nie jest neutralne. Restart procesu odpowiedzialnego za routing może powodować zmiany sąsiedztw, utratę aktualnych informacji i krótkotrwały wpływ na forwarding, zależnie od architektury i zabezpieczeń.
+
+Nie wykonuj więc „restart routing” tylko dlatego, że nie widzisz trasy w `show route`. Najpierw ustal, skąd router powinien ją znać, jaki jest stan protokołu, czy nie działa filtr lub polityka i czy problem nie leży w warstwie bezpieczeństwa.
+
+### Po restarcie testujemy również to, co nie jest w prompt
+
+Jeżeli R1 wrócił do CLI, sprawdź **wersję systemu, alarmy, porty, trasy, sąsiedztwa i dostęp do rzeczywistych usług**. W środowisku z redundantnymi RE, Virtual Chassis czy SRX cluster trzeba dodatkowo potwierdzić stan wszystkich członków i zależności HA.
+
+Wynik „SSH OK” ma znaczenie, ale nie zastępuje testu end-to-end z R5 do R6. To dokładnie ta sama zasada, której uczyliśmy się od początku rozdziału.
+
+**Źródła:** [request system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-reboot.html), [request system halt](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-halt.html), [show system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-reboot.html).
+
