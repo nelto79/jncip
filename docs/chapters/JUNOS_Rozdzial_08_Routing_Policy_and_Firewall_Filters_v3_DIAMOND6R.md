@@ -1886,3 +1886,342 @@ show security zones
 
 Wynik pozytywny wymaga połączenia kilku dowodów: sesje BGP są Established; prefiksy są aktywne w odpowiednich RIB; wybrane next-hopy są zgodne z import policy; security pozwala na nową sesję; test ICMP z właściwym source otrzymuje odpowiedź. W tym miejscu mamy **sprawdzony stan odniesienia** — ale dopiero po uruchomieniu labu i uzyskaniu rzeczywistych outputów.
 
+
+### 8.14.10. Domykamy import na styku CE↔CORE
+
+Do tej pory skupialiśmy się na tym, co R1 odbiera od R2/R3, a R4 od R2/R3. W dobrym projekcie bezpieczeństwa warto także jasno określić, **co wolno reklamować klientom CE do naszych brzegów**.
+
+R1 powinien otrzymywać od R5 wyłącznie 172.16.50.0/24 i 172.16.51.0/24. R4 powinien otrzymywać od R6 trzy prefiksy przeznaczone do naszego labu — dwa rzeczywiste i jeden testowy. Nie ustawiamy dla nich domyślnego zezwolenia na dowolny Internet table.
+
+**R1-vSRX — Configuration Mode, jawny import od CE-A**
+
+~~~junos
+set policy-options policy-statement FROM-CE-A term APPROVED from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement FROM-CE-A term APPROVED from route-filter 172.16.51.0/24 exact
+set policy-options policy-statement FROM-CE-A term APPROVED then accept
+set policy-options policy-statement FROM-CE-A term REST then reject
+set protocols bgp group CE-A import FROM-CE-A
+~~~
+
+**R4-vSRX — Configuration Mode, jawny import od CE-B w tym kontrolowany prefix testowy**
+
+~~~junos
+set policy-options policy-statement FROM-CE-B term APPROVED from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement FROM-CE-B term APPROVED from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement FROM-CE-B term APPROVED from route-filter 172.16.62.0/24 exact
+set policy-options policy-statement FROM-CE-B term APPROVED then accept
+set policy-options policy-statement FROM-CE-B term REST then reject
+set protocols bgp group CE-B import FROM-CE-B
+~~~
+
+W prawdziwej sieci nie przepuszczalibyśmy sztucznego blackhole prefix tylko dla wygody. Tutaj \`172.16.62.0/24\` przechodzi R4, R2/R3, a dopiero R1 blokuje go na imporcie, żeby można było **zobaczyć różnicę między ogłoszeniem a akceptacją trasy**.
+
+Po odczytaniu rezultatów i pozytywnym teście dopiero przechodzimy do controlled fault injection. Każdą awarię wywołuj **osobno**; przed kolejną wróć do sprawdzonego baseline.
+
+### 8.14.11. Fault A — route leak po usunięciu końcowego \`reject\`
+
+To ćwiczenie przedstawia dokładnie ryzyko, od którego zaczęliśmy rozdział. R1 eksportuje do rdzenia **wyłącznie** 172.16.50.0/24 i 172.16.51.0/24 od R5, bo \`CORE-OUT-CE-A\` kończy się jawnym \`REJECT-REST\`.
+
+Usuniemy **tylko ten terminalny term** na krótki czas. Co przewidujemy? R1 nadal będzie świadomie reklamować własne prefiksy CE-A, ale pozostałe aktywne trasy BGP, które nie dopasują się do termu CE-A, mogą spaść do **domyślnego eksportu BGP**.
+
+R1 nauczył się \`172.16.61.0/24\` od R3 jako preferowanej dolnej ścieżki. Po wyłączeniu \`REJECT-REST\` może zacząć reklamować tę trasę także do **R2**, choć R2 ma już własną, krótszą drogę do CE-B przez R4. Taka dodatkowa reklama jest niepożądanym tranzytem przez R1, nawet jeśli nie zmieni aktywnej ścieżki R2.
+
+**R1-vSRX — Configuration Mode, WYŁĄCZNIE kontrolowany lab i aktywny rollback**
+
+~~~junos
+deactivate policy-options policy-statement CORE-OUT-CE-A term REJECT-REST
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**R1-vSRX — Operational Mode, porównaj reklamy do obu CORE peerów**
+
+~~~junos
+show route advertising-protocol bgp 10.12.0.2
+show route advertising-protocol bgp 10.13.0.2
+show route 172.16.61.0/24 exact extensive
+~~~
+
+**R2-vSRX — Operational Mode, sprawdź otrzymaną informację od R1**
+
+~~~junos
+show route receive-protocol bgp 10.12.0.1
+show route 172.16.61.0/24 exact extensive
+~~~
+
+**Oczekiwany wynik (hipoteza, nie runtime PASS):** po wyłączeniu końcowego reject R1 może dodatkowo reklamować R2 prefiks 172.16.61.0/24, którego aktywną drogę poznał od R3. R2 może go przyjąć, ale nie musi wybrać — droga przez R4 może być lepsza. Wystarczającym dowodem ryzyka jest **nieautoryzowana reklama**, a nie dopiero zmiana FIB.
+
+**Naprawa:** nie potwierdzaj błędnego commitu. Pozwól automatycznemu rollbackowi po \`commit confirmed 2\` przywrócić \`REJECT-REST\`. Jeśli z jakiegoś powodu rollback nie nastąpi, przywróć go jawnie przez niezależną konsolę i wykonaj post-check. Nie zakładaj, że stary zapis \`rollback 1\` zawsze wskazuje tę samą historyczną wersję.
+
+**R1-vSRX — Operational Mode, po rollbacku**
+
+~~~junos
+show configuration policy-options policy-statement CORE-OUT-CE-A
+show route advertising-protocol bgp 10.12.0.2
+show route advertising-protocol bgp 10.13.0.2
+show system commit
+~~~
+
+Wniosek: **w BGP filtr eksportu trzeba domknąć jawnie**. To, że niepożądana trasa jest gorsza i nie trafia do FIB sąsiada, nie czyni nieplanowanego ogłoszenia poprawnym.
+
+### 8.14.12. Fault B — nowa polityka na neighbor nadpisuje filtr grupowy
+
+Ta awaria wymaga trochę uwagi, bo symptom wygląda niemal jak błąd protokołu. Na R1 mamy dwie sesje w grupie CORE. Chcemy mieć wspólny filtr \`FILTER-CE-B\` chroniący przed 172.16.62.0/24. Na sąsiadzie R2 ktoś jednak konfiguruje nową politykę tylko po to, aby podnieść LOCAL_PREF.
+
+Problem jest w tym, że **konfiguracja na poziomie neighbor może zastąpić odziedziczoną politykę grupową**. Jeśli nowa polityka nie ma końcowego reject i nie zawiera wspólnego filtra, niedopasowane trasy BGP mogą przejść przez default import.
+
+Najpierw utworzymy specjalną, celowo **niepełną** politykę do testu. Nie jest to właściwy wzorzec bezpieczeństwa.
+
+**R1-vSRX — Configuration Mode, BŁĘDNA policy tylko na potrzeby fault injection**
+
+~~~junos
+set policy-options policy-statement BAD-NEIGHBOR-IMPORT term BOOST from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement BAD-NEIGHBOR-IMPORT term BOOST then local-preference 200
+set policy-options policy-statement BAD-NEIGHBOR-IMPORT term BOOST then accept
+~~~
+
+Następnie na poziomie grupy wskazujemy wspólny filtr, a na R2 celowo pozostawiamy **wyłącznie** BAD-NEIGHBOR-IMPORT. Używamy jawnego \`delete\` poprzedniej listy import na neighbor, bo \`set\` dla listy polityk nie powinien być traktowany jak gwarantowana operacja zastępowania wszystkiego.
+
+**R1-vSRX — Configuration Mode, awaria dziedziczenia polityki**
+
+~~~junos
+set protocols bgp group CORE import FILTER-CE-B
+delete protocols bgp group CORE neighbor 10.12.0.2 import
+set protocols bgp group CORE neighbor 10.12.0.2 import BAD-NEIGHBOR-IMPORT
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+Co powinno się stać? R2 nadal wysyła 172.16.62.0/24, bo taka jest celowa konfiguracja labu. BAD-NEIGHBOR-IMPORT dopasowuje tylko 172.16.60.0/24; dla 172.16.62.0/24 nie ma akcji terminalnej. Przy zwykłym BGP import nieodrzucona trasa może więc zostać zaakceptowana, ponieważ **wspólny filtr z group nie został dołączony do łańcucha neighbor**.
+
+**R1-vSRX — Operational Mode, dowód niezamierzonego importu**
+
+~~~junos
+show configuration protocols bgp group CORE | display set
+show route receive-protocol bgp 10.12.0.2
+show route 172.16.62.0/24 exact extensive
+show route hidden
+~~~
+
+**Oczekiwany wynik (hipoteza):** testowy prefix 172.16.62.0/24 od R2 może stać się aktywny na R1, mimo że powinien być odrzucany. Nie oznacza to jeszcze, że R5 go zobaczy, ponieważ **R1 nadal posiada oddzielny, restrykcyjny eksport CE-A**. To właśnie pokazuje sens wielowarstwowej kontroli.
+
+**Naprawa:** odczekaj na automatyczny rollback \`commit confirmed\`. Oczekiwany stan to pełny łańcuch \`[ FILTER-CE-B PREFER-UPPER ]\` na R2 i \`[ FILTER-CE-B PREFER-LOWER ]\` na R3, bez nowej polityki grupowej nadpisującej nasze intencje.
+
+Jeśli wymagane jest jawne przywrócenie po awarii rollbacku, zastosuj po review:
+
+**R1-vSRX — Configuration Mode, przywrócenie prawidłowego modelu**
+
+~~~junos
+delete protocols bgp group CORE import
+delete protocols bgp group CORE neighbor 10.12.0.2 import
+set protocols bgp group CORE neighbor 10.12.0.2 import [ FILTER-CE-B PREFER-UPPER ]
+set protocols bgp group CORE neighbor 10.13.0.2 import [ FILTER-CE-B PREFER-LOWER ]
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Po post-check dopiero potwierdź zmianę. To ćwiczenie pokazuje, że **dziedziczenie w hierarchii nie oznacza automatycznego łączenia policy-chains**.
+
+### 8.14.13. Fault C — filtr zlicza ICMP, ale nie blokuje testowego źródła
+
+Przechodzimy z control plane do packet filtering. Nie zmieniamy już BGP.
+
+Najpierw na R5 dodajemy tymczasowy adres źródłowy \`203.0.113.9/32\` na loopback, wyłącznie w izolowanym labie. Chcemy wysłać pakiet do 172.16.60.1, ale nie oczekujemy end-to-end PASS. Ten source nie jest ogłoszony do BGP i odpowiedź nie musi do niego wrócić.
+
+**R5-vSRX — Configuration Mode, dodatkowy adres tylko do kontrolowanego testu**
+
+~~~junos
+set interfaces lo0 unit 0 family inet address 203.0.113.9/32
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+Na R1 tworzymy filtr z zamierzonym błędem: pierwszy term liczy wszystkie ICMP, drugi miał blokować testowy source. Problem polega na tym, że pierwszy term z samym \`count\` może wykonać **implicit accept**.
+
+**R1-vSRX — Configuration Mode, BŁĘDNY filtr do krótkiego testu**
+
+~~~junos
+set firewall family inet filter BAD-COUNT term COUNT-ALL-ICMP from protocol icmp
+set firewall family inet filter BAD-COUNT term COUNT-ALL-ICMP then count ICMP-TOTAL
+set firewall family inet filter BAD-COUNT term BLOCK-SOURCE from source-address 203.0.113.9/32
+set firewall family inet filter BAD-COUNT term BLOCK-SOURCE then count BAD-SOURCE-DROP
+set firewall family inet filter BAD-COUNT term BLOCK-SOURCE then discard
+set firewall family inet filter BAD-COUNT term REST then accept
+set interfaces ge-0/0/2 unit 0 family inet filter input BAD-COUNT
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**R5-vSRX — Operational Mode, próba ze źródłem testowym**
+
+~~~junos
+ping 172.16.60.1 source 203.0.113.9 count 3
+~~~
+
+**R1-vSRX — Operational Mode, obserwacja filtrów**
+
+~~~junos
+show firewall filter BAD-COUNT
+show configuration firewall family inet filter BAD-COUNT
+show configuration interfaces ge-0/0/2 | display set
+~~~
+
+**Oczekiwany wynik (hipoteza):** licznik \`ICMP-TOTAL\` wzrasta, ale licznik \`BAD-SOURCE-DROP\` w drugim termie nie wzrasta dla tego testu. Nie oznacza to, że ping powinien mieć odpowiedź — routing powrotny do 203.0.113.9 i security flow to osobna sprawa. Dowodzimy **przejścia pakietu przez ocenę stateless filtra**, nie zakończenia komunikacji host-to-host.
+
+**Naprawa:** nie zatwierdzaj błędnej konfiguracji R1. Pozwól wygaśnięciu \`commit confirmed 2\` odpiąć BAD-COUNT od interfejsu. Gdybyś świadomie budował filtr z liczeniem i późniejszą oceną termów, należy użyć wspieranego \`then next term\` — po sprawdzeniu obsługi na danym release.
+
+Na R5 usuń tymczasowy adres 203.0.113.9/32 po teście. W tym przypadku można bezpiecznie wykorzystać również wygaśnięcie warunkowego commitu, o ile nie został on wcześniej potwierdzony.
+
+**R5-vSRX — Configuration Mode, ręczny cleanup źródła testowego, jeśli pozostało po ćwiczeniu**
+
+~~~junos
+delete interfaces lo0 unit 0 family inet address 203.0.113.9/32
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+### 8.14.14. Fault D — usuwamy ostatnie \`accept\`, a ruch „magicznie” znika
+
+Teraz budujemy właściwy filtr \`CE-A-IN\` na ingress LAN-A R1. Jego zadaniem jest zablokować tylko źródło 203.0.113.9/32 i **przepuścić cały pozostały ruch do dalszych decyzji**. To będzie nasz nowy baseline do krótkiego testu.
+
+**R1-vSRX — Configuration Mode, poprawna wersja filtra**
+
+~~~junos
+set firewall family inet filter CE-A-IN term BLOCK-TEST from source-address 203.0.113.9/32
+set firewall family inet filter CE-A-IN term BLOCK-TEST then count TEST-DROP
+set firewall family inet filter CE-A-IN term BLOCK-TEST then discard
+set firewall family inet filter CE-A-IN term ALLOW-REMAINDER then count NORMAL-TRAFFIC
+set firewall family inet filter CE-A-IN term ALLOW-REMAINDER then accept
+set interfaces ge-0/0/2 unit 0 family inet filter input CE-A-IN
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+Najpierw wykonaj prawidłowy ping R5 → R6 oraz sprawdź, czy BGP R1↔R5 pozostaje Established. Jeśli tak, potwierdź baseline z \`commit\` na R1.
+
+Teraz celowo usuń **wyłącznie** \`ALLOW-REMAINDER\`.
+
+**R1-vSRX — Configuration Mode, BŁĘDNA zmiana, tylko przy niezależnej konsoli**
+
+~~~junos
+delete firewall family inet filter CE-A-IN term ALLOW-REMAINDER
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+Co się wydarzy? Pakiet R5 z normalnym source 172.16.50.1 nie pasuje do \`BLOCK-TEST\`, a następnego termu już nie ma. Standardowy stateless filter zastosuje **implicit discard**. Zależnie od rzeczywistej ścieżki przetwarzania może to również wpływać na pakiety kontrolne BGP przychodzące od R5 na tym samym interfejsie; sesja nie musi zerwać się natychmiast, ale może zacząć tracić pakiety.
+
+**R1-vSRX — Operational Mode, sprawdzamy świadomie wywołaną awarię**
+
+~~~junos
+show configuration firewall family inet filter CE-A-IN
+show firewall filter CE-A-IN
+show bgp summary
+show route 172.16.60.0/24 exact
+~~~
+
+To nie jest awaria samego BGP. BGP może jeszcze przez chwilę pokazywać Established, choć pakiety są już odrzucane przez input filter. Po wygaśnięciu confirmed commit wróci \`ALLOW-REMAINDER\`. Zbierz wtedy ten sam output i zweryfikuj, że ruch powrócił.
+
+**Wniosek:** stateless filter może zatrzymać ruch nawet wtedy, gdy RIB i FIB zawierają prawidłowe trasy. To osobny punkt diagnostyczny.
+
+### 8.14.15. Fault E — stateless filter przepuszcza, ale security policy SRX mówi \`deny\`
+
+Ostatnia kontrolowana awaria służy sprawdzeniu jeszcze jednej granicy. Na R1 zostawiamy poprawny \`CE-A-IN\`: normalny ruch ma trafić do końcowego \`ALLOW-REMAINDER then accept\`.
+
+Następnie modyfikujemy laboratoryjną policy \`LAB-ICMP\`, tak aby nowe inicjowane sesje ICMP były odrzucane. **Nie zmieniamy żadnej trasy ani BGP policy.**
+
+**R1-vSRX — Configuration Mode, kontrolowana zmiana policy stateful**
+
+~~~junos
+delete security policies from-zone LAB to-zone LAB policy LAB-ICMP then permit
+set security policies from-zone LAB to-zone LAB policy LAB-ICMP then deny
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+**R5-vSRX — Operational Mode, nowa próba z rzeczywistego źródła CE-A**
+
+~~~junos
+ping 172.16.60.1 source 172.16.50.1 count 3
+~~~
+
+**R1-vSRX — Operational Mode, odrębna analiza routing / filter / security**
+
+~~~junos
+show route 172.16.60.0/24 exact extensive
+show firewall filter CE-A-IN
+show security policies from-zone LAB to-zone LAB
+show security flow session
+~~~
+
+**Oczekiwany wynik:** prawidłowa route do R6 i przyjmujący stateless filter mogą pozostać bez zmian, ale nowy flow nie jest dopuszczany przez \`LAB-ICMP\`. Zauważ, że **stare sesje SRX mogą jeszcze przez pewien czas istnieć**, dlatego testuj nowy przepływ i sprawdzaj rzeczywiste security counters/session state, a nie wnioskuj z pojedynczego pingu.
+
+Po wygaśnięciu \`commit confirmed\` wróci laboratoryjne \`permit\`. Przetestuj normalny ruch raz jeszcze. To właśnie odróżnia stateful policy od routingu i stateless firewall filter.
+
+### 8.14.16. Dodatkowy eksperyment — strict uRPF w dwóch korytarzach
+
+Nie musimy włączać uRPF, aby osiągnąć podstawowy cel rozdziału. Warto jednak zrozumieć, dlaczego jego konfiguracja wymaga jeszcze jednego rodzaju kontroli.
+
+R1 preferuje 172.16.61.0/24 przez **R3**. Jeśli legalny pakiet ze źródłem 172.16.61.1 przyjdzie przez **R2**, strict uRPF może go odrzucić, ponieważ reverse path do źródła w RIB/FIB wskazuje R3. To przykład konfliktu z routingiem asymetrycznym.
+
+Zanim uruchomisz taki test na swoim vSRX, sprawdź wersję Junos, rzeczywistą obsługę \`rpf-check\`, dostępne liczniki oraz czy \`active-paths\` i \`feasible-paths\` są implementowane zgodnie z oczekiwaniem. Wariant z uRPF **nie należy do bazowego PASS** labu, bo bez dodatkowych testów warstwy stateful i return-path można łatwo pomylić przyczynę odrzucenia.
+
+**R1-vSRX — Operational Mode, read-only przygotowanie do analizy uRPF**
+
+~~~junos
+show route 172.16.61.1
+show route forwarding-table destination 172.16.61.1
+show interfaces terse
+show configuration routing-options forwarding-table | display set
+~~~
+
+Na końcu, jeśli chcesz przeprowadzić odrębny test uRPF, wykorzystaj **osobny snapshot** DIAMOND-6R i nie przenoś uzyskanych wyników bez sprawdzenia na MX/EX/QFX. Rozdział 8 uczy mechanizmu; nie udaje, że każda rodzina Junos ma identyczny forwarding implementation.
+
+### 8.14.17. Ochrona RE \`lo0.0\` — oddzielna sesja praktyczna, nie destrukcyjny etap baseline
+
+Na R1 jest już trzyosobowa grupa peerów: R5, R2 i R3. Możesz teraz przygotować \`prefix-list BGP-PEERS\` opartą o \`apply-path\` i zweryfikować, czy zawiera wszystkie trzy adresy.
+
+**R1-vSRX — Configuration Mode, dynamiczna lista do ochrony RE**
+
+~~~junos
+set policy-options prefix-list BGP-PEERS apply-path "protocols bgp group <*> neighbor <*>"
+~~~
+
+**R1-vSRX — Operational Mode, weryfikacja rozwinięcia listy**
+
+~~~junos
+show configuration policy-options prefix-list BGP-PEERS | display inheritance
+show configuration protocols bgp | display set
+~~~
+
+Następnie zbuduj roboczą policy \`PROTECT-RE\` według zasad z sekcji 8.9. **Nie przypinaj jej** do \`lo0.0\`, dopóki nie znasz adresacji konsoli/OOB, zasad SSH, BGP, DNS, NTP, SNMP i pozostałych host-bound protocols. Przygotuj test z \`commit confirmed\` i właściwym dostępem awaryjnym. Celem jest nauczyć się ochrony RE, a nie świadomie odciąć wszystkie sześć routerów.
+
+### 8.14.18. Cleanup, dowody i kryteria zakończenia
+
+Po każdym fault injection wracaliśmy do zapisanego baseline. Nie wprowadzaliśmy awarii A, B, C, D i E jednocześnie, ponieważ wtedy nie dałoby się wiarygodnie ustalić przyczyny objawu.
+
+Masz teraz dwa poprawne sposoby zakończenia pracy. Możesz zachować skonfigurowany DIAMOND-6R z sześcioma sesjami BGP, podwójnymi ścieżkami i politykami import/export jako **bazę do rozdziału 11**. Możesz też odtworzyć czysty snapshot z okresu przed ćwiczeniem. Sam restart vSRX nie przywraca wcześniejszej konfiguracji — musi to być świadomie przygotowana kopia albo zatwierdzony rollback.
+
+Jeśli zachowujesz lab jako referencję, pozostaw wyłącznie poprawne elementy:
+
+- sześć sesji BGP Established;
+- R5 reklamuje tylko 172.16.50/24 i 172.16.51/24;
+- R6 reklamuje trzy prefixy labowe, a R1 skutecznie odrzuca 172.16.62/24;
+- R1 preferuje 172.16.60/24 przez R2 i 172.16.61/24 przez R3;
+- R4 preferuje powrót do 172.16.50/24 przez R2 i 172.16.51/24 przez R3;
+- ścieżka R5→R6 i odpowiedź działają dla obu świadomie wybranych par source/destination;
+- brak pozostawionych \`BAD-COUNT\`, \`BAD-NEIGHBOR-IMPORT\`, aktywnych fault injection i niezatwierdzonych \`commit confirmed\`.
+
+W pliku evidence dla laboratorium przechowuj wyniki realnych komend \`show version\`, \`show bgp summary\`, \`receive-protocol\`, \`advertising-protocol\`, \`show route extensive\`, \`show firewall\`, \`show security flow session\`, odczyt tras powrotnych oraz faktyczny rezultat testów. Dopiero wtedy można oznaczyć daną fazę jako **RUNTIME VALIDATED**.
+
+Pamiętaj, że brak aktywnego prefiksu 172.16.62/24 na R1 nie dowodzi jeszcze, *dlaczego* go nie ma. Musimy pokazać, że **R6 go ogłosił, R4/R2/R3 przekazały, R1 otrzymał i jego import policy odrzuciła**. Taki łańcuch dowodów jest dużo bardziej wartościowy od samego zielonego pingu.
+
