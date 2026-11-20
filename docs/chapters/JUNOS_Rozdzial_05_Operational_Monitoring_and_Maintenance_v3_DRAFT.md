@@ -1235,3 +1235,436 @@ Wyobraź sobie, że administrator próbuje przypisać R1 adres `192.0.2.1/33`. P
 
 **Podsumowanie poziomu 2:** po każdym fault odpowiedz: *który element zmieniliśmy, które testy powinny nadal działać, które powinny zawieść, co dowodzi przyczyny i co sprawdzamy po powrocie?*
 
+
+---
+
+### Poziom 3 — pełny DIAMOND-6R: awaria górnej drogi, niejednoznaczny failover i analiza całego ruchu
+
+Teraz uruchomimy wszystkie sześć vSRX. Nie wprowadzamy nowej topologii: nadal są tylko dwie drogi przez rdzeń, **górna R1–R2–R4** i **dolna R1–R3–R4**. R5 i R6 to routery CE, a nie hosty VPCS.
+
+**Cel dydaktyczny:** przeanalizować nie tylko jeden port, lecz również zależności między lokalnym wyborem trasy, forwardingiem kolejnych hopów, polityką SRX oraz ruchem powrotnym.
+
+W podstawowym wariancie tego rozdziału wykorzystamy **adresy interfejsów LAN-A i LAN-B**. Referencyjne adresy loopback `10.255.255.1/32` do `10.255.255.6/32` i dodatkowe prefiksy `172.16.50.0/24`, `172.16.51.0/24`, `172.16.60.0/24`, `172.16.61.0/24` pozostają częścią projektu DIAMOND-6R, ale nie są potrzebne do tego pierwszego eksperymentu. Nie zmieniamy ich ani nie ogłaszamy BGP. Dzięki temu koncentrujemy się na diagnostyce, a nie na pięciu nowych mechanizmach jednocześnie.
+
+#### Przed konfiguracją: poznaj całą adresację
+
+| Połączenie | Interfejs pierwszy | Interfejs drugi |
+|---|---|---|
+| R5–R1 | R5 `ge-0/0/0.0` 192.0.2.10/24 | R1 `ge-0/0/2.0` 192.0.2.1/24 |
+| R1–R2 | R1 `ge-0/0/0.0` 10.12.0.1/30 | R2 `ge-0/0/0.0` 10.12.0.2/30 |
+| R1–R3 | R1 `ge-0/0/1.0` 10.13.0.1/30 | R3 `ge-0/0/0.0` 10.13.0.2/30 |
+| R2–R4 | R2 `ge-0/0/1.0` 10.24.0.1/30 | R4 `ge-0/0/0.0` 10.24.0.2/30 |
+| R3–R4 | R3 `ge-0/0/1.0` 10.34.0.1/30 | R4 `ge-0/0/1.0` 10.34.0.2/30 |
+| R4–R6 | R4 `ge-0/0/2.0` 198.51.100.1/24 | R6 `ge-0/0/0.0` 198.51.100.10/24 |
+
+To jest dokładnie sześć segmentów z [mapy referencyjnej](../../labs/reference-diamond-6vsrx/README.md). Nie ma łącza R2–R3 ani R1–R4.
+
+#### Co powinien znać każdy router, żeby ping R5→R6 mógł działać?
+
+Wybieramy **trasy statyczne**, ponieważ czytelnik zna już ich ogólną ideę, a rozbudowane BGP i OSPF pojawią się dopiero w późniejszych rozdziałach.
+
+Na R5 wystarczy wskazać, że sieć LAN-B leży za R1. Na R6 analogicznie, że LAN-A leży za R4. Routery R2 i R3 znają oba końce rdzenia. R1 i R4 mają trasę do drugiego LAN-u przez górny korytarz oraz możliwość wyboru dolnego korytarza jako zapasowego.
+
+**Ważna różnica:** fizyczne istnienie dwóch łączy nie oznacza automatycznie, że Junos przełączy routing. Konfigurując statyczną trasę, musimy jawnie określić next-hop i ewentualną alternatywę.
+
+W tym przykładzie używamy **`qualified-next-hop`**. To sposób nadania odrębnej preferencji zapasowemu następnemu hopowi. Dla zwykłej trasy statycznej preference wynosi typowo 5, a dla naszej alternatywy ustawimy 10. Wartość **niższa** jest lepsza, o ile next-hop jest rozwiązywalny. Nie jest to jednak mechanizm automatycznego monitorowania końcowej aplikacji — statyczny next-hop może nadal wyglądać na osiągalny, gdy odległy fragment drogi jest zepsuty.
+
+#### Konfiguracja dodatkowych routerów — tylko na świeżych klonach
+
+Przygotuj **R3**, następnie **R4**, rozbuduj **R2 i R1**, a na końcu **R6 i R5**. Na każdym urządzeniu osobno wykonaj `configure private`, sprawdź `show | compare`, `commit check` oraz lokalne post-checki. **Nie uruchamiaj timerów `commit confirmed` równocześnie na wszystkich sześciu routerach.** Każde urządzenie musi zostać najpierw poprawnie przygotowane i bezpiecznie zatwierdzone.
+
+**R3-vSRX — Operational Mode, rozpoczęcie konfiguracji nowego routera CORE-2**
+
+~~~junos
+configure private
+~~~
+
+**R3-vSRX — Configuration Mode [edit private], dolny korytarz i trasy w obu kierunkach**
+
+~~~junos
+set system host-name R3-vSRX
+set interfaces ge-0/0/0 unit 0 family inet address 10.13.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.1/30
+set security zones security-zone CORE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone CORE interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security policies from-zone CORE to-zone CORE policy CH05-CORE-ICMP match source-address any
+set security policies from-zone CORE to-zone CORE policy CH05-CORE-ICMP match destination-address any
+set security policies from-zone CORE to-zone CORE policy CH05-CORE-ICMP match application junos-ping
+set security policies from-zone CORE to-zone CORE policy CH05-CORE-ICMP then permit
+set routing-options static route 192.0.2.0/24 next-hop 10.13.0.1
+set routing-options static route 198.51.100.0/24 next-hop 10.34.0.2
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Na R3 obie strony połączenia są w tej samej strefie CORE. Tworzymy jawne, ograniczone laboratoryjne zezwolenie **CORE→CORE dla nowych sesji ICMP**. Dzięki temu późniejsza diagnostyka nie będzie oparta na przypadkowych domyślnych regułach intrazone danego obrazu SRX.
+
+Gdy konfiguracja R3 przejdzie lokalne kontrole, zatwierdź ją. Pełen test R3–R4 może być jeszcze niedostępny, ponieważ R4 nie jest gotowy; to nie powód do przedłużania timera w ciemno.
+
+**R3-vSRX — Operational Mode, osobna sesja, post-check**
+
+~~~junos
+show configuration interfaces | display set
+show configuration security zones | display set
+show route table inet.0
+show system commit
+~~~
+
+**R3-vSRX — Configuration Mode [edit private], po zatwierdzeniu poprawnego stanu lokalnego**
+
+~~~junos
+commit
+~~~
+
+Teraz przygotuj R4, który będzie miał dwa interfejsy do rdzenia i jeden do R6.
+
+**R4-vSRX — Operational Mode, wejście do edycji EDGE-B**
+
+~~~junos
+configure private
+~~~
+
+**R4-vSRX — Configuration Mode [edit private], połączenia CORE-1, CORE-2 i CE-B**
+
+~~~junos
+set system host-name R4-vSRX
+set interfaces ge-0/0/0 unit 0 family inet address 10.24.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.2/30
+set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24
+set security zones security-zone CORE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone CORE interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone CE interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE match source-address any
+set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE match destination-address any
+set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE match application junos-ping
+set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE then permit
+set security policies from-zone CE to-zone CORE policy CH05-CE-TO-CORE match source-address any
+set security policies from-zone CE to-zone CORE policy CH05-CE-TO-CORE match destination-address any
+set security policies from-zone CE to-zone CORE policy CH05-CE-TO-CORE match application junos-ping
+set security policies from-zone CE to-zone CORE policy CH05-CE-TO-CORE then permit
+set routing-options static route 192.0.2.0/24 next-hop 10.24.0.1
+set routing-options static route 192.0.2.0/24 qualified-next-hop 10.34.0.1 preference 10
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Na R4 konfigurujemy polityki **w obu kierunkach**, bo w dalszych testach R6 ma móc również inicjować nowy ping do R5. Sesja powrotna dla wcześniej dozwolonego flow jest mechanizmem stateful, ale osobno inicjowana sesja w przeciwnym kierunku może wymagać własnej policy.
+
+Dla LAN-A R4 wybierze next-hop R2 (10.24.0.1) jako podstawowy, a R3 (10.34.0.1) jako alternatywę o preference 10, jeśli jej użycie będzie możliwe. Nie oznacza to monitorowania końcowego R5.
+
+**R4-vSRX — Operational Mode, osobna sesja, lokalny post-check**
+
+~~~junos
+show interfaces terse
+show route 192.0.2.0/24 exact extensive
+show security policies
+show system commit
+~~~
+
+**R4-vSRX — Configuration Mode [edit private], po pozytywnym lokalnym post-check**
+
+~~~junos
+commit
+~~~
+
+R2 ma już interfejs do R1. Dodajemy mu port do R4 i trasę do LAN-B. Na dwóch portach CORE dopuszczamy nowy ICMP między interfejsami w tej samej strefie.
+
+**R2-vSRX — Operational Mode, wejście do edycji CORE-1**
+
+~~~junos
+configure private
+~~~
+
+**R2-vSRX — Configuration Mode [edit private], drugi port i połączenie do LAN-B**
+
+~~~junos
+set interfaces ge-0/0/1 unit 0 family inet address 10.24.0.1/30
+set security zones security-zone CORE interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security policies from-zone CORE to-zone CORE policy CH05-CORE-ICMP match source-address any
+set security policies from-zone CORE to-zone CORE policy CH05-CORE-ICMP match destination-address any
+set security policies from-zone CORE to-zone CORE policy CH05-CORE-ICMP match application junos-ping
+set security policies from-zone CORE to-zone CORE policy CH05-CORE-ICMP then permit
+set routing-options static route 198.51.100.0/24 next-hop 10.24.0.2
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R2-vSRX — Operational Mode, osobna sesja, port i trasa**
+
+~~~junos
+show interfaces ge-0/0/1 terse
+show route 198.51.100.0/24 exact
+ping 10.24.0.2 source 10.24.0.1 count 3
+~~~
+
+**R2-vSRX — Configuration Mode [edit private], po PASS**
+
+~~~junos
+commit
+~~~
+
+Na R1 dodamy drugą drogę, do R3, oraz trasę do LAN-B. R1 zachowuje swoją istniejącą konfigurację z poziomu 2.
+
+**R1-vSRX — Operational Mode, ponowne wejście do edycji EDGE-A**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], dolne połączenie i alternatywna trasa**
+
+~~~junos
+set interfaces ge-0/0/1 unit 0 family inet address 10.13.0.1/30
+set security zones security-zone CORE interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set routing-options static route 198.51.100.0/24 next-hop 10.12.0.2
+set routing-options static route 198.51.100.0/24 qualified-next-hop 10.13.0.2 preference 10
+set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE match source-address any
+set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE match destination-address any
+set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE match application junos-ping
+set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE then permit
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Zwróć uwagę: nie zmieniliśmy numerów portów istniejącego rdzenia. `ge-0/0/0` nadal prowadzi do R2, `ge-0/0/1` do R3, a `ge-0/0/2` do R5. W laboratorium czytelnik ma nauczyć się **zachowywać spójną adresację podczas diagnostyki**, a nie zmieniać topologię z każdą nową lekcją.
+
+**R1-vSRX — Operational Mode, osobna sesja, przegląd nowego układu**
+
+~~~junos
+show interfaces terse
+show route 198.51.100.0/24 exact extensive
+show route forwarding-table destination 198.51.100.10
+show security policies
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], po pozytywnym post-check**
+
+~~~junos
+commit
+~~~
+
+Ostatni router zdalny to R6. Ma on własny adres 198.51.100.10/24 i będzie odbiorcą pingu z R5.
+
+**R6-vSRX — Operational Mode, wejście do edycji CE-B**
+
+~~~junos
+configure private
+~~~
+
+**R6-vSRX — Configuration Mode [edit private], adres LAN-B i droga powrotna**
+
+~~~junos
+set system host-name R6-vSRX
+set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.10/24
+set security zones security-zone CE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set routing-options static route 192.0.2.0/24 next-hop 198.51.100.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R6-vSRX — Operational Mode, osobna sesja, reachability R4**
+
+~~~junos
+show interfaces ge-0/0/0 terse
+show route 192.0.2.0/24 exact
+ping 198.51.100.1 source 198.51.100.10 count 3
+~~~
+
+**R6-vSRX — Configuration Mode [edit private], po PASS**
+
+~~~junos
+commit
+~~~
+
+Na końcu R5 musi poznać sieć LAN-B przez R1. Jego trasa do 10.12.0.0/30 z poziomu 2 nie wystarcza do osiągnięcia 198.51.100.10.
+
+**R5-vSRX — Operational Mode, wejście do edycji CE-A**
+
+~~~junos
+configure private
+~~~
+
+**R5-vSRX — Configuration Mode [edit private], trasa do LAN-B**
+
+~~~junos
+set routing-options static route 198.51.100.0/24 next-hop 192.0.2.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R5-vSRX — Operational Mode, osobna sesja, test docelowy**
+
+~~~junos
+show route 198.51.100.0/24 exact
+ping 198.51.100.10 source 192.0.2.10 count 5
+~~~
+
+**R5-vSRX — Configuration Mode [edit private], po rzeczywistym PASS**
+
+~~~junos
+commit
+~~~
+
+W tym momencie **może** działać ping R5→R6 przez górny korytarz, jeśli wszystkie interfejsy, strefy, polityki i drogi powrotne są poprawne. Nie ogłaszamy automatycznego PASS; wynik trzeba potwierdzić na działającym labie. W niektórych wydaniach vSRX może być konieczne dopasowanie szczegółów konfiguracji lokalnie inicjowanego ruchu lub sesji do konkretnej platformy.
+
+### Bazowy test górnej i dolnej ścieżki
+
+Przed fault zapisz aktywną drogę do LAN-B na R1 i drogę powrotną do LAN-A na R4.
+
+**R1-vSRX — Operational Mode, która droga jest podstawowa?**
+
+~~~junos
+show route 198.51.100.0/24 exact extensive
+show route forwarding-table destination 198.51.100.10
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+~~~
+
+**R4-vSRX — Operational Mode, skąd wróci ruch do LAN-A?**
+
+~~~junos
+show route 192.0.2.0/24 exact extensive
+show route forwarding-table destination 192.0.2.10
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+~~~
+
+**R5-vSRX — Operational Mode, wynik ruchu generowanego lokalnie**
+
+~~~junos
+ping 198.51.100.10 source 192.0.2.10 count 5
+traceroute 198.51.100.10 source 192.0.2.10
+~~~
+
+**EXPECTED:** podstawowa droga R1→LAN-B prowadzi przez 10.12.0.2 (R2), a R4→LAN-A przez 10.24.0.1 (R2). Traceroute może pokazywać gwiazdki, jeśli sondy i odpowiedzi są ograniczane przez polityki — nie traktuj tego jako dowodu braku tranzytu.
+
+### Fault D — R1 traci górne łącze, ale R4 nadal preferuje górny powrót
+
+Wyłączymy **tylko** interfejs R1→R2. Nie ruszamy R4 ani R3. To zaawansowane ćwiczenie, ponieważ na pierwszy rzut oka obecność dolnej drogi mogłaby sugerować automatyczny sukces failover.
+
+**R1-vSRX — Configuration Mode [edit private], fault D w izolowanym DIAMOND-6R**
+
+~~~junos
+set interfaces ge-0/0/0 disable
+show | compare
+commit check
+commit confirmed 3
+~~~
+
+Teraz wykonaj odczyty bez dalszej zmiany konfiguracji.
+
+**R1-vSRX — Operational Mode, warunkowy stan po wyłączeniu portu**
+
+~~~junos
+show interfaces ge-0/0/0 terse
+show route 198.51.100.0/24 exact extensive
+show route forwarding-table destination 198.51.100.10
+show system commit
+~~~
+
+**R4-vSRX — Operational Mode, niezależnie sprawdź trasę powrotną**
+
+~~~junos
+show route 192.0.2.0/24 exact extensive
+show route forwarding-table destination 192.0.2.10
+~~~
+
+**R5-vSRX — Operational Mode, test usługi podczas awarii**
+
+~~~junos
+ping 198.51.100.10 source 192.0.2.10 count 5
+~~~
+
+Jaki wynik powinieneś przewidzieć? Na R1 next-hop przez R2 może stać się nieaktywny, a trasa zapasowa przez R3 może zostać użyta — **jeżeli** odzwierciedla to stan połączenia i poprawnie rozwiązuje next-hop. Ale R4 nadal może preferować drogę powrotną przez R2. R2 z kolei może nie mieć już skutecznej drogi do LAN-A przez zerwane R1–R2.
+
+W rezultacie **forward może pójść R1–R3–R4, a return próbować wrócić R4–R2–R1**. Nie mamy więc prawa zagwarantować udanego pingu tylko dlatego, że R1 zobaczył zapasowy next-hop.
+
+To najważniejszy praktyczny wniosek z tego fault: **failover w jednym routerze nie dowodzi konwergencji całej sieci**. Trzeba zbadać obie strony i ewentualne asymetryczne ścieżki. Na urządzeniach SRX asymetria może dodatkowo kolidować z mechanizmem stanowych sesji bezpieczeństwa.
+
+**Recovery:** nie potwierdzaj warunkowego commitu. Po automatycznym rollback sprawdź, że górny link i preferowana trasa wróciły do bazowego stanu, a test R5→R6 ponownie działa. Zapisz realną drogę wybraną przez R1 i R4. Jeśli zachowanie różni się od oczekiwanego, przeanalizuj next-hop, inne trasy w RIB oraz stan logicznych portów.
+
+### Dlaczego nie uruchamiamy na ślepo „awarii całego R2”?
+
+Wyłączenie VM R2 może nie wywołać identycznego stanu `link down` na R1 i R4 w każdym modelu połączeń EVE-NG. Wirtualny most i vNIC mogą nadal pokazywać link aktywny, choć sąsiad już nie odpowiada na ARP. Trasa statyczna oparta tylko na rozwiązywalności next-hopu nie wykrywa każdego rodzaju awarii sieci.
+
+Dlatego bardziej zaawansowany test konwergencji wymaga osobnej analizy mechanizmu wykrywania awarii, protokołu dynamicznego lub świadomego śledzenia reachability (np. rozwiązania RPM/IP monitoring na wspieranej platformie). W rozdziałach 6–11 nauczymy się, jak takie rozwiązania zaprojektować. Nie obiecujemy automatycznego przełączenia na R3 bez określenia mechanizmu.
+
+### Fault E — jedna błędna policy i pozornie poprawny routing
+
+W pełnym DIAMOND-6R wyłącz zezwolenie CORE→CE na **R4**, pozostawiając wszystkie statyczne trasy bez zmian. Dzięki temu zobaczysz, jak awaria na ostatnim routerze może wyglądać z R5 jak „problem routingu”.
+
+**R4-vSRX — Configuration Mode [edit private], fault E tylko na SRX policy**
+
+~~~junos
+deactivate security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE
+show | compare
+commit check
+commit confirmed 3
+~~~
+
+**R4-vSRX — Operational Mode, obserwacja policy i sesji**
+
+~~~junos
+show route 198.51.100.0/24 exact
+show route 192.0.2.0/24 exact
+show security policies from-zone CORE to-zone CE
+show security flow session
+~~~
+
+**R5-vSRX — Operational Mode, nowa próba po zmianie policy**
+
+~~~junos
+ping 198.51.100.10 source 192.0.2.10 count 5
+~~~
+
+**EXPECTED:** jeżeli nie ma innej policy dopuszczającej ten ruch, **nowa sesja** z rdzenia do R6 może zostać odrzucona na R4, mimo że R1–R3 i routing wyglądają poprawnie. Istniejące sesje mogły powstać wcześniej; należy rozróżnić ich zachowanie od nowej inicjacji.
+
+**Recovery:** po automatycznym rollback przeprowadź nowy test ICMP i porównaj stan policy. W ten sposób naprawa dotyczy dokładnie tego miejsca, w którym zidentyfikowaliśmy problem.
+
+### Fault F — missing route na R6: pakiet dochodzi, ale odpowiedź nie ma dokąd wrócić
+
+Możemy również usunąć na R6 jedyną trasę do LAN-A. Na R5, R1 i R4 nie zmieniamy niczego.
+
+**R6-vSRX — Configuration Mode [edit private], fault F: brak powrotu do R5**
+
+~~~junos
+delete routing-options static route 192.0.2.0/24
+show | compare
+commit check
+commit confirmed 3
+~~~
+
+**R6-vSRX — Operational Mode, obserwacja drogi powrotnej**
+
+~~~junos
+show route 192.0.2.0/24 exact
+show route forwarding-table destination 192.0.2.10
+show interfaces ge-0/0/0 terse
+~~~
+
+**R5-vSRX — Operational Mode, test komunikacji po zmianie tylko R6**
+
+~~~junos
+ping 198.51.100.10 source 192.0.2.10 count 5
+~~~
+
+**EXPECTED:** bez innej drogi obejmującej 192.0.2.10 R6 nie będzie umiał poprawnie odesłać odpowiedzi do R5. Port R6 do R4 nadal może być `up/up`, a host-bound request może dotrzeć do urządzenia. To brak **return path**, nie brak local link.
+
+Jeżeli na R6 istnieje default route lub BGP z innego laboratorium, wynik może być inny. Zanim uznasz test za PASS, sprawdź pełne dopasowanie routingu.
+
+**Recovery:** nie potwierdzaj commitu; po rollback sprawdź powrót trasy R6 i dwukierunkową łączność. Nie dodawaj default route bez potrzeby, bo zmieniałaby cel ćwiczenia.
+
+### Co zachować po zakończeniu poziomu 3?
+
+Dla każdej awarii zachowaj **rzeczywisty czas i hostname**, wynik odczytu przed zmianą, zmianę w `show | compare`, status po aktywacji, wynik testu z R5/R6 oraz stan po rollback. Jeżeli nie masz zrzutów dla konkretnej wersji Junos, wpisz **NOT TESTED**.
+
+Nie wyczyść z rozpędu całego DIAMOND-6R po jednym ćwiczeniu. Użyj oddzielnych snapshotów lub kontrolowanej procedury cleanup, tak aby rozdziały o OSPF/BGP mogły wykorzystać ten sam, stabilny projekt.
+
+**Źródła do interpretacji:** [Static Route Preferences and Qualified Next Hops](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html), [SRX Security Policies](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html), [commit confirmed](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html).
+
