@@ -759,3 +759,242 @@ Załóżmy, że zmieniono konfigurację i wykonano upgrade oprogramowania. Wczyt
 
 Dlatego w procedurach operacyjnych odróżniamy **rollback konfiguracji** od pełnego planu przywrócenia usługi. Ten ostatni może wymagać także testów protokołów, ścieżek, stanu systemu i pracy aplikacji.
 
+---
+
+## 3.10. J-Web — administracja przez przeglądarkę [A]
+
+Nie każda osoba zarządzająca Junos pracuje wyłącznie przez terminal. Juniper udostępnia również **J-Web** — graficzny interfejs dostępny przez przeglądarkę na wspieranych urządzeniach i wydaniach. Możesz w nim przeglądać informacje o systemie, monitorować wybrane elementy i przygotowywać konfigurację.
+
+J-Web jest szczególnie przydatny, kiedy uczysz się układu urządzenia lub chcesz pokazać mniej doświadczonemu administratorowi stan interfejsów. W niektórych sytuacjach prostszy będzie jednak CLI, zwłaszcza podczas analizy wielu urządzeń, diffów i logów.
+
+Nie zakładaj, że każdy model Juniper ma identyczny wygląd J-Web. **SRX i EX mogą mieć inne widoki, a dostępność funkcji zależy od Junos release oraz zainstalowanego pakietu J-Web.** Ekran opisany w instrukcji dla innej rodziny urządzeń nie musi odpowiadać Twojemu vSRX.
+
+### Jak bezpiecznie korzystać z GUI?
+
+Połączenie z J-Web powinno być szyfrowane przez **HTTPS** i dopuszczone tylko ze znanego segmentu zarządzania. Do działania może być potrzebna poprawna konfiguracja usługi `web-management`, certyfikatu oraz reguł dopuszczających dostęp do urządzenia. Na SRX dochodzą kwestie `host-inbound-traffic`.
+
+Nie otwieraj J-Web przez zwykłe HTTP tylko dlatego, że HTTPS wymaga dodatkowej konfiguracji. Nie wystawiaj też panelu na wszystkie interfejsy w sieci ćwiczeniowej lub, co gorsza, do Internetu.
+
+**R1-vSRX — Operational Mode: sprawdź najpierw, czy J-Web w ogóle jest skonfigurowany**
+
+~~~junos
+show version
+show configuration system services web-management | display set
+show configuration security zones | display set
+show interfaces terse
+~~~
+
+Jeżeli pierwsze polecenie potwierdza wspierany release, a drugie pokazuje konfigurację HTTPS, masz część potrzebnych informacji. Nadal nie jest to dowód, że panel działa: sprawdź certyfikat, właściwą strefę, adres management i dostępność TCP na wybranym porcie.
+
+### Dlaczego nie podajemy jednej uniwersalnej ścieżki menu J-Web?
+
+Interfejs J-Web zmieniał się między wersjami i rodzinami sprzętu. Nie byłoby uczciwe podać jako uniwersalnej ścieżki `Configure → Interfaces`, jeśli na Twoim obrazie funkcja znajduje się w innym miejscu albo nie jest zainstalowana.
+
+W odizolowanym labie zastosuj następującą procedurę: otwórz stronę HTTPS pod **zweryfikowanym adresem zarządzania**, zaloguj się uprawnionym kontem, znajdź sekcję monitorowania interfejsów i porównaj stan portu `ge-0/0/0` z `show interfaces terse` w CLI. Jeśli w danym release dostępne jest porównanie zmian konfiguracji, sprawdź, czy GUI prezentuje ten sam zakres zmiany, który widzisz w CLI przez `show | compare`.
+
+**Nie włączamy J-Web jako obowiązkowej części bazowej konfiguracji DIAMOND-6R.** Ten rozdział dotyczy przede wszystkim zasad CLI; GUI pozostaje wariantem opcjonalnym na wspieranej platformie. Dla konkretnych kliknięć korzystaj z dokumentacji producenta właściwej dla zidentyfikowanego release: [J-Web for SRX and EX](https://www.juniper.net/documentation/product/us/en/j-web/), [Secure Web Access](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/secure-web-access-remote-management.html).
+
+---
+
+## 3.11. Bezpieczny sposób wprowadzania zmian: diff, check, confirmed, test i dopiero zatwierdzenie [EXT]
+
+Do tego momentu znasz już elementy potrzebne do wykonania zmiany. Teraz połączymy je w jeden proces, który może stać się Twoim codziennym nawykiem.
+
+Przedstawmy zmianę trochę ważniejszą niż opis portu. Administrator chce zmodyfikować adresowanie lub filtry w drodze do serwera. Jeśli się pomyli, może stracić połączenie SSH do routera. **Nie wystarczy sprawdzić, że konfiguracja jest poprawna składniowo.** Trzeba zaplanować sposób przywrócenia dostępu, jeśli test po aktywacji zakończy się niepowodzeniem.
+
+### Co oznacza `commit confirmed`?
+
+Zwykły `commit` aktywuje zmianę i pozostawia ją w konfiguracji, chyba że później wykonasz kolejne działania. **`commit confirmed`** aktywuje ją warunkowo: daje określony czas na potwierdzenie, że wszystko działa. Jeśli nie otrzyma potwierdzenia, Junos powinien automatycznie przywrócić poprzednią konfigurację.
+
+Wyobraź sobie, że wykonujesz `commit confirmed 5`. System ma pięć minut na otrzymanie potwierdzenia. To czas na sprawdzenie, czy router pozostał osiągalny i czy usługa działa. Jeśli popełniłeś błąd i straciłeś SSH, mechanizm rollback może pomóc odzyskać poprzednią konfigurację.
+
+Nie należy jednak traktować tego jak gwarancji, że w każdym przypadku wszystko „naprawi się samo”. Dostępność konsoli, stan systemu, sposób zapisu i specyfika platformy nadal mają znaczenie. Nie przeprowadzaj pierwszego takiego testu na routerze produkcyjnym.
+
+### Jedna szczególnie ważna pułapka: `commit check` po `commit confirmed`
+
+Zanim aktywujesz zmianę, `commit check` jest rozsądnym krokiem. Ale **po wykonaniu `commit confirmed` jego rola może być inna**. Zgodnie z dokumentacją Juniper, również `commit check` wykonany podczas oczekiwania może **potwierdzić warunkowy commit**, zatrzymując automatyczny rollback.
+
+Właśnie dlatego kolejność działań ma znaczenie:
+
+1. Przejrzyj `show | compare`.
+2. Uruchom `commit check` **przed** aktywacją.
+3. Wykonaj `commit confirmed 5`.
+4. Sprawdź **działanie**, korzystając z poleceń operacyjnych, konsoli lub niezależnego testu klienta — bez kolejnego `commit check`.
+5. Dopiero po sukcesie zatwierdź nową konfigurację poleceniem `commit`.
+
+Pierwsze dwa kroki sprawdzają poprawność projektu zmian przed aktywacją. Czwarty odpowiada na pytanie, czy system działa poprawnie po aktywacji. Tych dwóch rodzajów weryfikacji nie wolno zastępować jednym testem.
+
+~~~mermaid
+flowchart TD
+  START["Przygotuj zmianę w candidate"] --> DIFF["show | compare"]
+  DIFF --> CHECK["commit check — PRZED aktywacją"]
+  CHECK --> CC["commit confirmed 5"]
+  CC --> TEST{"Czy działa dostęp i usługa?"}
+  TEST -->|Tak| COMMIT["commit — potwierdzenie"]
+  TEST -->|Nie| WAIT["Nie potwierdzaj; rollback po timerze<br/>lub kontrolowany powrót przez konsolę"]
+  COMMIT --> END["Zapisz wynik i dowody"]
+  WAIT --> END
+~~~
+
+*Rysunek 3.3. Bezpieczny model zmiany zdalnej. Podczas oczekiwania po `commit confirmed` nie uruchamiaj kolejnego `commit check`, jeśli chcesz zachować możliwość automatycznego cofnięcia.*
+
+### Jak wygląda to na prostym przykładzie?
+
+Użyjmy bezpiecznego ustawienia — komunikatu wyświetlanego użytkownikowi przy logowaniu. To nie jest zmiana routingu ani polityki bezpieczeństwa, ale pozwoli przećwiczyć mechanizm.
+
+**R1-vSRX — Operational Mode: wejdź do prywatnej konfiguracji**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode [edit private]: przygotowanie i kontrola przed aktywacją**
+
+~~~junos
+set system login message "CH03: Test warunkowego commit"
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Teraz **nie wpisuj niczego, co mogłoby potwierdzić zmianę**. Przejdź do odczytu operacyjnego z osobnej sesji, której nie używasz do edycji.
+
+**R1-vSRX — Operational Mode, osobna sesja: post-check podczas timera**
+
+~~~junos
+show system commit
+show configuration system login message
+show system uptime
+~~~
+
+Jeśli potwierdzisz, że zmiana jest zgodna z planem i nie ma wpływu na działanie labu, możesz ją zachować.
+
+**R1-vSRX — Configuration Mode [edit private]: potwierdzenie dopiero po PASS**
+
+~~~junos
+commit
+~~~
+
+Nie wykonuj tej ostatniej komendy, jeśli celem konkretnego eksperymentu jest obserwacja automatycznego rollback. W takim przypadku pozwól timerowi upłynąć i potwierdź powrót poprzedniej wersji.
+
+### Co, jeśli w mojej wersji Junos wymagany jest komentarz do commitu?
+
+W niektórych nowszych wydaniach Junos zasady commit mogą wymagać komentarza do zmiany. W takim przypadku składnia musi być dostosowana do konkretnego release. Przykładowy opis jest przydatny również ze względów operacyjnych: następny administrator widzi, dlaczego wprowadzono dany stan.
+
+**R1-vSRX — Configuration Mode [edit]: przykład jawnego komentarza przy finalnym zatwierdzeniu**
+
+~~~junos
+commit comment "CH03: validated login message"
+~~~
+
+Nie przedstawiamy jednak jednolitego obowiązku komentarza jako reguły każdego starego vSRX. Przed wykonaniem ćwiczenia sprawdź `show version` i właściwą dokumentację polecenia `commit`.
+
+### Co wpisujemy do worknotes po zmianie?
+
+W profesjonalnym change nie wystarczy informacja „commit complete”. Zapisz, **który router i element konfiguracji zostały zmienione**, co pokazał diff, czy walidacja przeszła, czy management pozostał osiągalny, jakie testy zostały wykonane i czy warunkowy commit został potwierdzony.
+
+Możesz opisać również plan cofnięcia: wykorzystanie `commit confirmed`, wskazanie snapshotu z historii lub punktowy powrót do stanu pierwotnego. Ale nie twierdź, że wykonano rollback, jeśli był tylko przygotowany jako zabezpieczenie.
+
+### `commit` to nie to samo co test aplikacji
+
+Nawet najlepszy workflow konfiguracji nie zastąpi testu działania. Jeśli po zmianie filtra użytkownik nie może otworzyć strony, udany commit niczego nie naprawia. Wtedy należy szukać przyczyny i wracać do stanu bezpiecznego zgodnie z planem. To samo dotyczy zmiany interfejsu w górnym korytarzu DIAMOND-6R — warto sprawdzić nie tylko R1, lecz także R2, R4 i R6, jeżeli zmiana miała wpływ na ich ruch.
+
+**Źródła Juniper:** [Commit the Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html), [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html), [Configure Command Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configure-command.html).
+
+---
+
+## 3.LAB. Laboratorium w trzech poziomach — nie ucz się change management na produkcyjnym routerze [EXT]
+
+Wiedzę o CLI najłatwiej przyswoić przez małe, bezpieczne eksperymenty, w których widać skutek każdej zmiany. Laboratorium podzielimy na trzy poziomy. W pierwszym potrzebujesz tylko jednego vSRX. W drugim sprawdzisz współpracę administratorów i drugie urządzenie. W trzecim wykorzystasz cały DIAMOND-6R, ale bez dokładania nowej adresacji i skomplikowanych protokołów.
+
+**Warunek bezpieczeństwa:** pracujemy na nowym, odizolowanym labie. Nie modyfikujemy istniejących plików `.unl`, połączeń management, globalnych bridge EVE-NG ani produkcyjnych urządzeń. Nie zakładamy, że każdy obraz vSRX obsługuje te same opcje. **RUNTIME VALIDATED** można wpisać dopiero po rzeczywistym wykonaniu testów na znanym release, ze zrzutami wyników.
+
+### Preflight — co sprawdzić jeszcze przed edycją?
+
+Zacznij od R1. Powinieneś mieć niezależny dostęp konsolowy i, jeśli to możliwe, drugą sesję administracyjną. Nie używaj `commit confirmed` w scenariuszu utraty dostępu, dopóki nie sprawdzisz konsoli w praktyce.
+
+**R1-vSRX — Operational Mode: odczyt przed laboratorium**
+
+~~~junos
+show version
+show system users
+show system commit
+show configuration system login message
+show configuration interfaces ge-0/0/0 | display set
+show interfaces terse
+~~~
+
+Zapisz zanonimizowane wyniki: wersję Junos, stan interfejsów i obecny tekst login message. Jeśli wcześniej skonfigurowano inne elementy, które kolidują z naszym ćwiczeniem, nie kasuj ich globalnie. Pracuj na nowej kopii R1 lub dostosuj eksperyment po rozpoznaniu realnego stanu.
+
+### Poziom 1. Jeden vSRX: zobacz różnicę między candidate i active
+
+W pierwszej fazie przygotujemy opis portu i nie zatwierdzimy go. Jeśli wszystko zrobisz poprawnie, `show | compare` pokaże nowy opis, a `show configuration` w Operational Mode nadal pokaże starą konfigurację.
+
+**R1-vSRX — Operational Mode: wejdź do edytora**
+
+~~~junos
+configure
+~~~
+
+**R1-vSRX — Configuration Mode [edit]: tylko wersja robocza**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-LEVEL1"
+show interfaces ge-0/0/0
+show | compare
+~~~
+
+**R1-vSRX — Operational Mode, druga sesja: aktywna konfiguracja**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+~~~
+
+Jeśli to, co widzisz, zgadza się z przewidywaniem, możesz zatwierdzić wyłącznie tę zmianę — pod warunkiem, że candidate nie zawiera cudzego diffu.
+
+**R1-vSRX — Configuration Mode [edit], tylko po przejrzeniu diffu**
+
+~~~junos
+commit check
+commit
+~~~
+
+Teraz porównaj aktywny opis z poprzednim odczytem. Następnie przygotuj jego usunięcie, ale **nie wykonuj commit**. Zamiast tego sprawdź działanie `rollback 0`.
+
+**R1-vSRX — Configuration Mode [edit]: cofnięcie tylko własnej niezacommitowanej próby**
+
+~~~junos
+delete interfaces ge-0/0/0 description
+show | compare
+rollback 0
+show | compare
+~~~
+
+Jeżeli nie ma cudzych zmian, diff powinien zniknąć. Router nadal zachowuje zatwierdzony wcześniej opis `CH03-LEVEL1`. Uczysz się w ten sposób, że `rollback 0` **nie cofa aktywnej zmiany z wcześniejszego commit**; odrzuca aktualną różnicę candidate.
+
+### Poziom 1, dodatkowe ćwiczenie: automatyczny rollback bez ryzyka utraty sieci
+
+W tym samym R1 zmienimy komunikat logowania i **celowo nie potwierdzimy** warunkowego commit.
+
+**R1-vSRX — Configuration Mode [edit], przygotowanie na czystej candidate**
+
+~~~junos
+set system login message "CH03: AUTO-ROLLBACK-TEST"
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+Teraz nie wykonuj `commit` ani `commit check`. Odczytaj bieżącą konfigurację z osobnej sesji i sprawdź historię. Odczekaj, aż warunkowa zmiana powinna zostać automatycznie cofnięta, a potem ponownie sprawdź stan.
+
+**R1-vSRX — Operational Mode, druga sesja: obserwacja przed i po timerze**
+
+~~~junos
+show system commit
+show configuration system login message
+~~~
+
+Dopiero gdy widzisz, że poprzedni komunikat powrócił, możesz odnotować rezultat testu. Jeśli oczekiwane cofnięcie nie nastąpiło, nie nazywaj go PASS — sprawdź, czy przypadkiem ktoś nie potwierdził commitu, czy timer jeszcze trwa albo czy w tej wersji systemu wystąpił problem.
+
+To ćwiczenie jest ważniejsze niż zapamiętanie samej składni `commit confirmed 2`. Uczysz się **różnicy między aktywacją warunkową a trwałym zatwierdzeniem**.
+
