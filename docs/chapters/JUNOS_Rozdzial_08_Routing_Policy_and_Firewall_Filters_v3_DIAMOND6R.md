@@ -843,3 +843,144 @@ show configuration routing-options forwarding-table | display set
 Pamiętaj, że tutaj pytasz o drogę **do źródła 172.16.61.1**, nie o drogę do destination IP konkretnej aplikacji. To odróżnia uRPF od zwykłego routingu i od BGP export policy.
 
 *Dokumentacja: [Understanding Unicast RPF](https://www.juniper.net/documentation/us/en/software/junos/security-services/topics/topic-map/interfaces-configuring-unicast-rpf.html), [rpf-check CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/rpf-check-edit-interfaces.html).*
+
+---
+
+## 8.11. Konfiguracja i troubleshooting — jak udowodnić, że policy zrobiła to, czego oczekiwaliśmy? [A]
+
+W pracy operacyjnej sama znajomość składni nie wystarczy. Najważniejsze jest umieć **umiejscowić decyzję** w odpowiednim etapie i zebrać dowody. W naszym diamencie prefiks \`172.16.60.0/24\` ma dotrzeć od R6 do R5. Jeśli R5 go nie widzi, nie można od razu założyć błędu export na R6. R4 mógł go otrzymać, lecz nie reklamować; R1 mógł odrzucić import; ścieżka R2 lub R3 mogła być ukryta; R5 mógł zainstalować nieodpowiednią trasę z innego źródła.
+
+Przejdźmy więc przez prosty workflow.
+
+### Najpierw ustal, kto naprawdę nie ma prefiksu
+
+Jeśli R5 nie ma 172.16.60.0/24, sprawdzamy od początku ścieżki reklamy:
+
+**R6-vSRX — Operational Mode, początek łańcucha**
+
+~~~junos
+show route 172.16.60.0/24 exact extensive
+show bgp summary
+show route advertising-protocol bgp 198.51.100.1
+show configuration protocols bgp | display set
+~~~
+
+Jeżeli R6 nie ma własnej aktywnej route, nie ma sensu poprawiać R1 import. Jeśli R6 ma trasę, ale nie reklamuje jej R4, analizujemy **R6 export** i dopasowanie \`from protocol direct\` lub \`route-filter\`.
+
+**R4-vSRX — Operational Mode, czy R4 rzeczywiście otrzymał i wybrał drogę od CE-B?**
+
+~~~junos
+show route receive-protocol bgp 198.51.100.10
+show route 172.16.60.0/24 exact extensive
+show route advertising-protocol bgp 10.24.0.1
+show route advertising-protocol bgp 10.34.0.1
+~~~
+
+Jeśli R4 otrzymał route, ale nie reklamuje do R2/R3, trzeba sprawdzić jego **CORE export**. Jeśli wysłał ją do obu, przechodzimy na R1.
+
+**R1-vSRX — Operational Mode, podwójny odbiór i wybór drogi**
+
+~~~junos
+show bgp summary
+show route receive-protocol bgp 10.12.0.2
+show route receive-protocol bgp 10.13.0.2
+show route 172.16.60.0/24 exact extensive
+show route 172.16.61.0/24 exact extensive
+show route hidden
+show route advertising-protocol bgp 192.0.2.10
+~~~
+
+Ostatnia komenda pokazuje perspektywę R5 — czy R1 dalej reklamuje zaakceptowane prefiksy. Jeśli na R1 jest aktywna \`172.16.60.0/24\`, ale reklama do R5 jest pusta, zajmujemy się eksportem z R1 do CE-A. Jeśli R1 nie ma trasy, zajmujemy się jego importem albo problemem next-hop.
+
+Ważne: **\`show route receive-protocol\` i \`show route advertising-protocol\` nie są tym samym widokiem**. Pierwszy pomaga badać otrzymaną informację, drugi rzeczywisty kierunek reklamy po export policy. Wyniki tych poleceń należy interpretować w kontekście opcji BGP \`keep\`, konkretnego peer’a i wydania systemu.
+
+### \`test policy\` — sprawdź logikę na trasach już obecnych w RIB
+
+Junos udostępnia polecenie \`test policy\`. Jest ono bardzo użyteczne przy sprawdzaniu, czy zbudowana policy dopasowuje prefixy zgodnie z założeniami. Nie jest jednak pełnym symulatorem BGP UPDATE pomiędzy dwoma routerami.
+
+**R1-vSRX — Operational Mode, test na prefiksach obecnych w lokalnej tablicy**
+
+~~~junos
+test policy ALLOW-CE-B 172.16.60.0/24
+test policy ALLOW-CE-B 172.16.61.0/24
+test policy ALLOW-CE-B 172.16.62.0/24
+~~~
+
+Polecenie wykorzystuje trasy obecne w danym kontekście routingu, nie tworzy prefiksu z powietrza. Dodatkowo posiada własne zasady dotyczące domyślnego wyniku i nie odtwarza wszystkich kontekstowych ograniczeń BGP. Jeśli prefix jest odrzucony na imporcie i nie występuje jako odpowiednia trasa testowa, \`test policy\` nie może magicznie wykazać zachowania rzeczywiście odebranego UPDATE.
+
+Dlatego w naszym laboratorium zrobimy dwa rodzaje testów. Najpierw użyjemy \`test policy\` do weryfikacji **logiki dopasowania**. Następnie rzeczywistego \`advertising-protocol\` i \`receive-protocol\` do potwierdzenia działania BGP na poszczególnych łączach.
+
+Istotna rzecz: w teście polityki bez jawnego końcowego \`reject\` można uzyskać pozornie korzystny wynik, ponieważ test posługuje się własnym domyślnym \`accept\`. Właśnie dlatego politykę bezpieczeństwa oceniamy zarówno na dozwolonych, jak i zabronionych prefiksach.
+
+### Jak testować filtr pakietów bez zgadywania?
+
+Dla firewall filter bardziej użyteczne są liczniki i pomiar **różnicy** przed oraz po znanym strumieniu testowym. Jeśli licznik \`BLOCKED-TEST\` wynosi 10 000, nie wiesz, czy wzrósł właśnie od Twojej próby, czy od godzin pracy routera. Zmierz wartość przed testem i po nim.
+
+**R1-vSRX — Operational Mode, przypięcie filtra i liczniki**
+
+~~~junos
+show configuration interfaces ge-0/0/2 | display set
+show configuration firewall family inet filter CE-A-IN
+show firewall filter CE-A-IN
+show interfaces ge-0/0/2 extensive
+~~~
+
+Jeżeli licznik rośnie, ale nie masz pewności, czy dotyczy właściwego pakietu, w odizolowanym labie wykonaj krótką kontrolowaną próbę z jednoznacznym source/destination. Unikaj globalnego czyszczenia liczników i sesji na urządzeniu produkcyjnym tylko po to, aby uzyskać wygodny output.
+
+Na vSRX po dopuszczeniu pakietu przez stateless filter nadal sprawdzamy stateful security.
+
+**R1-vSRX — Operational Mode, przekazywanie przez strefy i nowa sesja**
+
+~~~junos
+show security zones
+show security policies
+show security flow session
+show route 172.16.60.0/24 exact
+~~~
+
+Jeśli \`security flow session\` nie pokazuje spodziewanego flow, sprawdzamy kolejność testowania, źródło pakietu, policy hit count (jeśli obsługiwane), a także to, czy nie obserwujemy jedynie pingu do własnego adresu routera. Na SRX „mam poprawną trasę” i „mogę utworzyć sesję” to odrębne twierdzenia.
+
+### Zmiana produkcyjna: pre-check, przewidywanie, commit, post-check
+
+Załóżmy, że klient prosi o zablokowanie jednego prefiksu od CE-B. Dobrze przygotowana zmiana powinna mieć dokładnie opisany rezultat: **po zmianie 172.16.62.0/24 ma nie być używany przez R1, ale 172.16.60.0/24 i 172.16.61.0/24 mają pozostać dostępne**.
+
+Nie zaczynaj od \`set\`. Najpierw zachowaj pre-check: wersję, istniejący łańcuch BGP import/export, aktywne trasy, sessions i strefy. Następnie zapisz wynik, którego oczekujesz na R1 i R5. Dopiero wtedy wprowadź minimalną zmianę.
+
+**R1-vSRX — Operational Mode, wejście do konfiguracji**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode, po przygotowaniu minimalnej zmiany**
+
+~~~junos
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Po \`commit confirmed\` wykonujemy **operacyjne post-checki**, nie kolejne \`commit check\`. W Junos dodatkowy \`commit check\` podczas oczekującego confirmed commit może potwierdzić zmianę; nie uruchamiaj go mechanicznie. Jeśli możesz odciąć własny SSH, użyj niezależnej konsoli/OOB. Nie polegaj na „rollback przez to samo SSH”, które sam właśnie filtrujesz.
+
+**R1-vSRX — Operational Mode, tylko testy po aktywacji**
+
+~~~junos
+show bgp summary
+show route 172.16.60.0/24 exact extensive
+show route 172.16.61.0/24 exact extensive
+show route 172.16.62.0/24 exact extensive
+show route hidden
+show route advertising-protocol bgp 192.0.2.10
+~~~
+
+Jeśli kryteria są spełnione, potwierdzamy zmianę. Jeśli nie, pozwalamy automatycznemu rollbackowi zadziałać albo cofamy zgodnie z przygotowanym planem.
+
+**R1-vSRX — Configuration Mode, wyłącznie po pozytywnym post-check**
+
+~~~junos
+commit
+~~~
+
+Wynikiem profesjonalnej zmiany jest **dowód pozytywny i negatywny**: dozwolone prefiksy nadal działają, a zabroniony został skutecznie odrzucony. Komentarz „BGP checked, all OK” nie jest równoważnym dowodem.
+
+*Dokumentacja: [Testing Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-testing-routing-policies.html), [test policy CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/test-policy.html), [Junos CLI Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-cli-configuration.html).*
