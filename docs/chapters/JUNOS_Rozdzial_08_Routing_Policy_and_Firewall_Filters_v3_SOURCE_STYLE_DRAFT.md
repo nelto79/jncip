@@ -67,7 +67,7 @@ W Junos OS każdy protokół routingu posiada wbudowaną, niewidoczną w konfigu
 
    * **Zatrzymaj się na sekundę!** Inżynier Cisco patrzy na zdanie „Default Export OSPF = Reject everything” i marszczy brwi: *„Chwileczkę, skoro OSPF domyślnie wszystko odrzuca na eksporcie, to jak do cholery routery OSPF wymieniają się trasami?!”*.
 
-   * Trafne pytanie! Odpowiedź kryje się w różnicy między **natywnym działaniem protokołu (flooding LSA)** a **eksportem z tablicy RIB (redystrybucją)**. Gdy dodajesz interfejs do `protocols ospf area 0 interface ge-0/0/0.0`, demon OSPF sam natywnie rozsyła informacje o tym łączu (LSA Type 1/2/3) między sąsiadami — to **nie jest** eksport z tablicy RIB! Natomiast polityka `export` w OSPF służy **wyłącznie do wstrzykiwania tras obcych (zewnętrznych — Static, Direct spoza OSPF, BGP, RIP)** z tablicy `inet.0` do domeny OSPF jako LSA Type 5 lub Type 7. A domyślnie żaden szanujący się router nie redystrybuuje obcych tras automatycznie!
+   * Trafne pytanie! Odpowiedź kryje się w różnicy między **natywnym działaniem protokołu (flooding LSA)** a **eksportem z tablicy RIB (redystrybucją)**. Gdy dodajesz interfejs do `protocols ospf area 0 interface ge-0/0/0.0`, demon OSPF sam natywnie rozsyła informacje o tym łączu (LSA Type 1/2 wewnątrz area, a Type 3 między obszarami) między sąsiadami — to **nie jest** eksport z tablicy RIB! Natomiast polityka `export` w OSPF służy **wyłącznie do wstrzykiwania tras obcych (zewnętrznych — Static, Direct spoza OSPF, BGP, RIP)** z tablicy `inet.0` do domeny OSPF jako LSA Type 5 lub Type 7. A domyślnie żaden szanujący się router nie redystrybuuje obcych tras automatycznie!
 
 3. **IS-IS (Intermediate System to Intermediate System):**
 
@@ -570,13 +570,14 @@ admin@R1-vSRX> show configuration policy-options prefix-list BGP-PEERS | display
 [Wynik ilustracyjny / simulated output — nie pochodzi z działającego urządzenia]
 ##
 ## apply-path was expanded to:
+##     192.0.2.10/32;
 ##     10.12.0.2/32;
 ##     10.13.0.2/32;
 ##
 apply-path "protocols bgp group <*> neighbor <*>";
 ```
 
-Piękne, prawda? Dodajesz nowego sąsiada BGP, robisz `commit`, a filtr `lo0.0` **automatycznie** otwiera dla niego port TCP 179!
+Po dodaniu R5, R2 lub R3 do konfiguracji BGP lista `apply-path` może zaktualizować prefiksy źródeł. Nadal trzeba sprawdzić poprawność `host-inbound-traffic`, filtrów `lo0.0` i odpowiedniego kierunku TCP 179 — sam `apply-path` nie gwarantuje otwarcia całej ścieżki do RE.
 
 ---
 
@@ -684,31 +685,19 @@ Zanim wejdziemy w zaawansowane zastosowania w OSPF, IS-IS i BGP, zapoznaj się z
 
 W Cisco IOS, jeśli napisałeś 50-liniową `route-map` i chciałeś sprawdzić, co ona właściwie zrobi z prefiksami w tablicy routingu, musiałeś albo czytać ją z kartką w ręku, albo z duszą na ramieniu podpiąć ją do żywego sąsiada BGP i patrzeć, co wybuchnie!
 
-W Junos OS możesz **zasymulować działanie polityki w trybie operacyjnym BEZ podpinania jej do żadnego protokołu**, uruchamiając:
+W Junos można sprawdzić politykę na trasach, które **już istnieją w odpowiedniej tabeli**, nie przypinając jej jeszcze do sąsiada. `test policy` jest użyteczne przy analizie `route-filter`, ale ma dwie ważne granice: nie tworzy nieistniejących tras oraz stosuje **domyślną akcję accept**. Test pozbawiony końcowego `reject` może więc wyglądać na zbyt szeroki, a wynik nie uwzględni w pełni zachowania sesji BGP i jej kontekstu eksportowego.
 
-**Urządzenie: R1-vSRX — Operational Mode**
+**R1-vSRX — Operational Mode, test definicji polityki oraz odczyt rzeczywistej reklamy**
 
-```text
-# Symulacja polityki IMPORT-ISP1 przeciwko trasom pasującym do 198.51.100.0/22 w aktualnym RIB!
-admin@R1-vSRX> test policy IMPORT-ISP1 198.51.100.0/22
+~~~junos
+test policy PREFIX-EXAMPLE 172.16.0.0/16
+show route 172.16.60.0/24 exact extensive
+show route advertising-protocol bgp 192.0.2.10
+~~~
 
-[Wynik ilustracyjny / simulated output — nie pochodzi z działającego urządzenia]
-inet.0: 12 destinations, 14 routes (12 active, 0 holddown, 0 hidden)
-+ = Active Route, - = Last Active, * = Both
+W pierwszym poleceniu nazwa `PREFIX-EXAMPLE` odnosi się do **wcześniej utworzonej polityki demonstracyjnej z sekcji 8.6**; jeśli jej nie ma, trzeba najpierw stworzyć ją w odseparowanym labie. Druga komenda sprawdza istniejącą trasę, a trzecia faktyczną reklamę do R5. Jeżeli `test policy` coś akceptuje, nie znaczy to automatycznie, że R1 wysłał prefiks do sąsiada. Od tego są odpowiednie widoki `advertising-protocol`. Nie zamieszczamy tu zmyślonego outputu i liczników — zebrane wyniki powinny pochodzić z konkretnego vSRX.
 
-198.51.100.0/24    *[BGP/170] 00:05:12, localpref 100
-                      AS path: 65002 65004 I, validation-state: unverified
-                    > to 10.12.0.2 via ge-0/0/0.0
-198.51.101.0/24    *[BGP/170] 00:05:12, localpref 200
-                      AS path: 65003 65004 I, validation-state: unverified
-                    > to 10.13.0.2 via ge-0/0/1.0
 
-Policy IMPORT-ISP1: 2 prefix accepted, 1 prefix rejected
-```
-
-Spójrz na ostatnią linijkę: **`Policy IMPORT-ISP1: 2 prefix accepted, 1 prefix rejected`**! `test policy` bierze istniejące trasy z `inet.0` pasujące do wskazanego zakresu (np. `0.0.0.0/0` sprawdzi całą tablicę!) i pokazuje dokładnie, które zostałyby zaakceptowane (wraz ze zmienionymi atrybutami, jak `localpref 200`!), a ile zostałoby odrzuconych!
-
-> **Warto zapamiętać (Ograniczenie `test policy`):** Komenda `test policy` zawsze testuje politykę przeciwko trasom **już obecnym w aktywnym RIB** (`inet.0`) — nie wymyśla tras z powietrza. Ponadto, jeśli polityka sprawdza specyficzne warunki kontekstowe (jak `from neighbor` albo `to area`), testowanie jej „na sucho” bez tego kontekstu może nie dopasować tych konkretnych warunków. Mimo to przy sprawdzaniu `route-filter`, `prefix-list`, `as-path` i `community` jest absolutnie niezastąpiona!
 
 Podstawowy zestaw komend monitorowania obu silników (zestawiony z odpowiednikami Cisco):
 
@@ -851,170 +840,107 @@ A co, jeśli potrzebujesz zaawansowanej logiki Boole'a — np. chcesz dopasować
 
 * Co więcej, możesz w Junos używać wyrażeń logicznych z operatorami `&&` (AND), `||` (OR) oraz `!` (NOT) — np.: `set protocols bgp group ISP1 import "( ! BLOCK-BOGONS && ALLOW-VALID )"`!
 
-### 8.13.2. Anti-Loop Tagging przy dwupunktowej redystrybucji (OSPF ↔ BGP)
+### 8.13.2. Anti-loop przy redystrybucji pomiędzy OSPF i BGP
 
-To klasyczny scenariusz egzaminacyjny i produkcyjny poziomu CCNP/JNCIP. Masz dwie granice (R1 i R2) między Twoją domeną OSPF a zewnętrznym WAN-em BGP (np. MPLS L3VPN). Jeśli na obu routerach włączysz wzajemną redystrybucję (BGP → OSPF i OSPF → BGP) bez ochrony tagami:
+Na poziomie Professional pojawia się kolejny rodzaj problemu: **dwa punkty redystrybucji między protokołami**. Wyobraź sobie alternatywny wariant DIAMOND-6R, w którym R1–R4 tworzą domenę OSPF, a R1 i R4 są jednocześnie granicami do sąsiadów BGP.
 
-1. R1 odbiera prefiks `172.16.99.0/24` z BGP (pref 170) i redystrybuuje go do OSPF (LSA Type 5, **pref 150**!).
+R4 może odebrać od R6 `172.16.60.0/24` jako BGP i wprowadzić ją do OSPF jako external. R1 widzi wtedy ten prefix jako OSPF external. Jeżeli R1 bez ograniczeń wprowadzi każdą OSPF route z powrotem do BGP, może przekazać informację, która pierwotnie pochodziła z BGP, do niewłaściwej domeny. Jeśli w sieci jest drugi punkt wzajemnej redystrybucji, mogą powstać niepożądane informacje zwrotne, hairpinning i pętle.
 
-2. R2 odbiera ten prefiks zarówno z BGP (pref 170), jak i przez wewnętrzny OSPF od R1 (**pref 150**!).
+Szczególnie ważna jest różnica wartości preferencji Junos: **OSPF External 150** jest domyślnie preferowane względem **BGP 170** dla tego samego prefixu. To może prowadzić do zaskakującego wyboru OSPF, choć operator sądził, że „bezpośrednio odebrana eBGP będzie lepsza”, tak jak bywa w Cisco IOS z AD 20 dla eBGP i 110 dla OSPF.
 
-3. **KATASTROFA!** Ponieważ w Junos OS **OSPF External (150) ma LEPSZĄ preferencję niż BGP (170)**, R2 wybiera ścieżkę przez wewnętrzny OSPF (przez R1) zamiast bezpośredniego łącza BGP! A jeśli R2 następnie wyeksportuje trasy OSPF z powrotem do BGP, powstaje klasyczna pętla redystrybucji i suboptymalny routing (routing hairpinning)!
+Typową strategią ochrony jest **tagging**. Gdy R4 eksportuje trasę BGP do OSPF, dodaje określony route tag. Gdy R1 później przygotowuje OSPF→BGP, odrzuca trasy zawierające ten tag. To nie zwalnia z osobnego filtrowania prefiksów ani dokładnego zaplanowania obu granic.
 
-*(Porównaj z Cisco: w Cisco eBGP ma AD 20, a OSPF 110, więc problem występował w odwrotnym kierunku przy iBGP AD 200 vs OSPF 110 — w Junos OS **każdy** BGP ma preferencję 170, więc przegrywa nawet z OSPF External 150!)*
+**R4-vSRX — Configuration Mode, przykład oznaczania tras BGP w eksporcie do OSPF**
 
-**Rozwiązanie Tier 3 (Tagging + Community):**
+~~~junos
+set policy-options policy-statement BGP-TO-OSPF term CE-B from protocol bgp
+set policy-options policy-statement BGP-TO-OSPF term CE-B from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement BGP-TO-OSPF term CE-B then tag 65106
+set policy-options policy-statement BGP-TO-OSPF term CE-B then accept
+set policy-options policy-statement BGP-TO-OSPF term REST then reject
+~~~
 
-1. Gdy R1 i R2 wstrzykują trasy z BGP do OSPF, naklejają im znacznik OSPF **`tag 65001`** (i opcjonalnie podnoszą im lokalną preferencję OSPF External przy imporcie powyżej 170, np. do `175`, albo używają tagu na eksporcie!).
+**R1-vSRX — Configuration Mode, ochrona eksportu OSPF → BGP przed powrotem oznaczonej trasy**
 
-2. Gdy R1 i R2 eksportują trasy z OSPF do BGP, pierwsza reguła brzmi: `from protocol ospf; from tag 65001; then reject` (nigdy nie wrzucaj z powrotem do BGP tego, co sam wyjąłeś z BGP!).
+~~~junos
+set policy-options policy-statement OSPF-TO-BGP term BLOCK-RETURN from protocol ospf
+set policy-options policy-statement OSPF-TO-BGP term BLOCK-RETURN from tag 65106
+set policy-options policy-statement OSPF-TO-BGP term BLOCK-RETURN then reject
+set policy-options policy-statement OSPF-TO-BGP term ALLOW-LOCAL from protocol ospf
+set policy-options policy-statement OSPF-TO-BGP term ALLOW-LOCAL from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement OSPF-TO-BGP term ALLOW-LOCAL then accept
+set policy-options policy-statement OSPF-TO-BGP term REST then reject
+~~~
 
-3. Analogicznie w drugą stronę: eksportując OSPF do BGP, naklejaj BGP **`community add FROM-OSPF`**, a wstrzykując BGP do OSPF — natychmiast odrzucaj wszystko z `from community FROM-OSPF`!
+Nie podpinamy tych dwóch przykładów do aktywnego labu eBGP rozdziału 8: są ilustracją odrębnego wariantu OSPF/BGP. Zanim ich użyjesz, trzeba sprawdzić, czy R1 rzeczywiście posiada `172.16.50.0/24` jako aktywną OSPF route, czy eksport ma sens dla adresacji klienta i czy nie rozgłaszamy prefiksu własnego AS w nieodpowiednim kierunku.
 
-**Urządzenie: R1-vSRX — Configuration Mode**
 
-```text
-# Definicja community oznaczającej trasy zrodzone w lokalnym OSPF
-set policy-options community COMM-FROM-OSPF members 65001:900
-
-# 1. Eksport BGP -> OSPF (z ochroną przed powrotem tras OSPF i naklejeniem tagu)
-set policy-options policy-statement BGP-TO-OSPF term BLOCK-OWN-OSPF from protocol bgp
-set policy-options policy-statement BGP-TO-OSPF term BLOCK-OWN-OSPF from community COMM-FROM-OSPF
-set policy-options policy-statement BGP-TO-OSPF term BLOCK-OWN-OSPF then reject
-
-set policy-options policy-statement BGP-TO-OSPF term INJECT-BGP from protocol bgp
-set policy-options policy-statement BGP-TO-OSPF term INJECT-BGP then tag 65001
-set policy-options policy-statement BGP-TO-OSPF term INJECT-BGP then accept
-
-# 2. Eksport OSPF -> BGP (z ochroną przed powrotem otagowanych tras BGP!)
-set policy-options policy-statement OSPF-TO-BGP term BLOCK-REINJECTED from protocol ospf
-set policy-options policy-statement OSPF-TO-BGP term BLOCK-REINJECTED from tag 65001
-set policy-options policy-statement OSPF-TO-BGP term BLOCK-REINJECTED then reject
-
-set policy-options policy-statement OSPF-TO-BGP term INJECT-OSPF from protocol ospf
-set policy-options policy-statement OSPF-TO-BGP term INJECT-OSPF then community add COMM-FROM-OSPF
-set policy-options policy-statement OSPF-TO-BGP term INJECT-OSPF then accept
-```
 
 ### 8.13.3. Large BGP Communities (RFC 8092) dla 4-bajtowych numerów AS
 
 Klasyczne Standard BGP Communities mają format `16-bit:16-bit` (np. `65001:100`), więc nie mieszczą nowoczesnych 32-bitowych (4-bajtowych) numerów AS (np. `4200000001`). Na poziomie JNCIP-ENT pamiętaj o natywnym wsparciu **Large Communities** w Junos OS, mających trzy 32-bitowe pola: `large:<Global-Admin>:<Local-Data-1>:<Local-Data-2>` (np. `set policy-options community LC-PREPEND-2 members large:4200000001:100:2`).
 
-### 8.13.4. Troubleshooting Tier 3 — pięć rzeczywistych scenariuszy awarii
+### 8.13.4. Troubleshooting Tier 3 — pięć błędów na tym samym DIAMOND-6R
 
-Przećwiczmy metodykę **SYMPTOM → HIPOTEZA → TEST → WYNIK → ROOT CAUSE → NAPRAWA → WERYFIKACJA** na pięciu najboleśniejszych incydentach związanych z politykami i filtrami.
+W tym miejscu wracamy do zdarzenia z prologu. Nie zmieniamy adresacji ani nie wymyślamy kolejnych operatorów. Dla każdej awarii oddzielamy **objaw → hipotezę → dowód → naprawę**.
 
-#### Scenariusz 1: Wyciek tras BGP (Route Leak) mimo skonfigurowanej polityki eksportu
+**Przypadek 1: R5 otrzymuje więcej prefiksów, niż powinien.** Na R1 omyłkowo wyłączono końcowy term `REJECT-REST` w `export` do R5. R1 może teraz przekazać dodatkowe aktywne trasy BGP, np. 172.16.62.0/24, jeśli nie ogranicza go inna polityka. Zobacz, co R1 reklamuje, nie zakładaj, że wszystko wynika z `show bgp summary`.
 
-* **SYMPTOM:** Skonfigurowałeś politykę `TO-ISP1` z jednym termem `ALLOW-OWN` dla `192.0.2.0/24`, ale operator ISP-1 alarmuje, że rozgłaszasz mu prefiksy od operatora ISP-2!
+**R1-vSRX — Operational Mode, dowód rzeczywistego export do CE-A**
 
-* **HIPOTEZA:** W polityce `TO-ISP1` zabrakło końcowego termu `then reject`, więc trasy od ISP-2 wypadły za politykę prosto do domyślnego eksportu BGP (`accept active BGP routes`).
+~~~junos
+show route advertising-protocol bgp 192.0.2.10
+show configuration protocols bgp | display set
+show configuration policy-options | display set
+~~~
 
-* **TEST:** Sprawdzamy, co dokładnie rozgłaszamy do ISP-1 oraz strukturę polityki.
+Naprawa to świadome odtworzenie whitelisty i końcowego reject w **konkretnej** polityce eksportu, a nie globalne wyłączenie BGP. Test negatywny ma wykazać brak nieuzgodnionych prefiksów; dodatni — że potrzebne Business-B/Services-B nadal docierają do R5.
 
-**Urządzenie: R1-vSRX — Operational Mode**
+**Przypadek 2: R6 reklamuje 172.16.60.0/24, ale R1 preferuje niewłaściwy korytarz.** R4 przesyła tę samą trasę przez R2 i R3, lecz `local-preference` na imporcie R1 nie rozdziela ich zgodnie z planem. Sprawdź dwie aktywne ścieżki BGP i finalny next-hop. LOCAL_PREF ustala wybór między ścieżkami BGP; Junos route preference dotyczy konkurencji z innymi protokołami.
 
-```text
-admin@R1-vSRX> show route advertising-protocol bgp 10.12.0.2
-admin@R1-vSRX> show configuration policy-options policy-statement TO-ISP1
-```
+**R1-vSRX — Operational Mode, kontrola wyboru best path**
 
-* **WYNIK:** `[Wynik ilustracyjny / simulated output]` `show route advertising-protocol bgp 10.12.0.2` pokazuje oprócz `192.0.2.0/24` także dziesiątki prefiksów ze ścieżką `65003 ...`. W konfiguracji `TO-ISP1` brakuje termu odrzucającego na końcu.
+~~~junos
+show route 172.16.60.0/24 exact extensive
+show route forwarding-table destination 172.16.60.1
+show configuration protocols bgp group CORE | display set
+~~~
 
-* **ROOT CAUSE:** Brak jawnego `term REJECT-REST then reject` na końcu polityki eksportu BGP (mylne założenie ciscowskiego `deny any`).
+Jeśli wcześniej zaplanowany upper przez R2 nie wygrywa, porównaj pełne łańcuchy `import` dla 10.12.0.2 i 10.13.0.2. Nie zmieniaj odruchowo metric OSPF, jeśli problemem jest policy BGP.
 
-* **NAPRAWA:** `set policy-options policy-statement TO-ISP1 term REJECT-REST then reject` + `commit`.
+**Przypadek 3: po dodaniu indywidualnego LOCAL_PREF wraca zablokowana 172.16.62.0/24.** Ktoś zastąpił import łańcucha z whitelistą tylko polityką preferencji pod `neighbor 10.12.0.2`. W Junos ustawienie na poziomie sąsiada **nadpisuje**, zamiast doklejać, odpowiednią politykę grupową. Naprawą jest odtworzenie kompletnego łańcucha, np. wspólnego `FILTER-CE-B` przed `PREFER-UPPER`. Sam `keep all` nie jest ochroną przed przyjęciem prefiksu.
 
-* **WERYFIKACJA:** `show route advertising-protocol bgp 10.12.0.2` pokazuje teraz wyłącznie jeden prefiks `192.0.2.0/24`.
+**R1-vSRX — Operational Mode, porównanie reguł sąsiada i RIB**
 
-#### Scenariusz 2: Prefiks nie rozgłasza się w BGP, choć istnieje w tablicy routingu
+~~~junos
+show configuration protocols bgp group CORE | display set
+show route 172.16.62.0/24 exact extensive
+show route hidden 172.16.62.0/24
+~~~
 
-* **SYMPTOM:** Router R1 odbiera `10.50.0.0/24` od sąsiada BGP R2, ale nie przekazuje go do sąsiada R3.
+**Przypadek 4: licznik `COUNT-TCP` rośnie, ale Telnet nie jest blokowany.** Na R1 stateless filter najpierw liczy cały TCP (`then count`), a niżej ma `BLOCK-TELNET then discard`. Pierwszy pasujący term bez jawnego `next term` może wykonać implicit `accept` i drugi nie dostanie szansy. Sprawdź kolejność oraz wspierane akcje danego filtra, potem dodaj bezpieczne przejście do dalszej oceny, jeśli wspiera je konkretna platforma.
 
-* **HIPOTEZA:** Trasa BGP dla `10.50.0.0/24` jest **nieaktywna** w `inet.0`, bo przegrywa z trasą OSPF lub Static (niższa preferencja w Junos!), a eksport BGP domyślnie widzi tylko trasy aktywne.
+**R1-vSRX — Operational Mode, filtr i liczniki**
 
-* **TEST:** Sprawdzamy pełny stan prefiksu `10.50.0.0/24` w tablicy `inet.0`.
+~~~junos
+show configuration firewall family inet filter CE-A-IN
+show firewall filter CE-A-IN
+~~~
 
-**Urządzenie: R1-vSRX — Operational Mode**
+**Przypadek 5: po aktywowaniu ochrony `lo0.0` zerwały się sąsiedztwa R1 z R5, R2 lub R3.** Na wejściowym filtrze RE zabrakło dopuszczenia TCP/179 albo odpowiedzi protokołowych potrzebnych control plane. `apply-path` może odczytać sąsiadów z konfiguracji, ale lista nie zastępuje analizy portów, stref i niezbędnych usług OOB. Przez niezależną konsolę sprawdź log, `BGP summary` i pozostały czas `commit confirmed`; w razie braku pewności pozwól zaplanowanemu rollbackowi zadziałać.
 
-```text
-admin@R1-vSRX> show route 10.50.0.0/24
-```
+**R1-vSRX — Operational Mode, kontrola ochrony RE**
 
-* **WYNIK:** `[Wynik ilustracyjny / simulated output]` Widzimy dwie trasy: `*[OSPF/10]` (aktywna z gwiazdką!) oraz `[BGP/170]` (bez gwiazdki — nieaktywna).
+~~~junos
+show bgp summary
+show firewall log
+show firewall filter PROTECT-RE
+show system commit
+~~~
 
-* **ROOT CAUSE:** Eksport BGP ignoruje nieaktywne trasy BGP.
+Każdy z pięciu przypadków ma inną przyczynę, mimo że użytkownik końcowy zgłosiłby to samo: „nie działa sieć”. O wyniku decyduje odczyt **właściwego miejsca procesu**, nie liczba komend wykonanych na ślepo.
 
-* **NAPRAWA:** Dopisanie `set protocols bgp group TO-R3 advertise-inactive` (jeśli chcemy wysłać atrybuty BGP) lub jawny eksport `from protocol ospf` dla tego prefiksu.
 
-* **WERYFIKACJA:** `show route advertising-protocol bgp 10.13.0.2` natychmiast pokazuje `10.50.0.0/24`.
-
-#### Scenariusz 3: Polityka grupowa BGP przestała działać dla jednego sąsiada
-
-* **SYMPTOM:** Dla sąsiada `10.13.0.2` przestał działać filtr bogonów skonfigurowany na grupie `EXTERNAL-ISP`, choć dla sąsiada `10.12.0.2` w tej samej grupie działa idealnie.
-
-* **HIPOTEZA:** Ktoś dodał indywidualną politykę `import` lub `export` bezpośrednio pod `neighbor 10.13.0.2`, co całkowicie **nadpisało** (zamiast rozszerzyć) polityki z poziomu grupy!
-
-* **TEST:** Przeglądamy konfigurację całej grupy BGP.
-
-**Urządzenie: R1-vSRX — Operational Mode**
-
-```text
-admin@R1-vSRX> show configuration protocols bgp group EXTERNAL-ISP
-```
-
-* **WYNIK:** `[Wynik ilustracyjny / simulated output]` Grupa ma `import BLOCK-BOGONS`, ale pod `neighbor 10.13.0.2` widnieje `import SET-LP-200`.
-
-* **ROOT CAUSE:** Reguła hierarchii Junos: polityka na poziomie sąsiada całkowicie zastępuje politykę na poziomie grupy.
-
-* **NAPRAWA:** Zastąpienie polityki pod sąsiadem pełnym łańcuchem: `set protocols bgp group EXTERNAL-ISP neighbor 10.13.0.2 import [ BLOCK-BOGONS SET-LP-200 ]` + `commit`.
-
-* **WERYFIKACJA:** `show bgp neighbor 10.13.0.2 | match "Import|Export"` potwierdza oba wpisy w łańcuchu.
-
-#### Scenariusz 4: Firewall filter liczy pakiety Telnet, ale ich NIE blokuje!
-
-* **SYMPTOM:** Dodałeś na początku filtra `LAN-IN` term `COUNT-TCP` (`from protocol tcp; then count TCP-TOTAL`), a pod nim term `BLOCK-TELNET` (`from destination-port telnet; then discard`). Licznik `TCP-TOTAL` rośnie, a użytkownicy nadal mogą łączyć się przez Telnet!
-
-* **HIPOTEZA:** W termie `COUNT-TCP` zabrakło `then next term`, więc bezstanowy filtr firewalla dokleił niejawny **`accept`** i przerwał ocenę przed `BLOCK-TELNET`.
-
-* **TEST:** Sprawdzamy strukturę filtra oraz liczniki obu termów.
-
-**Urządzenie: R1-vSRX — Operational Mode**
-
-```text
-admin@R1-vSRX> show configuration firewall family inet filter LAN-IN
-admin@R1-vSRX> show firewall filter LAN-IN
-```
-
-* **WYNIK:** `[Wynik ilustracyjny / simulated output]` Term `COUNT-TCP` ma tylko `then count TCP-TOTAL` (brak `next term`), a licznik w `BLOCK-TELNET` stoi na `0`.
-
-* **ROOT CAUSE:** W bezstanowych Firewall Filters akcja nieterminująca bez `next term` automatycznie kończy filtr akcją `accept`.
-
-* **NAPRAWA:** `set firewall family inet filter LAN-IN term COUNT-TCP then next term` + `commit`.
-
-* **WERYFIKACJA:** Próba połączenia Telnet kończy się timeoutem, a licznik `BLOCK-TELNET` zaczyna rosnąć.
-
-#### Scenariusz 5: Po włączeniu filtra na `lo0.0` padły sesje BGP i OSPF
-
-* **SYMPTOM:** Podpiąłeś świeży filtr `PROTECT-RE` na `lo0.0` (na szczęście użyłeś `commit confirmed 5`!). SSH do routera działa, ale w `show bgp summary` sąsiedzi przechodzą w stan `Active`/`Connect`, a OSPF traci sąsiedztwa po Dead Timerze.
-
-* **HIPOTEZA:** Filtr `PROTECT-RE` nie ma jawnych reguł zezwalających dla sesji BGP (TCP 179 od sąsiadów) i/lub pakietów OSPF (proto 89) — wszystko wpada w końcowy `discard`.
-
-* **TEST:** Natychmiast sprawdzamy bufor logowania filtra firewalla w PFE!
-
-**Urządzenie: R1-vSRX — Operational Mode**
-
-```text
-admin@R1-vSRX> show firewall log
-```
-
-* **WYNIK:** `[Wynik ilustracyjny / simulated output]` W logu widać zablokowane pakiety z akcją `D` (Discard): `ge-0/0/0.0 D tcp 10.12.0.2 10.12.0.1` (port 179) oraz `proto 89` (OSPF).
-
-* **ROOT CAUSE:** Zapomniano dopisać `ALLOW-BGP` / `ALLOW-OSPF` przed końcowym `discard` na `lo0.0`.
-
-* **NAPRAWA:** Dopisanie brakujących termów (najlepiej z użyciem `apply-path` dla BGP!) przed upływem timera lub poczekanie na automatyczny rollback, poprawka i ponowny `commit confirmed 5`.
-
-* **WERYFIKACJA:** `show bgp summary` wraca do stanu `Establ`, w `show firewall log` znikają odrzucenia BGP/OSPF, potwierdzamy zmianę komendą `commit`.
 
 ---
 
