@@ -984,3 +984,268 @@ commit
 Wynikiem profesjonalnej zmiany jest **dowód pozytywny i negatywny**: dozwolone prefiksy nadal działają, a zabroniony został skutecznie odrzucony. Komentarz „BGP checked, all OK” nie jest równoważnym dowodem.
 
 *Dokumentacja: [Testing Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-testing-routing-policies.html), [test policy CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/test-policy.html), [Junos CLI Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-cli-configuration.html).*
+
+---
+
+## 8.12. Te same polityki w OSPF, IS-IS i BGP — dlaczego protokół ma znaczenie? [S]
+
+Wszystkie poznane mechanizmy \`policy-options\` stosują podobny język: term, from, then. Ale nie oznacza to, że każdy protokół pozwala w identyczny sposób zmieniać każdy rodzaj trasy.
+
+Żeby to zrozumieć, weźmy **tę samą fizyczną topologię DIAMOND-6R** i wyobraźmy sobie trzy warianty konfiguracji control plane. W pierwszym rdzeń R1–R4 działa na OSPF, w drugim na IS-IS, a w trzecim — tak jak w podstawowym laboratorium rozdziału — wszystkie sześć połączeń jest eBGP.
+
+Nie uruchamiamy tych wariantów **jednocześnie** bez wyraźnego planu redystrybucji. Chodzi o pokazanie, jak zmieni się znaczenie \`import\` i \`export\` dla poszczególnych protokołów.
+
+### 8.12.1. OSPF: własne LSA są rozpowszechniane niezależnie od export policy
+
+Załóżmy, że R1, R2, R3 i R4 tworzą wspólny OSPF Area 0. R1 ma interfejs \`ge-0/0/0.0\` do R2 w sieci 10.12.0.0/30. Kiedy włączysz OSPF na tym interfejsie, R1 i R2 wymienią informacje link-state i poznają swoją topologię.
+
+**R1-vSRX — Configuration Mode, oddzielny wariant OSPF rdzenia**
+
+~~~junos
+set protocols ospf area 0.0.0.0 interface ge-0/0/0.0
+set protocols ospf area 0.0.0.0 interface ge-0/0/1.0
+~~~
+
+To nie jest kompletna konfiguracja OSPF całego diamantu. R2, R3 i R4 potrzebują odpowiednich interfejsów i wspólnego area, a vSRX wymaga dopuszczenia protokołu OSPF jako host-inbound na danych strefach. W tym wariancie **nie** pozostawiamy równolegle nieprzemyślanego import/export BGP z bazowego labu.
+
+Skąd router dowiaduje się o 10.12.0.0/30? Z mechanizmu OSPF i jego LSA, nie z \`protocols ospf export\` robiącego redystrybucję \`Direct\`.
+
+Teraz inny przypadek: R1 ma **statyczną trasę** do testowej sieci 172.31.10.0/24. Ta trasa nie jest wewnętrznym linkiem OSPF. Jeśli chcemy ją rozpowszechnić jako OSPF external, właśnie wtedy użyjemy export policy.
+
+**R1-vSRX — Configuration Mode, osobny wariant redystrybucji statycznej trasy testowej**
+
+~~~junos
+set routing-options static route 172.31.10.0/24 discard
+set policy-options policy-statement OSPF-EXPORT-TEST term ONLY-TEST from protocol static
+set policy-options policy-statement OSPF-EXPORT-TEST term ONLY-TEST from route-filter 172.31.10.0/24 exact
+set policy-options policy-statement OSPF-EXPORT-TEST term ONLY-TEST then metric 20
+set policy-options policy-statement OSPF-EXPORT-TEST term ONLY-TEST then external type 1
+set policy-options policy-statement OSPF-EXPORT-TEST term ONLY-TEST then tag 65106
+set policy-options policy-statement OSPF-EXPORT-TEST term ONLY-TEST then accept
+set policy-options policy-statement OSPF-EXPORT-TEST term REST then reject
+set protocols ospf export OSPF-EXPORT-TEST
+~~~
+
+Dlaczego pokazujemy \`discard\`? Tylko dlatego, że jest to bezpieczny **sztuczny prefix do oceny redystrybucji**, a nie działająca aplikacja. Router posiada aktywny route do tego prefiksu, ale pakiety do nieobjętych inną trasą adresów będą odrzucane. Nie wykorzystuj tego wzorca jako gotowego sposobu „publikowania usługi” w produkcji.
+
+Po wdrożeniu takiej policy router OSPF może utworzyć external LSA reprezentujący prefix. To odrębny proces od natywnego rozgłaszania interfejsów OSPF.
+
+**R1-vSRX — Operational Mode, rozdzielenie trasy lokalnej i external LSA**
+
+~~~junos
+show route 172.31.10.0/24 exact
+show ospf neighbor
+show ospf database external
+show configuration protocols ospf | display set
+~~~
+
+Na drugim routerze OSPF sprawdzamy, czy external LSA dotarł i czy route została rzeczywiście zainstalowana. Nie wystarczy zobaczyć tylko \`show ospf neighbor Full\`.
+
+#### Dlaczego import \`reject\` nie usuwa wewnętrznego OSPF?
+
+Teraz załóżmy, że R3 nie chce używać wewnętrznej trasy OSPF do 10.12.0.0/30. Administrator pisze \`protocols ospf import\` z termem \`then reject\` i oczekuje, że route zniknie.
+
+W Junos **nie należy traktować OSPF import jak dowolnego filtra wszystkich LSA**. Zwykłe odrzucenie trasy nonexternal w imporcie OSPF jest ignorowane: link-state wymaga wspólnego obrazu topologii, a lokalna polityka nie powinna dowolnie usuwać z niego elementów. OSPF import ma zastosowania, przede wszystkim związane z **external routes** i określonymi atrybutami, lecz nie jest mechanizmem usuwania natywnych wewnętrznych prefiksów z LSDB.
+
+Co zatem robić, jeśli nie chcemy, by pewien prefix był widoczny w całym enterprise? Zastanowić się nad projektem obszarów, sumaryzacją w odpowiednim punkcie, kontrolą external redistribution lub innym sposobem oddzielenia domen routingu. To są zagadnienia dla rozdziału OSPF, a nie próba wygrania walki z LSDB jedną linią \`reject\`.
+
+**Praktyczne porównanie Cisco → Junos:** Cisco \`redistribute static subnets\` i Junos \`protocols ospf export POLICY\` mogą służyć podobnemu celowi. Ale samo dodanie OSPF-enabled interface nie jest redystrybucją \`Direct\` do external LSA. Jeśli chcesz ogłosić lokalną sieć LAN jako natywny prefix OSPF, zwykle konfigurujesz właściwy interfejs w OSPF (często passive dla sieci bez sąsiadów), a nie sztuczną policy export direct.
+
+*Dokumentacja: [OSPF Routing Policy](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-routing-policy.html), [Protocol Support](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-protocol-support-import-export-policies.html).*
+
+### 8.12.2. IS-IS: zbliżona logika link-state, ale inny model poziomów
+
+Drugi wariant: ten sam R1–R4 działa na **IS-IS**. Nie zmieniamy adresów 10.12, 10.13, 10.24, 10.34. Zmieniamy protokół odpowiedzialny za budowę topologii.
+
+IS-IS również rozsyła własne informacje link-state. Domyślna polityka export nie oznacza, że routery nie wysyłają LSP. Eksport w policy framework służy między innymi do redystrybucji tras innych protokołów oraz — w odpowiedniej architekturze — do kontrolowanego **route leaking pomiędzy poziomami**.
+
+Czym różni się to od OSPF? IS-IS posiada **Level 1** i **Level 2**. Router L1 jest zwykle zainteresowany informacjami lokalnego obszaru, a routery L2 odpowiadają za szerszy ruch pomiędzy obszarami. Gdy istnieje więcej niż jedno wyjście z obszaru L1, czasami warto wprowadzić wybrane bardziej szczegółowe prefiksy L2 do L1, aby ruch wybrał optymalną drogę zamiast tylko najbliższego routera L1/L2.
+
+W Junos można projektować do tego polityki eksportu IS-IS. Warunki \`from protocol isis\`, \`from level 2\` i \`to level 1\` pomagają sprecyzować, które wpisy są źródłem oraz dokąd powinny trafić. To znacznie bardziej określone zastosowanie niż ogólne \`then accept\` dla całej tabeli.
+
+W tym wariancie nie przygotowujemy gotowego „copy/paste” IS-IS do sześciu vSRX, ponieważ potrzebowałby NET, konfiguracji Levels, ISO family na interfejsach i odrębnego planu sąsiedztwa. To zakres rozdziału 10. Teraz najważniejsze jest zrozumienie **do jakiego punktu protokołu podpinana jest routing policy**.
+
+**R2-vSRX — Operational Mode, gdy osobny wariant IS-IS został zbudowany**
+
+~~~junos
+show isis adjacency
+show isis database extensive
+show route protocol isis
+show configuration protocols isis | display set
+~~~
+
+A co z \`protocols isis import\`? W nowszych wydaniach Junos taka funkcja istnieje, lecz nie oznacza swobodnego odrzucania wszystkich informacji nonexternal z LSDB. Producent opisuje ograniczenie, że \`reject\` dla niektórych tras nonexternal może zostać zignorowane. Stare materiały mogą dodatkowo opisywać IS-IS import jako niedostępny — dlatego zawsze wiąż temat z **konkretną wersją Junos** i aktualną CLI Reference.
+
+*Dokumentacja: [IS-IS import](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/import-edit-protocols-isis.html), [IS-IS Route Prioritization](https://www.juniper.net/documentation/us/en/software/junos/is-is/topics/example/example-configuring-routing-policy-to-prioritize-isis-routes.html).*
+
+### 8.12.3. BGP: tutaj import i export stają się podstawowym narzędziem sterowania
+
+Wracamy do naszej standardowej topologii **eBGP na sześciu łączach**.
+
+Na R6 najpierw eksportujemy local \`Direct 172.16.60.0/24\` do R4. R4 otrzymuje ją przez BGP, a następnie rozgłasza do R2 i R3. R1 otrzymuje dwa BGP paths, nakłada import policy, wybiera aktywną drogę i może ogłosić tę sieć do R5.
+
+Tutaj polityki mają naturalne zastosowanie na **każdej granicy między AS**:
+
+- R6 kontroluje, co ujawnia R4;
+- R4 kontroluje, co przekazuje przez dwa korytarze;
+- R1 kontroluje, które prefiksy zaakceptuje z R2 i R3;
+- R1 kontroluje, co wolno przekazać do CE-A na R5.
+
+BGP jest szczególnie elastyczny w pracy z prefixami i atrybutami. Jeśli R1 chce preferować 172.16.60.0/24 przez R2, import policy może nadać tej ścieżce LOCAL_PREF 200. Jeśli 172.16.61.0/24 ma iść dolnym korytarzem, inna import policy może dać LOCAL_PREF 200 ścieżce od R3.
+
+**R1-vSRX — Operational Mode, porównanie dróg do dwóch niezależnych usług R6**
+
+~~~junos
+show route 172.16.60.0/24 exact extensive
+show route 172.16.61.0/24 exact extensive
+show bgp neighbor 10.12.0.2
+show bgp neighbor 10.13.0.2
+~~~
+
+W prawidłowo skonfigurowanym labie oba prefiksy mają **po dwie dostępne BGP paths**, ale mogą wybierać przeciwny korytarz. To świadoma polityka sterowania ruchem, a nie konsekwencja „szybszego interfejsu” czy różnicy metryk OSPF.
+
+### Jedno spojrzenie porównawcze
+
+| Pytanie | OSPF | IS-IS | BGP |
+|---|---|---|---|
+| Czy własna informacja link-state jest rozgłaszana bez policy export? | Tak | Tak | Nie dotyczy tego mechanizmu |
+| Czy policy export służy do redystrybucji? | Tak | Tak | Tak |
+| Czy import policy pozwala dowolnie odrzucać wewnętrzne trasy protokołu? | Nie | Nie w zwykłym ujęciu nonexternal | Zwykle duża swoboda, z ograniczeniami BGP |
+| Jak możemy sterować wyborem korytarza? | Topologia, metric, areas | Metric, levels, polityki w odpowiednich miejscach | Import, LOCAL_PREF, AS_PATH i pozostałe atrybuty |
+| Co jest najważniejszą pułapką? | \`export reject\` nie zatrzymuje LSA flooding | Ograniczenia import i route leaking L1/L2 | Domyślny eksport aktywnych tras BGP i ryzyko route leak |
+
+Wszystkie trzy protokoły używają słów \`import\` i \`export\`, ale oceniają trasy **w innych punktach swojego życia**. To ważniejsza wiedza niż zapamiętanie samych komend.
+
+---
+
+## 8.13. Zaawansowane polityki — modularność, wybór ścieżki i zapobieganie pętlom [P]
+
+Na poziomie JNCIP nie wystarczy napisać polityki, która akceptuje jedną sieć i odrzuca pozostałe. W praktyce trzeba połączyć kilka wymagań bez sytuacji, w której nowa reguła niszczy starą.
+
+W naszym diamencie mamy już czytelny zestaw potrzeb:
+
+- \`172.16.60.0/24\` od R6 ma być preferowane **górą**, R6 → R4 → R2 → R1;
+- \`172.16.61.0/24\` ma być preferowane **dołem**, R6 → R4 → R3 → R1;
+- \`172.16.62.0/24\` nie może zostać zaakceptowane jako poprawna droga do R5;
+- do R2 i R3 R1 ma reklamować tylko prefiksy od **własnego CE-A R5**, nie może przypadkiem stać się tranzytem pomiędzy górnym i dolnym korytarzem.
+
+To nie jest problem jednej magicznej komendy. Potrzebujemy podzielić odpowiedzialność między polityki.
+
+### 8.13.1. Modularny łańcuch: wspólne zasady, indywidualne preferencje
+
+Najpierw stwórz politykę wspólną \`FILTER-CE-B\`, która odrzuca testowy prefix /62. Potem użyj dwóch odrębnych polityk preferencji dla R2 i R3.
+
+**R1-vSRX — Configuration Mode, wspólny filtr importu**
+
+~~~junos
+set policy-options policy-statement FILTER-CE-B term DROP-TEST from route-filter 172.16.62.0/24 exact
+set policy-options policy-statement FILTER-CE-B term DROP-TEST then reject
+set policy-options policy-statement FILTER-CE-B term CONTINUE then next policy
+~~~
+
+**R1-vSRX — Configuration Mode, preferencja górnego korytarza dla 172.16.60.0/24**
+
+~~~junos
+set policy-options policy-statement PREFER-UPPER term BUSINESS from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement PREFER-UPPER term BUSINESS then local-preference 200
+set policy-options policy-statement PREFER-UPPER term BUSINESS then accept
+set policy-options policy-statement PREFER-UPPER term SERVICES from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement PREFER-UPPER term SERVICES then local-preference 100
+set policy-options policy-statement PREFER-UPPER term SERVICES then accept
+set policy-options policy-statement PREFER-UPPER term REST then reject
+~~~
+
+**R1-vSRX — Configuration Mode, preferencja dolnego korytarza dla 172.16.61.0/24**
+
+~~~junos
+set policy-options policy-statement PREFER-LOWER term BUSINESS from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement PREFER-LOWER term BUSINESS then local-preference 100
+set policy-options policy-statement PREFER-LOWER term BUSINESS then accept
+set policy-options policy-statement PREFER-LOWER term SERVICES from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement PREFER-LOWER term SERVICES then local-preference 200
+set policy-options policy-statement PREFER-LOWER term SERVICES then accept
+set policy-options policy-statement PREFER-LOWER term REST then reject
+~~~
+
+**R1-vSRX — Configuration Mode, dwa kompletne łańcuchy importu pod dwoma sąsiadami**
+
+~~~junos
+set protocols bgp group CORE neighbor 10.12.0.2 import [ FILTER-CE-B PREFER-UPPER ]
+set protocols bgp group CORE neighbor 10.13.0.2 import [ FILTER-CE-B PREFER-LOWER ]
+~~~
+
+Teraz dopiero zobaczysz, po co całe to rozdzielenie. \`FILTER-CE-B\` jest wspólne dla obu peerów i zawsze wykonuje się jako pierwsze. \`PREFER-UPPER\` i \`PREFER-LOWER\` sterują natomiast różnymi atrybutami dla dwóch różnych korytarzy. Każda ma własny końcowy reject, więc nie dopuszczamy innych przypadkowych prefiksów tylko dlatego, że ominęły pierwszy term.
+
+### 8.13.2. LOCAL_PREF wpływa na wyjście z R1 — nie steruje samodzielnie całym Internetem
+
+Warto zrozumieć, że **LOCAL_PREF** dotyczy własnego wyboru BGP. Wyższy jest zwykle preferowany przez BGP; nasza policy nadaje 200 dla wybranej ścieżki, a 100 dla alternatywnej.
+
+Nie należy mylić tego z Junos **route preference**. Lokalna route preference mówi, który *protokół* wygrywa w RIB dla tego samego prefixu. LOCAL_PREF rozróżnia *BGP paths*, zanim najlepsza droga BGP zostanie porównana z innymi protokołami.
+
+Jeżeli R1 ma aktywną OSPF/10 do 172.16.60.0/24, może ona wygrać w Junos RIB, nawet gdy ścieżka BGP ma LOCAL_PREF 200. To nie znaczy, że BGP źle policzył swoje atrybuty. Oznacza, że finalna selekcja w RIB jest innym etapem.
+
+### 8.13.3. AS_PATH prepend, MED i communities — kogo możemy przekonać, a kogo nie?
+
+Na R4 mamy dwie sesje eBGP do rdzenia: R2 i R3. Gdyby R4 chciał *zasugerować*, aby R1 preferował określoną trasę przez R2, może zastosować różne atrybuty eksportu, np. dodać AS_PATH prepend tylko na połączeniu do R3. Ale to zadziała tylko wtedy, gdy R1 oraz inne routery nie mają silniejszej polityki — np. właśnie skonfigurowanego LOCAL_PREF.
+
+**R4-vSRX — Configuration Mode, koncepcyjny wariant AS_PATH prepend dla R3**
+
+~~~junos
+set policy-options policy-statement TO-LOWER term CE-B from protocol bgp
+set policy-options policy-statement TO-LOWER term CE-B from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement TO-LOWER term CE-B then as-path-prepend "65004 65004"
+set policy-options policy-statement TO-LOWER term CE-B then accept
+set policy-options policy-statement TO-LOWER term REST then reject
+~~~
+
+**Uwaga projektowa:** nie podpinaj tej polityki jako całego eksportu R4 do R3 w podstawowym labie, bo ograniczyłaby pozostałe prefiksy, w tym 172.16.61.0/24. To osobny eksperyment pokazujący działanie atrybutu; do produkcji należałoby zbudować pełny, bezpieczny łańcuch obejmujący wszystkie uzgodnione prefiksy.
+
+\`as-path-prepend\` może sprawić, że ścieżka wygląda na dłuższą dla obcych AS. Nie daje gwarancji wyboru R2, jeśli odbiorca preferuje inną drogę za pomocą LOCAL_PREF.
+
+\`metric\` w polityce BGP może oznaczać atrybut MED. W klasycznym przypadku jest on porównywany według zasad BGP, często istotny pomiędzy trasami od tego samego sąsiedniego AS; jego porównywanie i wpływ na wybór drogi zależy od konfiguracji. MED nie jest uniwersalnym przyciskiem „ta droga ma pierwszeństwo”.
+
+BGP communities pozwalają uzgodnić z operatorem reguły sterowania: np. operator może odczytać community i odpowiednio ustawić własne LOCAL_PREF. Ale to **operator** musi naprawdę realizować taką politykę. Bez umowy o znaczeniu community są po prostu dodatkowymi metadanymi.
+
+### 8.13.4. Anti-loop przy redystrybucji pomiędzy OSPF i BGP
+
+Na poziomie Professional pojawia się kolejny rodzaj problemu: **dwa punkty redystrybucji między protokołami**. Wyobraź sobie alternatywny wariant DIAMOND-6R, w którym R1–R4 tworzą domenę OSPF, a R1 i R4 są jednocześnie granicami do sąsiadów BGP.
+
+R4 może odebrać od R6 \`172.16.60.0/24\` jako BGP i wprowadzić ją do OSPF jako external. R1 widzi wtedy ten prefix jako OSPF external. Jeżeli R1 bez ograniczeń wprowadzi każdą OSPF route z powrotem do BGP, może przekazać informację, która pierwotnie pochodziła z BGP, do niewłaściwej domeny. Jeśli w sieci jest drugi punkt wzajemnej redystrybucji, mogą powstać niepożądane informacje zwrotne, hairpinning i pętle.
+
+Szczególnie ważna jest różnica wartości preferencji Junos: **OSPF External 150** jest domyślnie preferowane względem **BGP 170** dla tego samego prefixu. To może prowadzić do zaskakującego wyboru OSPF, choć operator sądził, że „bezpośrednio odebrana eBGP będzie lepsza”, tak jak bywa w Cisco IOS z AD 20 dla eBGP i 110 dla OSPF.
+
+Typową strategią ochrony jest **tagging**. Gdy R4 eksportuje trasę BGP do OSPF, dodaje określony route tag. Gdy R1 później przygotowuje OSPF→BGP, odrzuca trasy zawierające ten tag. To nie zwalnia z osobnego filtrowania prefiksów ani dokładnego zaplanowania obu granic.
+
+**R4-vSRX — Configuration Mode, przykład oznaczania tras BGP w eksporcie do OSPF**
+
+~~~junos
+set policy-options policy-statement BGP-TO-OSPF term CE-B from protocol bgp
+set policy-options policy-statement BGP-TO-OSPF term CE-B from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement BGP-TO-OSPF term CE-B then tag 65106
+set policy-options policy-statement BGP-TO-OSPF term CE-B then accept
+set policy-options policy-statement BGP-TO-OSPF term REST then reject
+~~~
+
+**R1-vSRX — Configuration Mode, ochrona eksportu OSPF → BGP przed powrotem oznaczonej trasy**
+
+~~~junos
+set policy-options policy-statement OSPF-TO-BGP term BLOCK-RETURN from protocol ospf
+set policy-options policy-statement OSPF-TO-BGP term BLOCK-RETURN from tag 65106
+set policy-options policy-statement OSPF-TO-BGP term BLOCK-RETURN then reject
+set policy-options policy-statement OSPF-TO-BGP term ALLOW-LOCAL from protocol ospf
+set policy-options policy-statement OSPF-TO-BGP term ALLOW-LOCAL from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement OSPF-TO-BGP term ALLOW-LOCAL then accept
+set policy-options policy-statement OSPF-TO-BGP term REST then reject
+~~~
+
+Nie podpinamy tych dwóch przykładów do aktywnego labu eBGP rozdziału 8: są ilustracją odrębnego wariantu OSPF/BGP. Zanim ich użyjesz, trzeba sprawdzić, czy R1 rzeczywiście posiada \`172.16.50.0/24\` jako aktywną OSPF route, czy eksport ma sens dla adresacji klienta i czy nie rozgłaszamy prefiksu własnego AS w nieodpowiednim kierunku.
+
+### 8.13.5. Policy subroutines i policy expressions
+
+Gdy polityki stają się bardziej rozbudowane, czasami musimy użyć jednej polityki jako **warunku** w innej. Junos obsługuje subroutines oraz policy expressions, które pozwalają budować bardziej zaawansowane warunki logiczne.
+
+Nie są one jednak zamiennikiem dobrze zaprojektowanego łańcucha \`[ FILTER TAG ALLOW ]\`. Wywołując policy jako subroutine, trzeba rozumieć, jaki wynik logiczny zwraca \`accept\` lub \`reject\`, jak interpretowane są nieterminujące akcje i czy modyfikacje atrybutów wpływają na dalszą ocenę. To dużo łatwiej przetestować na małej, izolowanej tabeli niż wdrażać od razu przy wielu peerach.
+
+W praktyce na R1 najprostszy i najbardziej czytelny model dla naszych trzech prefiksów to nadal **jawna whitelist + lokalne preferencje + końcowy reject**. Nie stosujemy wielopoziomowej logiki tylko dlatego, że Junos ją umożliwia.
+
+*Dokumentacja: [Policy Chain Evaluation](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-chain-evaluation-method.html), [Policy Expressions](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-applying-policy-expressions-to-routes-exported-from-routing-tables.html), [Actions in Routing Policy Terms](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-actions-in-routing-policy-terms.html).*
