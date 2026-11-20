@@ -838,3 +838,277 @@ show system uptime
 
 ---
 
+## 4.11. Configuration archival — dlaczego historia rollback na routerze to jeszcze nie backup? [A]
+
+### Gdyby jutro trzeba było wymienić R1
+
+Wyobraź sobie, że R1 przestaje działać i nie da się już uruchomić jego systemu operacyjnego. Technicy mają w magazynie nowy vSRX lub fizyczny router zastępczy. Ktoś pyta: „Gdzie jest ostatnia zatwierdzona konfiguracja?”.
+
+Z rozdziału III znasz lokalną historię commit oraz \`rollback 1\`. To bardzo wygodne, kiedy sam router działa. Ale jeśli nie można już odczytać jego pamięci, lokalna historia może być niedostępna razem z urządzeniem.
+
+Dlatego administracja Enterprise potrzebuje **niezależnej kopii konfiguracji**, przechowywanej poza routerem. W Junos jedną z opcji jest **configuration archival**, czyli automatyczne przesyłanie zatwierdzonej konfiguracji na zewnętrzny serwer.
+
+### Trzy różne formy zabezpieczenia konfiguracji
+
+Nie mieszajmy trzech mechanizmów.
+
+**Rollback history** pozwala przywrócić wcześniejsze wersje zatwierdzonej konfiguracji na urządzeniu, o ile te wersje są dostępne.
+
+**Rescue configuration**, którą poznamy w 4.13, jest specjalnie zapisaną konfiguracją ratunkową. Administrator decyduje, kiedy jest wystarczająco dobra, aby stać się punktem powrotu.
+
+**Off-device archive** to kopia wysłana poza urządzenie, np. na odpowiednio zabezpieczony serwer. Ten mechanizm pomaga, kiedy lokalna pamięć urządzenia lub sam router zostaną utracone.
+
+Dobry projekt często wykorzystuje wszystkie trzy, ponieważ rozwiązują różne problemy.
+
+### Co oznacza archiwizacja po każdym commit?
+
+W Junos można zaplanować przesyłanie konfiguracji do archiwum, np. przy każdej zatwierdzonej zmianie. To nazywa się **\`transfer-on-commit\`**.
+
+**R1-vSRX — Configuration Mode [edit private], włączenie samego mechanizmu archival**
+
+~~~junos
+set system archival configuration transfer-on-commit
+show | compare
+~~~
+
+Nie mamy jeszcze podanego docelowego serwera i nie powinniśmy zatwierdzać tej części jako kompletnego rozwiązania backupowego. Konfiguracja archiwum potrzebuje rzeczywistego miejsca docelowego, działającej ścieżki sieciowej oraz autoryzacji do zapisu plików.
+
+### SCP/SFTP i dlaczego nie podajemy hasła serwera
+
+W zależności od modelu i release Junos może przekazywać archiwa przez wybrane protokoły, w tym **SCP** lub **SFTP**. Oba korzystają z SSH, ale sposób transferu i wymagania implementacyjne mogą się różnić. W nowym środowisku unikamy nieszyfrowanego przesyłania konfiguracji, ponieważ jej zawartość może ujawniać ważne informacje o sieci.
+
+Dla przykładu załóżmy, że \`LAB-SERVICES\` ma odpowiednio przygotowany katalog archiwum, konto do przyjmowania backupów i serwer SSH. Wówczas można przygotować **szablon**:
+
+**R1-vSRX — Configuration Mode [edit private], szablon kierunku SCP — NIEKOMPLETNY**
+
+~~~junos
+set system archival configuration archive-sites "scp://junos-backup@203.0.113.30/backup/junos/"
+show | compare
+~~~
+
+W tym przykładzie **nie podajemy ani hasła, ani prywatnego klucza SSH**. Istnienie samego URL nie oznacza, że transfer się uda. Trzeba skonfigurować bezpieczny mechanizm uwierzytelniania, zweryfikować host key/fingerprint odbiornika i upewnić się, że docelowy katalog jest zapisywalny. Dokładny sposób ustawienia kluczy, wymiany danych i obsługi \`mgmt_junos\` zależy od platformy, wydania i polityki organizacji.
+
+Nie próbuj „rozwiązać” problemu przez ustawianie hasła w jawnym URL i zapisanie go na GitHub. Tak samo nie akceptuj automatycznie dowolnego host key bez weryfikacji — oznaczałoby to ryzyko przesłania konfiguracji nieautoryzowanemu serwerowi.
+
+### Czy \`transfer-on-commit\` gwarantuje, że plik dotarł?
+
+Nie. Mechanizm może próbować wysłać konfigurację po commit, ale serwer może być nieosiągalny, konto zablokowane, katalog pełny albo połączenie odrzucone. Samo \`commit complete\` nie jest potwierdzeniem backupu.
+
+Prawidłowy test to:
+
+1. Sprawdzenie konfiguracji archiwizacji i routingu do serwera.
+2. Wykonanie kontrolowanego commit na bezpiecznej zmianie.
+3. Weryfikacja logów transferu na urządzeniu.
+4. **Potwierdzenie istnienia właściwego pliku po stronie serwera.**
+5. W bardziej zaawansowanym teście — bezpieczna próba wczytania jego kopii na izolowanym routerze i porównania zawartości.
+
+Na niektórych platformach z odrębną management instance istnieją dodatkowe ograniczenia narzędzi transferowych. Dlatego projekt archiwizacji musi uwzględniać faktyczną wersję Junos, nie tylko adres serwera.
+
+**R1-vSRX — Operational Mode, odczyt konfiguracji i wiadomości**
+
+~~~junos
+show configuration system archival | display set
+show log messages | match "archive|transfer|scp|sftp"
+show system commit
+~~~
+
+Gdy na serwerze nie ma pliku, nie ogłaszaj PASS mimo prawidłowej konfiguracji na routerze. Sprawdź po kolei: routing, nazwy/klucze, konto, prawa katalogu, dostępny dysk i logi obu stron.
+
+**Dokumentacja:** [Back Up Configurations to an Archive Site](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/cli/topics/task/junos-software-system-management-router-configuration-archiving.html), [archival statement](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/archival-edit-system.html).
+
+---
+
+## 4.12. Logging i tracing — jak znaleźć przyczynę, gdy zwykły syslog nie wystarcza? [A]
+
+### Syslog mówi, że coś się stało. Tracing pomaga dowiedzieć się dlaczego
+
+W sekcji 4.10 nauczyliśmy się odczytywać zdarzenia systemowe. Wyobraź sobie teraz, że w późniejszym laboratorium OSPF sąsiedztwo R1–R2 co kilka minut zmienia stan. W logu widzisz informację o jego zerwaniu, ale nie znasz przyczyny. Czy routery nie uzgadniają parametrów? Czy zanika interfejs? Czy istnieje błąd komunikacji?
+
+W tej sytuacji potrzebujesz bardziej szczegółowych danych. Junos udostępnia **traceoptions** — możliwość rejestrowania wybranych zdarzeń związanych z protokołem lub procesem. Nie jest to jednak synonim „zapisz wszystko, co dzieje się w całym systemie”.
+
+### Trzy pytania, trzy różne rodzaje dowodów
+
+Zwykły \`show log messages\` odpowiada na pytanie o wybrane **zdarzenia systemowe**.
+
+Polecenia \`show\` dotyczące protokołów, np. \`show ospf neighbor\`, pokażą **bieżący stan danego mechanizmu**.
+
+Natomiast \`traceoptions\` mogą pomóc zrozumieć **szczegółowe zdarzenia procesu** w określonym czasie.
+
+Jeśli zaufasz tylko jednemu źródłu, łatwo wyciągniesz błędny wniosek. Na przykład \`show ospf neighbor\` może aktualnie pokazywać pełne sąsiedztwo, mimo że w logu kilka minut wcześniej nastąpiła zmiana stanu.
+
+### Dlaczego tracing może być niebezpieczny?
+
+Szerokie zapisywanie wszystkich informacji przez dłuższy czas może obciążać urządzenie i zapełniać pliki. W środowisku produkcyjnym niewłaściwe traceoptions uruchomione na protokole mającym tysiące sąsiedztw mogłyby nawet pogorszyć sytuację, którą próbujesz diagnozować.
+
+Dlatego tracing powinien mieć **jasny cel, ograniczony zakres, przewidywany rozmiar logów i procedurę wyłączenia**.
+
+W przyszłym labie OSPF można wykorzystać ograniczony tracing błędów. Nie uruchamiamy tutaj OSPF na pełnym DIAMOND-6R tylko po to, żeby mieć co logować.
+
+**R1-vSRX — Configuration Mode [edit private], osobny wariant OSPF LAB, nieaktywowany w bazowym CH04**
+
+~~~junos
+set protocols ospf traceoptions file CH04-OSPF size 1m files 3 no-world-readable
+set protocols ospf traceoptions flag error
+show | compare
+~~~
+
+Jeśli OSPF w ogóle nie jest uruchomiony w tej wersji laboratorium, nie oczekuj użytecznych komunikatów o sąsiedztwie. To przygotowana składnia do ćwiczeń w rozdziale OSPF, po sprawdzeniu jej obsługi na konkretnym release. Nie wykonuj jej przypadkowo na rzeczywistym routerze core.
+
+**R1-vSRX — Operational Mode, gdy tracing rzeczywiście uruchomiono w wariancie OSPF**
+
+~~~junos
+show log CH04-OSPF | last 30
+show configuration protocols ospf traceoptions | display set
+~~~
+
+### Co zrobić po zakończeniu diagnostyki?
+
+Ograniczone traceoptions powinny zostać usunięte albo dezaktywowane zgodnie z planem. Nie zostawiaj ich jako stale włączonego „narzędzia na przyszłość”, jeśli nie mają określonego celu operacyjnego.
+
+**R1-vSRX — Configuration Mode [edit private], cleanup tylko własnego eksperymentu**
+
+~~~junos
+delete protocols ospf traceoptions
+show | compare
+~~~
+
+Przed commit sprawdź, czy \`traceoptions\` nie zostały wcześniej świadomie skonfigurowane przez kogoś innego. W takim przypadku usuń tylko **własne zmiany**, zamiast kasować całą gałąź.
+
+### A co z packet capture?
+
+Nie myl rejestrowania zdarzeń protokołu z przechwytywaniem wszystkich pakietów. \`monitor traffic\` w Junos może pokazywać przede wszystkim ruch widoczny z perspektywy systemu, a nie każdy pakiet przekazywany sprzętowo lub programowo przez PFE.
+
+Na SRX do diagnozy ruchu użytkowników mogą być potrzebne odpowiednie **security flow session**, dedykowane opcje packet capture albo inne narzędzia zależne od platformy. Nie wyciągaj wniosku „pakiet nie dotarł” tylko dlatego, że nie pojawił się w \`monitor traffic\`.
+
+**Dokumentacja:** [OSPF/IS-IS Traceoptions](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-is-is-ospf.html), [monitor traffic](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-traffic.html).
+
+---
+
+## 4.13. Rescue configuration — świadomie zapisany punkt powrotu [A]
+
+### Czy „ostatnia zatwierdzona” znaczy „ostatnia dobra”?
+
+Nie zawsze. Możesz zatwierdzić pięć kolejnych zmian, które składniowo są poprawne, ale stopniowo pogarszają bezpieczeństwo lub routing. Lokalna historia commit zawiera zapisane wersje, lecz sama nie wie, która była najlepszym stanem do przywrócenia.
+
+Dlatego Junos posiada **rescue configuration** — specjalnie zapisywaną przez administratora wersję ratunkową. Powinna pochodzić z momentu, w którym urządzenie działa prawidłowo i istnieje udokumentowana możliwość zarządzania nim.
+
+Nie powstaje automatycznie po każdym commit. Ktoś musi świadomie ją zapisać.
+
+### Jak zapisać rescue po zakończeniu onboardingu?
+
+Najpierw sprawdź, czy działa dostęp administracyjny, konta, podstawowy routing management i właściwe usługi. Dopiero potem zapisz stan jako rescue.
+
+**R1-vSRX — Operational Mode, zapis rescue tylko po zaakceptowaniu poprawnej konfiguracji**
+
+~~~junos
+request system configuration rescue save
+~~~
+
+W ten sposób nie wykonujesz rollback; jedynie przechowujesz zatwierdzoną konfigurację jako przyszły punkt ratunkowy.
+
+**R1-vSRX — Operational Mode, weryfikacja rescue**
+
+~~~junos
+show system configuration rescue
+show system commit
+~~~
+
+Nie wystarczy zapisać rescue raz na zawsze. Po istotnym redesignie sieci stary punkt może być już nieadekwatny. Aktualizację rescue wykonuj świadomie jako element procesu przyjęcia nowego baseline.
+
+### Co się dzieje podczas \`rollback rescue\`?
+
+To bardzo ważny detal z rozdziału III: **\`rollback rescue\` wczytuje konfigurację ratunkową do candidate**, a nie natychmiast zmienia działające urządzenie. Nadal musisz porównać ją z active, ocenić konsekwencje i zatwierdzić zmianę, jeśli rzeczywiście chcesz ją zastosować.
+
+**R1-vSRX — Configuration Mode [edit private], symulacja odczytu rescue bez aktywacji**
+
+~~~junos
+rollback rescue
+show | compare
+~~~
+
+Zanim klikniesz commit, sprawdź, czy rescue zawiera poprawną adresację, konta, klucze i wymagane ustawienia. Rescue utworzona zbyt wcześnie może np. nie mieć jeszcze działającego SSH lub konta lokalnego. Przywrócenie jej bez analizy mogłoby ponownie odciąć dostęp.
+
+### Rescue a \`commit confirmed\`
+
+Te mechanizmy rozwiązują inne problemy. **\`commit confirmed\`** pozwala warunkowo wprowadzić zmianę i automatycznie ją cofnąć, jeśli nie zostanie potwierdzona. **Rescue configuration** jest statycznym, świadomie zapisanym punktem ratunkowym, który administrator może wybrać do przywrócenia.
+
+Nie wykonuj testu rescue w trakcie oczekującego \`commit confirmed\`. Najpierw zakończ lub pozwól wycofać warunkową zmianę, upewnij się co do stanu active i dopiero potem przeprowadź osobny eksperyment.
+
+Jeśli rescue nie istnieje, nie próbuj zgadywać, że \`rollback rescue\` załaduje coś sensownego. Brak punktu ratunkowego to wynik **NOT READY**, który trzeba naprawić przed oddaniem urządzenia do produkcji.
+
+**Dokumentacja:** [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html), [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html).
+
+---
+
+## 4.14. Co oznacza „router gotowy do pracy”? [A]
+
+### To nie jest liczba wykonanych poleceń
+
+Spróbuj spojrzeć na R1 z perspektywy inżyniera, który jutro ma odebrać telefon o awarii. Czy będzie umiał zalogować się na router? Czy zobaczy, kto wcześniej zmienił konfigurację? Czy odczyta poprawną godzinę zdarzenia? Czy monitoring pokaże stan? Czy istnieje backup poza uszkodzonym urządzeniem?
+
+Dopiero kiedy te pytania mają potwierdzone odpowiedzi, można mówić o świadomym **commissioningu**, czyli przygotowaniu urządzenia do użycia i formalnym przekazaniu do utrzymania.
+
+Dobrze zaprojektowana pierwsza konfiguracja łączy kilka niezależnych elementów. Nie zastępują się nawzajem:
+
+- Poprawna **tożsamość urządzenia**: hostname, oznaczenie roli i dokumentacja.
+- **Dostęp administracyjny**: niezależna konsola, działające konto lokalne i test SSH z właściwego źródła.
+- **Autoryzacja**: uprawnienia właściwe dla poszczególnych ról.
+- **Centralne AAA**, jeżeli jest wymagane, oraz zweryfikowany scenariusz jego niedostępności.
+- **Interfejsy i routing management**: działająca droga do usług administracyjnych.
+- **Czas**: rzeczywista synchronizacja NTP, nie tylko poprawny timezone.
+- **Monitoring i logi**: odpowiedzi SNMPv3 oraz odbiór syslog po drugiej stronie.
+- **Backup i recovery**: zdalne archiwum, rescue i kontrolowany plan rollback.
+
+To nie jest lista komend do wpisania w tej kolejności, lecz mapa zależności. Przykładowo nie przetestujesz NTP, jeśli nie ma działającej drogi do serwera. Nie zabezpieczysz SSH przez wyłączenie root, dopóki nie ma alternatywnego konta. Nie udowodnisz archiwizacji bez pliku po stronie odbiornika.
+
+### Dlaczego \`show configuration\` to za mało?
+
+Gdy wykonujesz \`show configuration system ntp\`, dowiadujesz się, jaki serwer został wpisany. Ale nie wiesz jeszcze, czy zegar rzeczywiście jest zsynchronizowany. Podobnie \`show configuration snmp\` nie dowodzi, że NMS potrafi wykonać authPriv GET.
+
+Dla każdej usługi trzeba zatem rozdzielić **konfigurację**, **stan systemu** i **test wykonany z właściwej strony**.
+
+| Obszar | Dowód lokalny na R1 | Dowód końcowy |
+|---|---|---|
+| Tożsamość i management | \`show version\`, \`show interfaces terse\` | Zgodność z dokumentacją i działająca konsola |
+| SSH | \`show configuration system services ssh\` | Nowe połączenie z LAB-ADMIN |
+| Local accounts i role | \`show configuration system login\` | Logowanie \`labadmin\` i ograniczone \`nocview\` |
+| AAA | \`show configuration system authentication-order\` | Udane logowanie, reject i timeout, logi serwera |
+| NTP | \`show ntp associations\`, \`show ntp status\` | Synchronizacja do poprawnego źródła |
+| SNMPv3 | \`show snmp statistics\`, \`show snmp v3\` | Zewnętrzny authPriv GET |
+| Syslog | \`show log messages\` | To samo zdarzenie na kolektorze |
+| Archival | \`show configuration system archival\` | Prawidłowy plik w repozytorium backupów |
+| Rescue | \`show system configuration rescue\` | Punkt ratunkowy nadający się do kontrolowanego odtworzenia |
+
+Jeśli nie masz działającego serwera, którego dotyczy wiersz, odpowiednim wynikiem jest **NOT TESTED**, a nie PASS. To nie odbiera wartości podręcznikowi; daje uczciwy obraz możliwości laboratorium.
+
+### Jeden read-only zestaw na zakończenie
+
+**R1-vSRX — Operational Mode, przegląd gotowości przed handover**
+
+~~~junos
+show version
+show system uptime
+show system alarms
+show interfaces terse
+show route table inet.0
+show configuration system | display set
+show configuration interfaces | display set
+show system users
+show ntp associations
+show ntp status
+show snmp statistics
+show log messages | last 30
+show system commit
+show system configuration rescue
+~~~
+
+Nie uruchamiaj całego zestawu wklejonego bezmyślnie do ticketu. Niektóre wyniki mogą zawierać informacje wrażliwe, a ich zakres może być szeroki. Do dokumentacji przekazuj potrzebne, zanonimizowane potwierdzenia.
+
+### Co wpisać w handover?
+
+Dobry dokument odbiorowy zawiera nazwę i rolę urządzenia, model/release, interfejs management i sposób dostępu, znane zależności od AAA/NTP/NMS/SIEM, wyniki testów, lokalizację backupów, sposób uzyskania konsoli, aktualny status rescue, a także ograniczenia i zadania pozostałe do wykonania.
+
+Warto uwzględnić również informację, czego **nie przetestowano**. Router może zostać przyjęty warunkowo do laboratorium z brakującym serwerem NTP, ale nie powinien zostać ogłoszony kompletnym wdrożeniem Enterprise tylko dlatego, że wszystkie polecenia \`set\` mają poprawną składnię.
+
+---
+
