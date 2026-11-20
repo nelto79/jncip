@@ -23,7 +23,7 @@ Rozdział II (kanoniczny): `docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_O
 1. docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md — obowiązujący, zunifikowany spis treści; zachowaj zakres i numerację.
 2. docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md — pełny rozdział 2 (nie skracaj, nie nadpisuj streszczeniem).
 2a. docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md — pełny rozdział 3, wydanie v3 (2026-11-20), od podstaw dla początkującego. Obejmuje 3.1–3.11, CLI/hierarchię/candidate/commit/load/rollback/J-Web oraz laboratorium 1 vSRX → 2 vSRX → DIAMOND-6R. Wcześniejsze wydanie: docs/archive/JUNOS_Rozdzial_03_pre_beginner_rewrite_2026-11-20.md. Nie zastępuj rozdziału streszczeniem; ucz znaczenia komend, wyników i skutków zmian.
-2b. docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md — pełny rozdział 4 (4.1–4.14 oraz 4.15 LAB), Cisco ↔ Junos, AAA, NTP, SNMPv3, syslog, archival, traceoptions, rescue.
+2b. docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md — pełny rozdział IV v3 (20.11.2026), dla czytelnika z ~1 rokiem doświadczenia, bez założenia znajomości Cisco. Blueprint 4.1–4.14 i 4.15 LAB: initial config, management, local accounts, classes, AAA, interfaces, groups, NTP, SNMPv3, syslog, archival, traceoptions, rescue. Ćwiczenia 1 vSRX → usługi zewnętrzne → DIAMOND-6R. Starsza wersja: docs/archive/JUNOS_Rozdzial_04_pre_beginner_rewrite_2026-11-20.md. NIE zastępuj jej streszczeniem.
 2c. docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md — pełny rozdział 5 (5.1–5.8 oraz 5.9 LAB), workflow diagnostyki i maintenance, interface counters/DOM, show/monitor, ping/source/VRF, upgrade, reboot/halt i root recovery.
 3. **labs/reference-diamond-4vsrx-2vpcs/README.md — baza CH01–CH07: 4 vSRX + 2 VPCS, interfejsy, CIDR i loopbacki /32. Dla CH08 stosuj jawny wariant DIAMOND-6R opisany wyżej.**
 3a. **labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md — diagram Mermaid do osadzania i linkowania w podręczniku (sześć łączy, oba IP/CIDR każdego segmentu, wszystkie loopbacki).** W rozdziałach wykorzystuj ten sam model, a w razie korekty diagramu aktualizuj również jego kopię w referencyjnym README.
@@ -162,6 +162,9 @@ Dla rozdziału 2 odpowiedni rejestr źródeł: \`docs/research/CH02_GOTCHAS_ZROD
 - Dokumentacja: docs/research/CH03_JUNOS_CLI_GOTCHAS_I_ZRODLA_2026-11-16.md. Status labu dokumentuj jawnie jako PLANNED / STATIC VALIDATED / RUNTIME VALIDATED.
 
 ## Specjalne zasady CH04 — bezpieczny onboarding i system services
+
+**CH04 v3:** użyj DIAMOND-6R dla sześciu routerów (R5/R6 zastępują VPCS), ale dla pierwszego onboardingu wystarczy 1×vSRX i niezależna konsola. Opcjonalny management 203.0.113.0/24 z LAB-ADMIN / LAB-SERVICES jest **oddzielnym izolowanym segmentem administracyjnym**, nie nowym łączem routingu danych; weryfikuj mapping OOB NIC i kontekst `mgmt_junos`, nie wpisuj `fxp0` w ciemno. Nie twierdź, że SNMPv3 authPriv działa, jeśli opisano jedynie VACM bez prawdziwego użytkownika USM i sekretów z vault. Serwer NTP/syslog/SCP/AAA musi istnieć i odpowiedzieć. Lab nie ma runtime PASS.
+
 
 - Chapter 4 canonical: `docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md`, punkty 4.1–4.14 oraz 4.15 [LAB], **nie redukuj do listy poleceń**.
 - Dobór factory defaults **per platform i wydanie**; EX4400 `me0`, SRX/vSRX może mieć `fxp0`, a `mgmt_junos` nie jest automatycznie obecny po użyciu portu OOB.
