@@ -521,3 +521,320 @@ show interfaces terse
 
 ---
 
+## 4.7. Configuration groups — jak uniknąć ręcznego przepisywania tych samych ustawień? [A]
+
+W małym laboratorium masz sześć routerów, a w prawdziwej firmie może być ich kilkaset. Wyobraź sobie, że na każdym urządzeniu obowiązuje ta sama firmowa zasada: standardowy komunikat logowania, pewne ustawienia systemowe, konwencja opisów i wybrane parametry monitoringu.
+
+Możesz ręcznie wpisywać identyczne linie na każdym routerze. To zadziała, lecz przy kolejnej zmianie standardu musisz poprawić wszystkie miejsca. W Junos istnieje mechanizm **configuration groups**, który pozwala wielokrotnie wykorzystywać fragmenty konfiguracji i dziedziczyć je w odpowiednich miejscach hierarchii.
+
+### Najpierw wyjaśnijmy samo dziedziczenie
+
+Gdy konfiguracja lokalna używa grupy, Junos może pobrać z niej wartości, które mają obowiązywać w danej części drzewa. Sama grupa to jednak **definicja szablonu**, a nie jego natychmiastowe zastosowanie. Potrzebne jest wskazanie \`apply-groups\`.
+
+Przyjmijmy prosty przykład. Na R1 chcemy zastosować standardowy komunikat logowania.
+
+**R1-vSRX — Configuration Mode [edit private], definicja grupy**
+
+~~~junos
+set groups CH04-BASE system login message "CH04: Lab device"
+show groups CH04-BASE
+~~~
+
+Zwróć uwagę: właśnie utworzyłeś grupę w candidate. Ale dopóki nie została zastosowana, nie musi wpływać na wynikową konfigurację systemu.
+
+**R1-vSRX — Configuration Mode [edit private], zastosowanie grupy**
+
+~~~junos
+set apply-groups CH04-BASE
+show | compare
+show system login | display inheritance
+~~~
+
+\`apply-groups\` na poziomie korzenia wskazuje, że system ma uwzględniać tę grupę w odpowiednich miejscach drzewa konfiguracji. \`display inheritance\` pokazuje wartości uwzględniające dziedziczenie. To ważne: bez tego polecenia inżynier może nie znaleźć ustawienia w miejscu, w którym go oczekiwał.
+
+### Co, gdy lokalnie ustawisz inną wartość?
+
+Załóżmy, że R1 potrzebuje innego komunikatu niż pozostałe urządzenia. Nie musisz od razu usuwać całej grupy. W typowym mechanizmie dziedziczenia **jawnie ustawiona wartość lokalna może mieć pierwszeństwo** nad wartością dziedziczoną.
+
+**R1-vSRX — Configuration Mode [edit private], lokalny wyjątek od grupy**
+
+~~~junos
+set system login message "CH04: R1 local exception"
+show system login | display inheritance
+show | compare
+~~~
+
+Sprawdź, która wartość pojawiła się w konfiguracji wynikowej. Dzięki temu nie uczysz się tylko komend, ale mechanizmu: najpierw przychodzi szablon, potem może go nadpisać ustawienie zdefiniowane bliżej konkretnego urządzenia albo odpowiedniego obiektu.
+
+Przy większej liczbie grup **kolejność \`apply-groups\` ma znaczenie** dla wyboru wartości. Nie próbuj zgadywać, że ostatnia wymieniona zawsze wygrywa w każdej sytuacji — sprawdź dokumentację i faktyczne \`display inheritance\`.
+
+### A jeśli chcę wyłączyć dziedziczenie tylko na jednym porcie?
+
+Junos posiada również **\`apply-groups-except\`**, które pozwala wyłączyć dziedziczenie wskazanej grupy w odpowiednim poddrzewie. To przydatne, kiedy setki interfejsów korzystają ze standardu, a pojedynczy wymaga wyjątku.
+
+Nie będziemy konfigurować fikcyjnych 120 portów na vSRX. Wystarczy zrozumieć, że grupa i jej wyłączenie są częścią **hierarchii**, a nie globalnymi tekstowymi „makrami”, które zawsze działają identycznie na każdym miejscu.
+
+W rozbudowanych konfiguracjach mogą występować także symbole dopasowujące, np. wildcards, pozwalające stosować wspólny fragment do większej liczby obiektów. To temat, przy którym warto szczególnie uważać na zakres dopasowania: zbyt szeroki wzorzec może objąć także interfejsy zarządzające lub porty z inną rolą.
+
+### Czy \`apply-groups\` wysyła konfigurację automatycznie na R2 i R3?
+
+Nie. Grupa w konfiguracji R1 jest lokalnym mechanizmem dziedziczenia na R1. Nie jest centralnym systemem zarządzania sześcioma routerami. Jeżeli chcesz zastosować standard na R2 i R3, musisz go świadomie dostarczyć i zatwierdzić na tych urządzeniach, ewentualnie korzystając z zewnętrznej automatyzacji.
+
+Właśnie dlatego configuration groups pomagają w **powtarzaniu konfiguracji**, ale nie zastępują repozytorium, backupu, orkiestracji ani kontroli zmian.
+
+### Jak bezpiecznie wycofać laboratoryjny eksperyment?
+
+Jeśli grupa i wyjątek nie zostały jeszcze zatwierdzone, a w prywatnej candidate masz wyłącznie własne testy, możesz usunąć ich elementy i porównać stan z active.
+
+**R1-vSRX — Configuration Mode [edit private], wycofanie własnego eksperymentu**
+
+~~~junos
+delete system login message
+delete apply-groups CH04-BASE
+delete groups CH04-BASE
+show | compare
+~~~
+
+Nie zakładaj pustego diffu, jeśli wcześniej istniał już jakiś \`system login message\` — w takim przypadku trzeba przywrócić poprzednią wartość, a nie usuwać ją na ślepo. W tym rozdziale wielokrotnie wracamy do zasady: **baseline ma większą wartość niż mechaniczny cleanup**.
+
+**Dokumentacja:** [Configuration Groups Usage](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html), [apply-groups](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/apply-groups.html).
+
+---
+
+## 4.8. NTP — dlaczego poprawna godzina jest częścią działania sieci? [A]
+
+### Dwie awarie i trzy różne zegary
+
+R1 pokazuje awarię portu o 10:04, R2 o 10:07, a serwer aplikacji zapisuje błąd o 10:03. Czy najpierw padło połączenie, a dopiero potem aplikacja? Jeśli zegary różnią się o kilka minut, nie możesz tego wiarygodnie ustalić.
+
+W środowisku Enterprise logi routerów, switchy, firewalli, AAA i serwerów trafiają często do jednego systemu. Żeby ustalić kolejność zdarzeń, urządzenia potrzebują możliwie wspólnego czasu. Do tego służy **NTP — Network Time Protocol**.
+
+NTP pozwala urządzeniu porównywać swój czas z wybranymi serwerami i stopniowo korygować zegar. Nie jest to tylko „pobranie aktualnej godziny raz na zawsze”. System utrzymuje informację o źródłach czasu i ich jakości; może też uznać serwer za niewiarygodny lub nieosiągalny.
+
+### Stratum, association i synchronized — co oznaczają?
+
+**NTP server** to urządzenie lub usługa udostępniająca czas innym. **Stratum** opisuje pozycję danego źródła w hierarchii NTP, ale niższa liczba nie zawsze oznacza, że ten serwer jest najlepszym wyborem dla konkretnego klienta. Ważne są także stabilność, osiągalność i inne parametry.
+
+**Association** to relacja klienta NTP z danym źródłem. Sama widoczność takiej relacji nie znaczy jeszcze, że system jest zsynchronizowany. Polecenia \`show ntp associations\` i \`show ntp status\` pozwalają rozróżnić serwer wpisany w konfigurację od serwera rzeczywiście używanego i stan synchronizacji urządzenia.
+
+### Konfigurujemy NTP dopiero po przygotowaniu drogi do serwera
+
+W wariancie dodatkowej sieci management załóżmy, że Linux VM \`LAB-SERVICES\` ma IP **203.0.113.30** i rzeczywiście uruchomiony daemon NTP. R1 musi mieć z niego osiągalną odpowiedź na odpowiednie pakiety, zwykle UDP/123.
+
+**R1-vSRX — Configuration Mode [edit private], serwer NTP w opcjonalnym izolowanym OOB**
+
+~~~junos
+set system ntp server 203.0.113.30
+set system time-zone Europe/Warsaw
+show | compare
+~~~
+
+To **szablon zależny od wariantu labu**. Jeśli nie utworzyłeś sieci management i nie uruchomiłeś usługi NTP na Linux, nie konfiguruj nieistniejącego serwera i nie oznaczaj testu jako PASS.
+
+\`time-zone\` odpowiada za prezentację czasu lokalnego. Nie synchronizuje zegara. NTP może prawidłowo utrzymywać czas UTC, a administrator zobaczy go w lokalnej strefie; to dwie różne sprawy.
+
+### Dlaczego \`source-address\` ma znaczenie?
+
+Router może mieć kilka adresów IP. Jeśli wysyła zapytanie do NTP z niewłaściwego source, serwer może nie mieć drogi powrotnej, filtrować zapytania albo traktować router jako nieznanego klienta.
+
+W rozbudowanym środowisku ważna jest także **routing instance** — z której tablicy router szuka drogi do serwera. W NTP istnieją specyficzne zależności od \`mgmt_junos\`, platformy i wydania, więc nie można po prostu skopiować \`source-address\` z cudzej konfiguracji i zakładać, że będzie poprawny.
+
+**R1-vSRX — Operational Mode, pre-check trasy do serwera czasu**
+
+~~~junos
+show interfaces terse
+show route 203.0.113.30
+show configuration system ntp | display set
+~~~
+
+Jeżeli korzystasz z wydzielonego management routing instance, sprawdź także odpowiednią tabelę, a nie tylko \`inet.0\`.
+
+### Jak udowodnić, że NTP działa?
+
+**R1-vSRX — Operational Mode, po rzeczywistym uruchomieniu NTP server**
+
+~~~junos
+show ntp associations
+show ntp status
+show system uptime
+~~~
+
+Po konfiguracji i udanym commit system może potrzebować pewnego czasu, aby wybrać i zsynchronizować źródło. Nie interpretuj braku natychmiastowego \`synchronized\` jako jednoznacznej awarii.
+
+Przy diagnozie przejdź kolejno przez następujący związek przyczynowy: **adres serwera → droga IP → source-address/VRF → dostęp UDP/123 → odpowiedź serwera → rzeczywista synchronizacja**.
+
+Ping do 203.0.113.30 potwierdza tylko pewien rodzaj osiągalności ICMP. Nie testuje NTP. Możesz mieć poprawny ping, ale zablokowany UDP/123 lub brak działającej usługi.
+
+**Dokumentacja:** [NTP Configuration](https://www.juniper.net/documentation/us/en/software/junos/time-mgmt/topics/example/ntp-configuration.html), [NTP source-address and management instance](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/ntp-edit-system.html).
+
+---
+
+## 4.9. SNMP — jak system monitoringu dowiaduje się, co dzieje się na routerze? [A]
+
+### Nie każdy administrator stale patrzy na konsolę
+
+Wyobraź sobie, że R1 działa w biurze oddalonym o kilkaset kilometrów. Zespół sieciowy nie będzie co minutę logował się przez SSH i wykonywał \`show interfaces\`. Potrzebuje systemu, który regularnie sprawdza stan urządzeń, zapisuje pomiary i powiadamia o problemach.
+
+Jednym ze sposobów zbierania takich informacji jest **SNMP — Simple Network Management Protocol**. Router udostępnia pewne dane przez SNMP agent, a system monitoringu — często nazywany **NMS (Network Management System)** — może je odczytywać.
+
+Wśród typowych danych znajdują się informacje o czasie działania, interfejsach i licznikach. Ale odczyt informacji nie jest tym samym co wykrywanie każdego rodzaju awarii. Nie każda niedostępność aplikacji jest widoczna jako awaria interfejsu, a poprawne odpowiedzi SNMP nie dowodzą, że użytkownicy mają działający Internet.
+
+### Polling, trap i inform — trzy sytuacje
+
+Najczęściej monitoring działa jako **polling**: NMS sam pyta router o wybrane informacje, zwykle przez UDP/161. Wyobraź sobie, że co minutę sprawdza, czy port R1 do R2 jest w stanie \`up\`.
+
+**Trap** działa w odwrotnym kierunku: router wysyła do systemu monitoringu powiadomienie o zdarzeniu, np. zmianie stanu interfejsu. W typowej konfiguracji SNMP służy do tego UDP/162. **Inform** jest podobnym rodzajem powiadomienia, ale przewiduje potwierdzenie odbioru przez system docelowy.
+
+Te mechanizmy nie zastępują się nawzajem. Polling może wykryć aktualny stan, a zdarzeniowa notyfikacja pomaga zauważyć zmianę szybciej. Każdy wymaga poprawnej konfiguracji i ścieżki sieciowej.
+
+### Dlaczego w nowej sieci wybieramy SNMPv3?
+
+W starszych środowiskach często spotkasz **SNMPv2c**, w którym dostęp opiera się na community string. Ta wartość nie zapewnia nowoczesnego szyfrowania komunikacji i nie powinna być domyślnym wyborem dla nowego projektu.
+
+**SNMPv3** pozwala używać uwierzytelniania i ochrony poufności danych. Poziom **authPriv** oznacza, że komunikacja używa zarówno uwierzytelniania, jak i szyfrowania. W Junos występują tu dwa istotne mechanizmy:
+
+**USM (User-based Security Model)** odpowiada za bezpieczeństwo komunikatów związane z użytkownikiem SNMP, np. uwierzytelnianie i szyfrowanie. **VACM (View-based Access Control Model)** określa, jaki zakres danych dany użytkownik lub grupa może odczytywać.
+
+To podobne rozróżnienie do konta administracyjnego i jego uprawnień. Nie wystarczy znać hasło; trzeba jeszcze wiedzieć, **które informacje wolno odczytać**.
+
+### Czym jest engine ID?
+
+SNMPv3 korzysta z identyfikatora engine, który wiąże się z bezpieczeństwem i użytkownikami USM. W pewnych konfiguracjach zmiana engine ID po skonfigurowaniu kluczy powoduje problemy z uwierzytelnianiem i może wymagać ponownego skonfigurowania użytkowników/kluczy.
+
+Dlatego w produkcyjnym wdrożeniu najpierw ustala się właściwy, stabilny identyfikator, a dopiero później finalną konfigurację użytkowników USM. Nie zmieniaj go arbitralnie podczas troubleshootingu.
+
+### Projektujemy ograniczony widok do odczytu
+
+Na początku pokażmy część SNMP, która nie wymaga żadnego sekretu: zdefiniowanie widoku danych i powiązanie go z grupą uprawnień. W tym przykładzie nazwa \`CH04-RO\` oznacza *read-only*.
+
+**R1-vSRX — Configuration Mode [edit private], fragment modelu dostępu SNMPv3**
+
+~~~junos
+set snmp view CH04-RO oid .1 include
+set snmp v3 vacm security-to-group security-model usm security-name CH04-NMS group CH04-MON
+set snmp v3 vacm access group CH04-MON default-context-prefix security-model usm security-level privacy read-view CH04-RO
+show | compare
+~~~
+
+W tej chwili **nie masz jeszcze działającego SNMPv3 authPriv**. Powstała tylko część dotycząca widoku i przypisania grupy. Brakuje prawdziwego użytkownika USM i jego bezpiecznie skonfigurowanych parametrów uwierzytelniania oraz szyfrowania.
+
+Wybrany OID \`.1\` pozwala w tej demonstracji zbudować szeroki widok danych SNMP. W produkcji najlepiej ograniczyć widok do informacji niezbędnych dla NMS — nie zakładaj, że „read-only” oznacza brak ryzyka ujawnienia informacji o infrastrukturze.
+
+### Dlaczego nie wklejamy sekretów do dokumentacji?
+
+Do skonfigurowania authPriv potrzebne są m.in. hasła lub klucze uwierzytelniania i prywatności. W dokumentacji producenta znajdziesz składnię z \`authentication-sha\` i \`privacy-aes128\`, ale nie wolno umieszczać prawdziwych danych w GitHub ani w zapisywanej sesji terminala.
+
+Dlatego zamiast udawać kompletną konfigurację wpisem \`<SECRET>\`, traktujemy poniższy opis jako **niedokończony etap wdrożenia**. Administrator musi:
+
+1. Wybrać obsługiwany algorytm dla konkretnego Junos i NMS.
+2. Ustalić engine ID.
+3. Utworzyć użytkownika USM oraz jego parametry bezpieczeństwa z bezpiecznego źródła.
+4. Zweryfikować VACM i ewentualną listę klientów/filtry sieciowe.
+5. Uruchomić rzeczywisty test SNMPv3 GET z serwera monitoringu.
+
+W nowych wydaniach dostępne mogą być mocniejsze algorytmy niż historyczne SHA-1/AES128, ale ich wybór powinien wynikać z **wspólnego wsparcia urządzenia i klienta SNMP**. Nie zakładaj automatycznie, że składnia z dokumentacji innego modelu działa na naszym obrazie vSRX.
+
+### Skąd wiadomo, że SNMPv3 jest skonfigurowany poprawnie?
+
+Samo \`show configuration snmp\` oznacza tylko, że router przechowuje ustawienia. Potrzebny jest rzeczywisty **SNMPv3 authPriv GET**, np. odczyt \`sysUpTime.0\`, wykonany z przygotowanego serwera \`LAB-SERVICES\`. Odpowiedź ma też być dozwolona przez właściwe filtry oraz ścieżkę management.
+
+**R1-vSRX — Operational Mode, podstawowa diagnostyka SNMP**
+
+~~~junos
+show configuration snmp | display set
+show snmp statistics
+show snmp v3
+show log messages | match "snmp|SNMP"
+~~~
+
+\`show snmp statistics\` pomoże zauważyć błędy obsługi, ale do rozstrzygnięcia problemu najlepiej zbierać wyniki po obu stronach. Jeśli router odpowiada na ping, lecz klient SNMP dostaje timeout, zbadaj także UDP/161, source IP, engine ID, użytkownika, algorytmy i VACM.
+
+Pamiętaj, że **trap/inform UDP/162** to inny test niż **polling UDP/161**. Udany GET nie dowodzi jeszcze dostarczania powiadomień.
+
+**Dokumentacja:** [Configure SNMPv3](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html), [Configure SNMP in Junos OS](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmp-in-junos-os.html).
+
+---
+
+## 4.10. Syslog — jak router opowiada historię swojej awarii? [A]
+
+### Bez logów wiesz tylko, co dzieje się teraz
+
+Widzisz, że port R1 do R2 ma stan \`up\`. Ale użytkownicy zgłosili przerwę 15 minut temu. Czy port był wtedy \`down\`? Czy ktoś zmienił konfigurację? Czy urządzenie zostało zrestartowane? Bieżący stan nie daje pełnej odpowiedzi.
+
+**Syslog** to mechanizm zapisywania zdarzeń. Router może przechowywać logi lokalnie, a także wysyłać je do centralnego serwera, aby ich nie stracić przy poważniejszej awarii.
+
+Na początek musimy odróżnić **treść zdarzenia**, **czas** i **miejsce przechowywania**. Jeśli zegar routera jest błędny, kolejność zdarzeń będzie trudna do odtworzenia, nawet gdy sam log zawiera poprawną informację. Dlatego NTP pojawia się w tym rozdziale przed syslog.
+
+### Severity i facility — dwa sposoby opisywania jednej wiadomości
+
+W syslog wiadomość może należeć do określonej kategorii, zwanej **facility**, np. związanej z uwierzytelnianiem lub systemem. Ma też poziom ważności, czyli **severity**.
+
+Nie musisz zapamiętywać wszystkich numerów severity na początku. Wystarczy rozumieć, że \`notice\` i \`info\` nie są tym samym co nagły alarm krytyczny. Konfiguracja powinna zapisywać potrzebne zdarzenia bez zasypywania systemu i terminali.
+
+### Lokalny log
+
+**R1-vSRX — Configuration Mode [edit private], plik lokalny z systemowymi zdarzeniami**
+
+~~~junos
+set system syslog file messages any notice
+set system syslog file messages authorization info
+show | compare
+~~~
+
+Pierwsza linia określa, jakie zdarzenia trafią do lokalnego pliku \`messages\` w odpowiednim zakresie ważności. Druga pozwala uwzględnić informacje o autoryzacji. W rzeczywistej konfiguracji upewnij się, że nie dublujesz niepotrzebnie istniejących reguł ani nie ustawiasz zbyt dużego wolumenu logów.
+
+**R1-vSRX — Operational Mode, odczyt lokalnych zdarzeń**
+
+~~~junos
+show log messages | last 30
+show log messages | match "mgd|sshd|UI_COMMIT"
+~~~
+
+Jeśli po commit pojawi się nowa wiadomość, to dobry początek analizy. Nie znaczy to jeszcze, że centralny serwer logowania też ją odebrał.
+
+### Zdalny syslog: drugi koniec musi działać
+
+Załóżmy, że \`LAB-SERVICES\` rzeczywiście odbiera syslog pod adresem **203.0.113.30** w izolowanej sieci management. Wtedy R1 może wysyłać do niego odpowiednie wiadomości.
+
+**R1-vSRX — Configuration Mode [edit private], zdalny syslog w opcjonalnym OOB**
+
+~~~junos
+set system syslog host 203.0.113.30 any notice
+set system syslog host 203.0.113.30 authorization info
+show | compare
+~~~
+
+To nie uruchamia syslog receiver. Jeśli nie masz serwera, zdalna strona testu pozostaje **NOT TESTED**. Dla produkcyjnego rozwiązania trzeba także rozważyć bezpieczny transport, segmentację management, odporność odbiornika i retencję logów.
+
+### Dlaczego adres źródłowy routera ma znaczenie?
+
+Serwer logów zwykle rozpoznaje urządzenie między innymi po IP, hostname i metadanych zdarzenia. Jeśli R1 wysyła wiadomości z innego źródła niż oczekiwane, alert może zostać źle przypisany albo filtr go odrzuci. Gdy urządzenie ma \`mgmt_junos\`, trzeba jeszcze sprawdzić właściwą trasę do odbiornika.
+
+Dlatego docelowy projekt zawiera **spójną nazwę urządzenia, poprawny czas, odpowiedni source-address i prawidłową drogę do kolektora**. To cztery oddzielne warunki. Sam \`set system syslog host ...\` ich nie zapewnia.
+
+### System syslog a logowanie sesji SRX
+
+Na SRX istnieją również mechanizmy związane z **security flow logs**, dokumentujące decyzje i sesje bezpieczeństwa. Nie są one tym samym co zwykły systemowy syslog o błędach interfejsu czy commitach. W zależności od trybu i platformy konfiguracja ruchu flow może być odrębna.
+
+W rozdziale IV uczymy się podstaw zdarzeń systemowych. Nie będziemy konfigurować pełnego SIEM ani szczegółowego eksportu każdej sesji firewall, ponieważ to oddzielny temat.
+
+### Uwaga na zalanie konsoli
+
+Zbyt szerokie wysyłanie wszystkich informacji do wszystkich zalogowanych użytkowników może spowodować **log storm** — lawinę wiadomości, utrudniającą administrację. Nie konfiguruj globalnego wysyłania wszystkiego na terminale jako szybkiego rozwiązania braku monitoringu.
+
+### Jak sprawdzić syslog end-to-end?
+
+Po testowej zmianie nazwy, opisu portu lub logowaniu znajdź zdarzenie lokalnie na R1 i w odpowiednim czasie na \`LAB-SERVICES\`. Porównaj jego timestamp i identyfikator urządzenia. Zapisane ustawienie docelowego IP nie dowodzi, że pakiet został dostarczony.
+
+**R1-vSRX — Operational Mode, odczyt przed raportem do NOC**
+
+~~~junos
+show configuration system syslog | display set
+show log messages | last 40
+show system uptime
+~~~
+
+**Dokumentacja:** [System Syslog Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/syslog-edit-system.html), [System Logging Source Address](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/security-source-address-edit-system-ntp-radius-syslog-tacacs.html).
+
+---
+
