@@ -915,3 +915,347 @@ commit
 commit
 ~~~
 
+
+---
+
+### Poziom 3 — cały DIAMOND-6R: jeden cel, dwa korytarze, sześć routerów [P — rozszerzenie dydaktyczne]
+
+Na tym poziomie nie uczymy jeszcze konfiguracji OSPF i BGP. Chcemy wyłącznie **zobaczyć, co dzieje się z pakietem, gdy ma przejść przez wiele routerów**, oraz porównać dwa możliwe kierunki. Dlatego wykorzystamy kontrolowane trasy statyczne, które już potrafisz rozpoznać w CLI. Dynamicznego wyboru drogi nauczysz się w późniejszych rozdziałach.
+
+Ważna różnica względem dwóch poprzednich poziomów: **R5 i R6 to routery, nie zwykłe komputery**. Test z \`ping ... source ...\` jest ruchem wygenerowanym lokalnie na R5, tranzytowym na R1, R2/R3 i R4, a host-bound na R6. Nie jest to pełny dowód komunikacji dwóch komputerów za routerami. Jeśli będziemy kiedyś potrzebować testów ruchu użytkowników z prawdziwych hostów, dodamy odpowiednie węzły końcowe jako osobny wariant laboratorium.
+
+#### Jakie adresy wykorzystamy?
+
+Dla pełnego obrazu wróćmy do stałej mapy interfejsów DIAMOND-6R. Pierwsze dwa łącza po stronie R5/R1/R2 zostały skonfigurowane w poprzednich poziomach.
+
+| Połączenie | Pierwszy koniec | Drugi koniec |
+|---|---|---|
+| R5–R1 | R5 \`ge-0/0/0.0\` 192.0.2.10/24 | R1 \`ge-0/0/2.0\` 192.0.2.1/24 |
+| R1–R2 | R1 \`ge-0/0/0.0\` 10.12.0.1/30 | R2 \`ge-0/0/0.0\` 10.12.0.2/30 |
+| R1–R3 | R1 \`ge-0/0/1.0\` 10.13.0.1/30 | R3 \`ge-0/0/0.0\` 10.13.0.2/30 |
+| R2–R4 | R2 \`ge-0/0/1.0\` 10.24.0.1/30 | R4 \`ge-0/0/0.0\` 10.24.0.2/30 |
+| R3–R4 | R3 \`ge-0/0/1.0\` 10.34.0.1/30 | R4 \`ge-0/0/1.0\` 10.34.0.2/30 |
+| R4–R6 | R4 \`ge-0/0/2.0\` 198.51.100.1/24 | R6 \`ge-0/0/0.0\` 198.51.100.10/24 |
+
+Na końcowych routerach dodamy dwa adresy usługowe na \`lo0.0\`:
+
+- R5: **172.16.50.1/24** (Business-A) oraz **172.16.51.1/24** (Management-A).
+- R6: **172.16.60.1/24** (Business-B) oraz **172.16.61.1/24** (Services-B).
+
+Dlaczego używamy loopback? Adres loopback jest logicznym adresem samego urządzenia, niezależnym od konkretnego portu Ethernet. Przydaje się do testów routingu oraz jako stabilny adres w wielu projektach sieciowych. Zwróć jednak uwagę, że **ping do loopbacku R6 pozostaje host-bound na R6**, choć po drodze jest transit na kilku innych routerach.
+
+#### Krok A — uzupełniamy brakujące porty i strefy
+
+Konfigurujemy tylko rzeczy, których jeszcze nie ma. Jeżeli wcześniejsze etapy zmieniły nazwy lub statusy portów, najpierw sprawdź mapping EVE-NG. Nie wykonuj tego na gotowych urządzeniach klienta.
+
+**R1-vSRX — Configuration Mode, dolny port do R3**
+
+~~~junos
+set interfaces ge-0/0/1 unit 0 family inet address 10.13.0.1/30
+set security zones security-zone CORE interfaces ge-0/0/1.0
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R2-vSRX — Configuration Mode, górne łącze do R4**
+
+~~~junos
+set interfaces ge-0/0/1 unit 0 family inet address 10.24.0.1/30
+set security zones security-zone CORE-RIGHT interfaces ge-0/0/1.0
+set security policies from-zone CORE to-zone CORE-RIGHT policy PASS-LAB-ICMP match source-address any
+set security policies from-zone CORE to-zone CORE-RIGHT policy PASS-LAB-ICMP match destination-address any
+set security policies from-zone CORE to-zone CORE-RIGHT policy PASS-LAB-ICMP match application junos-ping
+set security policies from-zone CORE to-zone CORE-RIGHT policy PASS-LAB-ICMP then permit
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R3-vSRX — Configuration Mode, dolna ścieżka**
+
+~~~junos
+set system host-name R3-vSRX
+set interfaces ge-0/0/0 unit 0 family inet address 10.13.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.1/30
+set interfaces lo0 unit 0 family inet address 10.255.255.3/32
+set security zones security-zone CORE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone CORE-RIGHT interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security policies from-zone CORE to-zone CORE-RIGHT policy PASS-LAB-ICMP match source-address any
+set security policies from-zone CORE to-zone CORE-RIGHT policy PASS-LAB-ICMP match destination-address any
+set security policies from-zone CORE to-zone CORE-RIGHT policy PASS-LAB-ICMP match application junos-ping
+set security policies from-zone CORE to-zone CORE-RIGHT policy PASS-LAB-ICMP then permit
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R4-vSRX — Configuration Mode, dwa uplinki rdzenia oraz łącze do R6**
+
+~~~junos
+set system host-name R4-vSRX
+set interfaces ge-0/0/0 unit 0 family inet address 10.24.0.2/30
+set interfaces ge-0/0/1 unit 0 family inet address 10.34.0.2/30
+set interfaces ge-0/0/2 unit 0 family inet address 198.51.100.1/24
+set interfaces lo0 unit 0 family inet address 10.255.255.4/32
+set security zones security-zone CORE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone CORE interfaces ge-0/0/1.0 host-inbound-traffic system-services ping
+set security zones security-zone CE interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+set security policies from-zone CORE to-zone CE policy PASS-LAB-ICMP match source-address any
+set security policies from-zone CORE to-zone CE policy PASS-LAB-ICMP match destination-address any
+set security policies from-zone CORE to-zone CE policy PASS-LAB-ICMP match application junos-ping
+set security policies from-zone CORE to-zone CE policy PASS-LAB-ICMP then permit
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R6-vSRX — Configuration Mode, ostatni router**
+
+~~~junos
+set system host-name R6-vSRX
+set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.10/24
+set interfaces lo0 unit 0 family inet address 10.255.255.6/32
+set interfaces lo0 unit 0 family inet address 172.16.60.1/24
+set interfaces lo0 unit 0 family inet address 172.16.61.1/24
+set security zones security-zone CE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R5-vSRX — Configuration Mode, dwa adresy testowe na loopback**
+
+~~~junos
+set interfaces lo0 unit 0 family inet address 172.16.50.1/24
+set interfaces lo0 unit 0 family inet address 172.16.51.1/24
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+W tym momencie powinny działać bezpośrednie połączenia między sąsiadami, o ile porty, strefy i mapowanie są prawidłowe. Nie powinieneś jeszcze oczekiwać pingu pomiędzy zdalnymi loopbackami R5 i R6, ponieważ brakuje tras przez cały diament.
+
+**R3-vSRX — Operational Mode, kontrola dolnej ścieżki**
+
+~~~junos
+show interfaces terse
+show route 10.13.0.0/30 exact
+show route 10.34.0.0/30 exact
+ping 10.34.0.2 source 10.34.0.1 count 3
+~~~
+
+**R4-vSRX — Operational Mode, kontrola połączeń**
+
+~~~junos
+show interfaces terse
+show route 10.24.0.0/30 exact
+show route 10.34.0.0/30 exact
+show route 198.51.100.0/24 exact
+~~~
+
+Nie zatwierdzaj kolejnego zestawu zmian na błędnej topologii. Po pozytywnych pre-checkach potwierdź oczekujące \`commit confirmed\` na każdym zmienionym routerze, zawsze z konsoli odpowiedniego urządzenia.
+
+#### Krok B — najpierw przygotowujemy górny korytarz
+
+Wybieramy dwa adresy, które będziemy testować:
+
+**Źródło:** R5 \`172.16.50.1\`  
+**Cel:** R6 \`172.16.60.1\`
+
+Chcemy, aby Echo Request przeszedł drogą **R5 → R1 → R2 → R4 → R6**, a odpowiedź wróciła odwrotnie. Do każdej strony potrzebujemy tras. R5 zna własne 172.16.50.0/24 jako Direct. R6 zna własne 172.16.60.0/24 jako Direct. Pozostałym routerom musimy pokazać next-hop.
+
+Najpierw popatrz na plan dla **drogi tam**:
+
+| Router | Trasa do 172.16.60.0/24 | Następny hop |
+|---|---|---|
+| R5 | Static | 192.0.2.1 — R1 |
+| R1 | Static | 10.12.0.2 — R2 |
+| R2 | Static | 10.24.0.2 — R4 |
+| R4 | Static | 198.51.100.10 — R6 |
+| R6 | Direct | Lokalny loopback |
+
+A teraz **droga powrotna** do 172.16.50.0/24:
+
+| Router | Trasa do 172.16.50.0/24 | Następny hop |
+|---|---|---|
+| R6 | Static | 198.51.100.1 — R4 |
+| R4 | Static | 10.24.0.1 — R2 |
+| R2 | Static | 10.12.0.1 — R1 |
+| R1 | Static | 192.0.2.10 — R5 |
+| R5 | Direct | Lokalny loopback |
+
+To wystarczy, żeby zobaczyć, dlaczego cztery routery po drodze nie „zgadują” tras powrotnych. Każdy posiada własną decyzję o kolejnym hopie.
+
+**R5-vSRX — Configuration Mode, wyjście w stronę R6**
+
+~~~junos
+set routing-options static route 172.16.60.0/24 next-hop 192.0.2.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R1-vSRX — Configuration Mode, do R6 przez R2 i powrót do R5**
+
+~~~junos
+set routing-options static route 172.16.60.0/24 next-hop 10.12.0.2
+set routing-options static route 172.16.50.0/24 next-hop 192.0.2.10
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R2-vSRX — Configuration Mode, górne pośrednictwo w obu kierunkach**
+
+~~~junos
+set routing-options static route 172.16.60.0/24 next-hop 10.24.0.2
+set routing-options static route 172.16.50.0/24 next-hop 10.12.0.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R4-vSRX — Configuration Mode, do R6 bezpośrednio, do R5 przez R2**
+
+~~~junos
+set routing-options static route 172.16.60.0/24 next-hop 198.51.100.10
+set routing-options static route 172.16.50.0/24 next-hop 10.24.0.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R6-vSRX — Configuration Mode, droga powrotna do sieci R5**
+
+~~~junos
+set routing-options static route 172.16.50.0/24 next-hop 198.51.100.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Gdy już połączysz routing z security policies w odpowiednich strefach, rozpocznij pierwszy test.
+
+**R5-vSRX — Operational Mode, test górną ścieżką**
+
+~~~junos
+ping 172.16.60.1 source 172.16.50.1 count 5
+show route 172.16.60.0/24 exact
+~~~
+
+**R1-vSRX — Operational Mode, początek rdzenia**
+
+~~~junos
+show route 172.16.60.0/24 exact
+show route forwarding-table destination 172.16.60.1
+show security flow session source-prefix 172.16.50.1
+~~~
+
+**R2-vSRX — Operational Mode, router pośredni górnego korytarza**
+
+~~~junos
+show route 172.16.60.0/24 exact
+show route 172.16.50.0/24 exact
+show security flow session source-prefix 172.16.50.1
+~~~
+
+**R4-vSRX — Operational Mode, wyjście z rdzenia**
+
+~~~junos
+show route 172.16.60.0/24 exact
+show route 172.16.50.0/24 exact
+show security policies from-zone CORE to-zone CE
+~~~
+
+**Oczekiwany wynik:** nowe Echo Requesty R5→R6 mogą dotrzeć górnym korytarzem, a Echo Reply wrócić przez R4/R2/R1, jeżeli właściwe policy SRX, host-inbound oraz rozwiązywanie next-hop działają prawidłowo. Gdy ping nie działa, **nie dokładaj automatycznie następnej trasy**: sprawdź, czy dotychczasowe route są aktywne, czy każdy hop zna drogę powrotną i czy na vSRX jest dopuszczona odpowiednia sesja.
+
+Dokładne zachowanie lokalnego ruchu do \`lo0\` na R6 oraz sesji flow wymaga weryfikacji z danym release. Nie można ogłosić sukcesu na podstawie przygotowanej konfiguracji.
+
+#### Krok C — dolny korytarz i drugi prefiks usługowy
+
+Teraz wprowadzimy **osobny zestaw sieci**, żeby oba korytarze mogły działać równocześnie bez przesuwania tych samych static routes.
+
+**Źródło:** R5 \`172.16.51.1\`  
+**Cel:** R6 \`172.16.61.1\`
+
+Oczekujemy drogi **R5 → R1 → R3 → R4 → R6** i powrotu przez R3. To dobry przykład, że router może mieć różne następne hopy dla dwóch różnych sieci docelowych.
+
+| Router | Trasa do 172.16.61.0/24 | Trasa do 172.16.51.0/24 |
+|---|---|---|
+| R5 | przez R1 192.0.2.1 | Direct |
+| R1 | przez R3 10.13.0.2 | przez R5 192.0.2.10 |
+| R3 | przez R4 10.34.0.2 | przez R1 10.13.0.1 |
+| R4 | przez R6 198.51.100.10 | przez R3 10.34.0.1 |
+| R6 | Direct | przez R4 198.51.100.1 |
+
+**R5-vSRX — Configuration Mode, Services-B przez R1**
+
+~~~junos
+set routing-options static route 172.16.61.0/24 next-hop 192.0.2.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R1-vSRX — Configuration Mode, dolna ścieżka przez R3**
+
+~~~junos
+set routing-options static route 172.16.61.0/24 next-hop 10.13.0.2
+set routing-options static route 172.16.51.0/24 next-hop 192.0.2.10
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R3-vSRX — Configuration Mode, przekazywanie między R1 i R4**
+
+~~~junos
+set routing-options static route 172.16.61.0/24 next-hop 10.34.0.2
+set routing-options static route 172.16.51.0/24 next-hop 10.13.0.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R4-vSRX — Configuration Mode, usługa R6 i droga powrotna przez R3**
+
+~~~junos
+set routing-options static route 172.16.61.0/24 next-hop 198.51.100.10
+set routing-options static route 172.16.51.0/24 next-hop 10.34.0.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R6-vSRX — Configuration Mode, powrót do Management-A**
+
+~~~junos
+set routing-options static route 172.16.51.0/24 next-hop 198.51.100.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R5-vSRX — Operational Mode, porównanie obu dróg**
+
+~~~junos
+ping 172.16.60.1 source 172.16.50.1 count 3
+ping 172.16.61.1 source 172.16.51.1 count 3
+show route 172.16.60.0/24 exact
+show route 172.16.61.0/24 exact
+~~~
+
+**R1-vSRX — Operational Mode, gdzie router wyśle dwa rodzaje pakietów?**
+
+~~~junos
+show route 172.16.60.0/24 exact
+show route 172.16.61.0/24 exact
+show route forwarding-table destination 172.16.60.1
+show route forwarding-table destination 172.16.61.1
+~~~
+
+Na R1 powinieneś zobaczyć, że dla 172.16.60.0/24 next-hop jest **10.12.0.2 (R2)**, a dla 172.16.61.0/24 next-hop **10.13.0.2 (R3)**. To rezultat **dwóch różnych statycznych tras do dwóch różnych prefiksów**, a nie automatycznego load balancingu czy decyzji BGP.
+
+Jeżeli testy pokazują oczekiwane ścieżki i komunikacja działa, potwierdź odpowiednie commity po pozytywnych kontrolach. W późniejszych rozdziałach nauczymy się zastępować ręczne static routes protokołami dynamicznymi i politykami wyboru drogi.
+
