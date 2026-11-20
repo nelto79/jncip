@@ -1351,3 +1351,156 @@ show interfaces terse
 
 Po zdiagnozowaniu problemu zapisz przynajmniej, **co zgłosił użytkownik, na którym routerze wykonano zmianę, czym różniła się candidate od active, jaki był wynik walidacji, co nastąpiło po aktywacji i czy rollback się wykonał**. Nie pisz „Junos się zawiesił”, jeśli dowody wskazują jedynie na brak potwierdzenia `commit confirmed`.
 
+
+---
+
+## 3.TEST. Samodzielne sprawdzenie rozumienia — najpierw przewiduj, potem czytaj odpowiedź [EXT]
+
+W tych pytaniach nie chodzi o zgadywanie nazw poleceń. W realnej pracy istotne jest, czy potrafisz przewidzieć **konsekwencje swojej decyzji**. Spróbuj odpowiedzieć przed przeczytaniem wyjaśnień.
+
+**Pytanie 1.** Zalogowałeś się do R1 i widzisz `operator@R1-vSRX>`. Czy ten znak dowodzi, że masz prawa superuser? Czy polecenia dostępne w tym trybie na pewno nie mogą niczego zmienić?
+
+**Pytanie 2.** W Configuration Mode przygotowałeś `set interfaces ge-0/0/0 description "UPLINK"`, ale nie wykonałeś commit. Czy opis powinien być już widoczny jako aktywny w `show configuration` uruchomionym z oddzielnej sesji Operational Mode?
+
+**Pytanie 3.** Jesteś w `[edit interfaces ge-0/0/0]`. Co robi `up`, a co `top`? Dlaczego polecenie `set description` wykonane w tej gałęzi nie musi mieć tej samej pełnej składni, co w korzeniu konfiguracji?
+
+**Pytanie 4.** Wpisujesz `show route | count` i dostajesz 12 000. Czy router ma dokładnie 12 000 tras? Co policzyło to polecenie?
+
+**Pytanie 5.** Dlaczego `show configuration interfaces ge-0/0/0` może pokazywać mniej ustawień niż `show configuration interfaces ge-0/0/0 | display inheritance`?
+
+**Pytanie 6.** Dwie osoby edytują ten sam R1 przez zwykłe `configure`. Jedna zmienia opis R1–R2, druga edytuje opis R1–R3. Ktoś wykonuje commit. Które zmiany mogą stać się aktywne?
+
+**Pytanie 7.** Czym różni się `configure private` od `configure exclusive`? Czy prywatna candidate zamraża działającą konfigurację routera?
+
+**Pytanie 8.** Administrator A zatwierdził zmianę, gdy administrator B nadal pracował w `configure private`. Co powinien sprawdzić B przed własnym commit? Kiedy używa się `update`?
+
+**Pytanie 9.** Masz plik z pięcioma wierszami rozpoczynającymi się od `set`. Jakiej rodziny poleceń użyjesz do jego wczytania? Dlaczego `load override` byłoby niebezpiecznym wyborem?
+
+**Pytanie 10.** Wczytujesz konfigurację przez `load replace`, ale w pliku nie ma znacznika `replace:`. Dlaczego wynik może być inny od oczekiwanego?
+
+**Pytanie 11.** Czym różni się `deactivate` od `delete`? Czy dezaktywowanie krytycznej trasy po commit może wpłynąć na ruch?
+
+**Pytanie 12.** Zapisujesz candidate do pliku przez `save /var/tmp/ch03.conf`. Czy w tym momencie nowe ustawienia zaczęły działać?
+
+**Pytanie 13.** Wykonałeś `commit confirmed 5`. Po minucie uruchomiłeś `commit check`, ponieważ chciałeś „tylko zweryfikować” stan. Czy nadal możesz zakładać, że po pięciu minutach nastąpi automatyczny rollback?
+
+**Pytanie 14.** `commit check` zakończył się sukcesem. Czy wiesz już, że użytkownik z R5 będzie mógł nadal zalogować się przez SSH do R1? Jakiego rodzaju test nadal jest potrzebny?
+
+**Pytanie 15.** Po `rollback 1` zobaczyłeś starszą konfigurację, ale działająca sieć jeszcze się nie zmieniła. Co się stało i jaki dodatkowy krok byłby potrzebny, aby przywrócić poprzedni stan?
+
+**Pytanie 16.** Czy rescue configuration powstaje po każdym commit automatycznie? Co powinieneś ustalić, zanim wykonasz `rollback rescue`?
+
+**Pytanie 17.** Na R1 i R4 zmieniasz opisy interfejsów. Czy zatwierdzenie R1 automatycznie zatwierdzi również candidate na R4? Czy warto pozostawić dwa niepotwierdzone commity na raz, gdy dopiero uczysz się tego mechanizmu?
+
+**Pytanie 18.** Ping do management R1 działa, a SSH odpowiada, lecz J-Web się nie otwiera. Czy na tej podstawie należy wyłączyć firewall? Co powinno być sprawdzone?
+
+### Rozwiązania z wyjaśnieniem
+
+**1.** Nie. Znak `>` oznacza Operational Mode, a nie konkretną klasę uprawnień. Niektóre polecenia tego trybu mogą wpływać na stan urządzenia; prawo do ich wykonania zależy od autoryzacji.
+
+**2.** Nie. Do momentu commit opis jest tylko zmianą candidate. Operacyjny `show configuration` z oddzielnej sesji pokazuje zatwierdzoną konfigurację.
+
+**3.** `up` przechodzi jeden poziom w hierarchii wyżej, a `top` wraca do jej korzenia. W zagnieżdżonym kontekście krótsza ścieżka może dotyczyć bieżącej gałęzi `interfaces ge-0/0/0`.
+
+**4.** `| count` liczy wyświetlone wiersze tekstu, niekoniecznie liczbę rekordów routingu. Nagłówki i wielowierszowy format mogą powodować różnicę.
+
+**5.** Konfiguracja może korzystać z dziedziczenia grup. `display inheritance` pozwala zobaczyć także wynikowe ustawienia dostarczone przez `apply-groups`.
+
+**6.** Obydwie. Wspólny candidate może zawierać poprawki kilku administratorów; commit jednego z nich może je wszystkie zatwierdzić.
+
+**7.** `private` daje własną wersję roboczą, a `exclusive` blokuje wspólną edycję dla innych. Żaden z nich nie zatrzymuje całej aktywności sieci; private nie uniemożliwia innym zatwierdzania ich zmian.
+
+**8.** B musi porównać prywatną candidate z aktualnym stanem active, sprawdzić możliwe konflikty i w razie potrzeby wykonać `update`. To synchronizacja stanu private z nowym active, a nie import pliku.
+
+**9.** `load set`, np. `load set terminal`. `load override` zastępuje całą candidate i może usunąć elementy niewystępujące w pięciu liniach.
+
+**10.** Bez `replace:` Junos może potraktować taką operację jak merge. Samo słowo `replace` w poleceniu nie musi oznaczać zastąpienia całej wskazanej zawartości pliku bez prawidłowych znaczników.
+
+**11.** `deactivate` zachowuje obiekt z oznaczeniem nieaktywności, `delete` go usuwa. Obie operacje mogą wpłynąć na działanie, jeśli zatwierdzisz je na elemencie istotnym dla ruchu.
+
+**12.** Nie. `save` tworzy plik tekstowy z konfiguracją, natomiast `commit` aktywuje zweryfikowaną candidate.
+
+**13.** Nie. `commit check` w czasie oczekiwania może potwierdzić poprzedni `commit confirmed`, co usuwa planowany automatyczny rollback. Dlatego pre-check wykonujemy **przed** warunkową aktywacją, a po niej stosujemy read-only testy operacyjne.
+
+**14.** Nie. `commit check` sprawdza spójność konfiguracji, nie pełne działanie usług. Trzeba potwierdzić rzeczywistą ścieżkę SSH oraz usługę z właściwego źródła, najlepiej zachowując konsolę.
+
+**15.** `rollback 1` załadował wcześniejszą konfigurację do candidate. Aby stała się aktywna, potrzebujesz kontroli diffu, walidacji i zatwierdzenia zmiany zgodnie z planem.
+
+**16.** Nie. Rescue trzeba świadomie zapisać. Przed przywróceniem ustal, kiedy została utworzona, co zawiera i czy nie usunie nowszych wymaganych ustawień.
+
+**17.** Nie. Każdy vSRX ma własną historię i candidate. Zmieniaj i potwierdzaj kolejne routery etapami, szczególnie podczas nauki, zamiast prowadzić kilka równoległych timerów.
+
+**18.** Nie wyłączaj firewallu w ciemno. Sprawdź wsparcie J-Web, konfigurację HTTPS, certyfikat, interfejs i port management oraz host-inbound i inne właściwe kontrole ruchu do samego urządzenia.
+
+---
+
+## 3.REF. Mapa poleceń do codziennej pracy — gdy już rozumiesz, co oznaczają [EXT]
+
+Na koniec dobrze mieć krótką mapę. Nie zastępuje ona wyjaśnień, ale pomaga szybko wrócić do właściwego polecenia podczas ćwiczeń.
+
+| Pytanie | Polecenie / widok | O czym pamiętać |
+|---|---|---|
+| Która wersja Junos? | `show version` | Składnia i wsparcie funkcji mogą zależeć od release |
+| Kto jest zalogowany? | `show system users` | Sprawdź innych administratorów przed shared candidate |
+| Jaki tryb? | Prompt `>` / `#` | Tryb nie jest tożsamy z uprawnieniami |
+| Jak wejść do konfiguracji? | `configure` | Zwykle wspólna candidate |
+| Jak pracować prywatnie? | `configure private` | Uważaj na zmiany aktywne zatwierdzone przez innych |
+| Jak zablokować edycję? | `configure exclusive` | Zastosuj tylko po uzgodnieniu z zespołem |
+| Jak poruszać się po konfiguracji? | `edit`, `up`, `top` | Sprawdź bieżącą hierarchię |
+| Jak znaleźć składnię? | `?`, `Tab`, `help apropos` | Korzystaj z pomocy właściwego wydania |
+| Jak ograniczyć output? | `match`, `except`, `find`, `last` | Nie trać kontekstu problemu |
+| Jak zobaczyć konfigurację jako linie? | `display set` | Nie jest to nowa kopia konfiguracji |
+| Jak zobaczyć dziedziczenie? | `display inheritance` | Może wskazać ustawienia z configuration groups |
+| Jak zmienić kandydacką konfigurację? | `set`, `delete` | Zmiany nie są jeszcze aktywne |
+| Jak tymczasowo wyłączyć obiekt? | `deactivate` / `activate` | Po commit może zmienić routing lub security |
+| Jak porównać konfiguracje? | `show | compare` | Sprawdź cały diff |
+| Jak wczytać linie set? | `load set` | Weryfikuj format i zasięg wczytywanego pliku |
+| Jak wczytać fragment drzewa? | `load merge`, `load replace` | `replace:` określa zastępowaną gałąź |
+| Jak sprawdzić konfigurację? | `commit check` | Po `commit confirmed` może ją **potwierdzić** |
+| Jak aktywować warunkowo? | `commit confirmed 5` | W czasie timera wykonuj post-check read-only |
+| Jak potwierdzić wynik? | `commit` | Dopiero po pozytywnym teście usługi |
+| Jak zobaczyć historię? | `show system commit`, `show system rollback` | Nie zgaduj numerów historycznych wersji |
+| Jak odrzucić własny niezacommitowany diff? | `rollback 0` | Nie kasuj cudzych zmian ze shared candidate |
+| Jak przygotować starszą konfigurację? | `rollback 1` | Ładuje do candidate; aktywacja wymaga commit |
+| Jak zapisać plik konfiguracyjny? | `save` | Plik lokalny nie jest niezależnym backupem |
+| Jak odzyskać zapisany punkt ratunkowy? | `rollback rescue` | Najpierw sprawdź, czy rescue istnieje i jest właściwa |
+
+---
+
+## Zakończenie. Co właściwie zmieniło się w Twoim sposobie pracy?
+
+Wróćmy do zadania, od którego zaczęliśmy: opis połączenia R1–R2. Gdy czytałeś je na początku, wyglądało na jedną prostą linię konfiguracji. Teraz widzisz w nim cały proces: wejście w odpowiedni tryb, wskazanie gałęzi, zmiana candidate, kontrola różnicy, ewentualna walidacja i zatwierdzenie. Jeżeli coś idzie nie tak, możesz ustalić, **czy błąd powstał przed aktywacją, podczas commit, czy dopiero w działaniu usługi**.
+
+To jest najważniejsza umiejętność wyniesiona z rozdziału III. Nie chodzi o to, by zapamiętać 30 poleceń. Chodzi o świadome przejście od pomysłu do bezpiecznej zmiany: **najpierw sprawdzam, potem przygotowuję, porównuję, aktywuję z planem powrotu, testuję i dopiero zamykam change.**
+
+W następnym rozdziale skonfigurujemy nowe urządzenie — nazwy, interfejsy, konta, SSH, NTP, syslog i inne podstawowe usługi. Potrafisz już korzystać z Junos CLI na tyle świadomie, aby nie traktować każdej komendy `set` jak natychmiastowej zmiany całej sieci.
+
+---
+
+## Źródła, pochodzenie materiału i granice walidacji
+
+Rozdział napisano na podstawie aktualnego [Unified Blueprint](../JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md), wcześniejszej wersji III (zachowanej w [archiwum](../archive/JUNOS_Rozdzial_03_pre_beginner_rewrite_2026-11-20.md)), stylistyki [rozdziału VIII](JUNOS_Rozdzial_08_Routing_Policy_and_Firewall_Filters.md) oraz [rozdziału II](JUNOS_Rozdzial_02_Architektura_Junos_OS.md). Celowo zastąpiono założenie „czytelnik zna Cisco” nauczaniem od podstaw.
+
+Najważniejsze oficjalne dokumenty Juniper:
+
+1. [Junos CLI Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-overview.html) — podstawy interfejsu i trybów.
+2. [CLI Configuration Mode](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-configuration.html) — nawigacja po hierarchii.
+3. [CLI Environment Settings](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-environment-settings.html) — uzupełnianie i ustawienia terminala.
+4. [pipe CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/pipe.html) — filtrowanie wyników.
+5. [Displaying Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-pipe-display.html) — set, XML, inheritance.
+6. [Overview of Configure Command](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configure-command.html) — shared, exclusive, private i konflikty.
+7. [update (Configuration Mode)](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/update.html) — synchronizacja private candidate.
+8. [Modifying Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/modifying-configuration.html) — edycja i replace pattern.
+9. [Loading Configuration Files](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-config-files-loading.html) — merge, replace, override, set, update.
+10. [save (Configuration Mode)](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/save-cli-config.html) — zapis konfiguracji do pliku.
+11. [Commit the Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html) — commit, check, confirmed i potwierdzanie.
+12. [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html) — składnia commit.
+13. [Rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/rollback.html) — numeracja i zachowanie.
+14. [show system rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-rollback.html) — historia do odczytu.
+15. [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html) — konfiguracja ratunkowa.
+16. [J-Web Documentation](https://www.juniper.net/documentation/product/us/en/j-web/) — graficzna administracja dla wspieranych platform.
+17. [Secure Web Management](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/secure-web-access-remote-management.html) — HTTPS i certyfikaty.
+
+**Status:** redakcja i struktura przygotowane; przykłady sprawdzone w dokumentacji producenta na poziomie mechanizmów. **Nie uruchamiano vSRX, nie wykonywano faktycznych commitów i nie zebrano wyników z EVE-NG.** Wszystkie scenariusze laboratoryjne pozostają `PLANNED / NOT RUNTIME VALIDATED`. Konkretna składnia może wymagać dostosowania do rzeczywistej wersji Junos, modelu vSRX oraz obecnej konfiguracji; test na urządzeniu rozstrzyga, czy scenariusz działa.
+
+*Najlepsza umiejętność administratora Junos to nie szybkość wpisywania komend, ale pewność, **który stan konfiguracji zmienia i jak udowodni, że osiągnął zamierzony rezultat.***
