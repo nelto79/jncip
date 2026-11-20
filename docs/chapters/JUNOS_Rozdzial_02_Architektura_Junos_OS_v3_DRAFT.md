@@ -313,3 +313,191 @@ Nasz vSRX w EVE-NG nie jest laboratoryjnym odpowiednikiem modułowego MX z dwiem
 
 **Źródła Juniper:** [Routing Databases Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-protocols-routing-databases-overview.html), [Junos Routing and Forwarding Tables](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-routing-forwarding-table-overview.html), [show route forwarding-table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
 
+
+---
+
+## 2.4. Packet Forwarding Engine — jak router przekazuje pakiet, gdy zna już drogę? [A]
+
+### Co PFE robi po otrzymaniu pakietu?
+
+R1 ma przygotowaną informację, że sieć 10.12.0.0/30 znajduje się na porcie w kierunku R2. Gdy R5 wyśle pakiet z adresem docelowym 10.12.0.2, R1 nie musi najpierw uruchamiać OSPF ani BGP. Może skorzystać z odpowiedniej pozycji w tablicy forwarding.
+
+To jednak nie oznacza, że przekazanie pakietu sprowadza się do mechanicznego „wyślij na port 0”. Router musi odczytać właściwe pola nagłówka, odnaleźć pasującą trasę, sprawdzić wymagane warunki przetwarzania i przygotować nową ramkę do wysłania.
+
+Zatrzymajmy się przy słowie **ramka**. Na Ethernet pakiet IP nie jest przesyłany po kablu samodzielnie. Umieszczamy go wewnątrz ramki Ethernet, która ma między innymi adresy MAC źródła i odbiorcy. Adresy IP pozwalają routerom ustalać drogę pomiędzy sieciami. Adresy MAC pozwalają dostarczyć ramkę do następnego urządzenia w obrębie konkretnego segmentu Ethernet.
+
+Kiedy R5 wysyła do R2 przez R1, dzieje się więc coś ważnego: **adres IP docelowy nadal oznacza R2, ale adres MAC odbiorcy zmienia się na każdym odcinku Ethernet**.
+
+### Prześledźmy R5 → R1 → R2 bez skrótów
+
+R5 ma adres 192.0.2.10/24 na porcie do R1. R1 ma po tej stronie adres 192.0.2.1/24, a na łączu do R2 adres 10.12.0.1/30. R2 ma 10.12.0.2/30.
+
+R5 chce wysłać ICMP Echo Request do **10.12.0.2**. Adres ten nie należy do jego lokalnej sieci 192.0.2.0/24. Dlatego R5 potrzebuje trasy kierującej pakiet do **192.0.2.1**, czyli R1. Może być to trasa do konkretnej sieci albo, w bardziej ogólnym scenariuszu, default route.
+
+R5 przygotowuje pakiet IP:
+
+- Source IP: 192.0.2.10.
+- Destination IP: 10.12.0.2.
+- Protokół: ICMP.
+
+Następnie umieszcza go w ramce Ethernet przeznaczonej dla MAC interfejsu R1 w LAN-A. Jeśli R5 nie zna jeszcze tego MAC, może użyć **ARP (Address Resolution Protocol)**, aby dowiedzieć się, jaki adres MAC odpowiada 192.0.2.1.
+
+Gdy R1 otrzymuje ramkę, odczytuje pakiet IP. Destination IP to 10.12.0.2, czyli **nie jego własny adres 192.0.2.1 ani 10.12.0.1**. R1 sprawdza forwarding i znajduje wyjście na interfejs do R2.
+
+Na wyjściu R1 musi przygotować **nową ramkę Ethernet**. Jej source MAC będzie związany z portem R1 do R2, a destination MAC z portem R2. Pakiet IP nadal ma destination **10.12.0.2**. W typowym routingu bez NAT source IP też pozostaje **192.0.2.10**. Zmienia się natomiast m.in. **TTL**, ponieważ pakiet przechodzi przez router IP.
+
+~~~mermaid
+flowchart LR
+  R5["R5<br/>IP źródła 192.0.2.10"] -->|"Ramka 1<br/>MAC: R5 → R1<br/>IP: .10 → 10.12.0.2"| R1["R1<br/>przekazuje pakiet"]
+  R1 -->|"Ramka 2<br/>MAC: R1 → R2<br/>IP: .10 → 10.12.0.2"| R2["R2<br/>IP celu 10.12.0.2"]
+~~~
+
+*Rysunek 2.5. R1 przekazuje pakiet IP, ale tworzy nową ramkę Ethernet na następnym odcinku. W rzeczywistym systemie adresy MAC trzeba odczytać z interfejsów i ARP; nie wpisujemy ich na sztywno do referencyjnej topologii.*
+
+Wyobraź sobie teraz, że R1 ma poprawną trasę do 10.12.0.2, lecz nie może ustalić adresu MAC R2. Samo posiadanie wpisu w RIB nie wystarczy do skutecznej transmisji Ethernet. Trzeba jeszcze rozwiązać informację warstwy drugiej potrzebną do wyjścia.
+
+**R1-vSRX — Operational Mode, połączenie routingu, interfejsu i ARP**
+
+~~~junos
+show route 10.12.0.0/30 exact
+show route forwarding-table destination 10.12.0.2
+show interfaces ge-0/0/0 terse
+show arp no-resolve
+~~~
+
+W \`show arp\` po udanym ruchu możemy spodziewać się adresu IP 10.12.0.2 powiązanego z MAC R2 na odpowiednim interfejsie. Jeśli go nie ma, to jeszcze nie dowód awarii — być może nie było ruchu wymagającego ARP, wpis wygasł albo platforma inaczej pokazuje sąsiedztwo. Dopiero połączenie stanu interfejsu, tablicy forwardingu i testu pakietowego pozwala rozpoznać problem.
+
+### Longest Prefix Match: skąd router wie, który wpis wybrać?
+
+W rozdziale I poznałeś pojęcie prefiksu. Przypomnijmy je na konkretnym przykładzie. Wpis **172.16.0.0/16** obejmuje większą przestrzeń adresów niż **172.16.60.0/24**. Jeśli obie trasy są użyteczne, pakiet do **172.16.60.1** pasuje do obu, ale bardziej szczegółowa /24 wskazuje precyzyjniejszą drogę.
+
+To nazywamy **Longest Prefix Match (LPM)**. „Longest” oznacza tu najdłuższą maskę/prefix — więcej bitów opisujących sieć — a nie najdłuższą fizycznie trasę.
+
+W naszym DIAMOND-6R sieć **172.16.60.0/24** może należeć do R6. Gdy R1 będzie ją znał, pakiet do 172.16.60.1 powinien zostać skierowany drogą do R6. Jeśli R1 miałby również default route 0.0.0.0/0, nie wygra ona z /24 dla tego celu. Default ma najkrótszy możliwy prefix i służy jako droga ogólna, gdy nie ma bardziej szczegółowego dopasowania.
+
+Nie myl tego z wcześniejszą **route preference**. LPM porównuje dopasowanie różnych prefiksów do adresu docelowego. Route preference pomaga wybierać między konkurującymi trasami do **tego samego** prefiksu. Te mechanizmy często występują obok siebie, ale odpowiadają na inne pytania.
+
+### Co dzieje się z TTL i dlaczego nie każdy ping znika tak samo?
+
+**TTL — Time To Live** to pole w pakiecie IPv4, które ogranicza liczbę przejść przez routery. W typowym routingu router zmniejsza TTL o 1. Jeśli wskutek tego TTL nie pozwala przekazać pakietu dalej, pakiet jest odrzucany, a urządzenie może wygenerować informację **ICMP Time Exceeded** do nadawcy, zależnie od zachowania platformy i filtrów.
+
+To mechanizm chroniący sieć przed pakietami krążącymi bez końca w pętli routingu. Jest także jednym z mechanizmów wykorzystywanych przez **traceroute**.
+
+Ważne: nie trzeba uruchamiać procesu OSPF po każdym zmniejszeniu TTL. W nowoczesnym forwarding odpowiednie operacje mogą zachodzić w układzie PFE. Nie każdy pakiet ICMP musi więc być obsługiwany w całości przez RE. Zagadnienie wyjątkowych pakietów wróci w sekcji 2.6.
+
+### A co, jeśli router zna drogę, ale świadomie odrzuca pakiet?
+
+W sieci istnieją też decyzje typu **discard** i **reject**. To nie są synonimy „brak trasy”. Router może mieć skonfigurowaną trasę, której zadaniem jest właśnie odrzucanie ruchu.
+
+Najprostsza ilustracja to laboratoryjna statyczna trasa do nieobsługiwanej sieci. W Junos można utworzyć route typu \`discard\` albo \`reject\`; ich semantyka odpowiedzi na odrzucenie różni się. W szczególnych platformach i wariantach komunikat ICMP może podlegać dodatkowym ograniczeniom. Gdy pakiet jest odrzucony świadomie, **brak odpowiedzi nie oznacza automatycznie awarii interfejsu**.
+
+Nie konfiguruj takich tras w działającym środowisku tylko po to, żeby zobaczyć odpowiedź ping. W dalszych laboratoriach będziemy je wprowadzać na wyraźnie oznaczonych, izolowanych prefiksach, a następnie usuwać.
+
+### Czy PFE na vSRX jest tym samym co ASIC w switchu?
+
+Nie. **PFE jest nazwą roli w architekturze Junos**, natomiast implementacja zależy od sprzętu i systemu. W wielu fizycznych urządzeniach forwarding realizują wyspecjalizowane układy. W wirtualnym vSRX ruch jest przetwarzany przez programowy dataplane, w którym bardzo ważny jest również mechanizm security flow.
+
+Dla nas oznacza to dwie rzeczy. Po pierwsze, nauka rozdzielenia RE/FIB/forwarding pozostaje użyteczna. Po drugie, nie możemy z wyników vSRX wyciągać wniosków o wydajności sprzętowego PFE w MX lub EX ani deklarować testów TCAM czy ASIC na podstawie maszyny wirtualnej.
+
+**Pytanie kontrolne.** \`show route\` ma właściwą trasę, a \`show route forwarding-table\` również wskazuje sensowny next-hop. Czy możesz uznać, że pakiet dotarł do R2? Jeszcze nie. Trzeba sprawdzić łącze Ethernet, osiągalność MAC/ARP, ewentualne filtry i security policies, drogę powrotną oraz faktyczny test.
+
+**Źródła Juniper:** [Router Data Flow Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-router-data-flow-overview.html), [show route forwarding-table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html), [show pfe route](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-pfe-route.html).
+
+---
+
+## 2.5. Transit traffic — pakiet, którego celem nie jest router po drodze [A]
+
+### Jeden pakiet, trzy urządzenia i cztery warunki powodzenia
+
+Przyjmijmy, że podłączyliśmy R5–R1–R2 i skonfigurowaliśmy potrzebne adresy. R5 chce wysłać ICMP Echo Request do R2. Interesuje nas teraz **rola środkowego routera R1**.
+
+R1 nie jest nadawcą i nie jest końcowym odbiorcą. Jest urządzeniem, przez które pakiet musi przejść. Taki ruch nazywamy **transit traffic**.
+
+Wielu początkujących inżynierów kojarzy router z czymś, co „po prostu przepuszcza IP”. Ale w praktyce, aby R1 poprawnie przekazał pakiet, muszą być spełnione kolejne warunki:
+
+1. **Pakiet musi dotrzeć na właściwy interfejs wejściowy R1.** Do tego potrzebujemy poprawnego L2 i adresowania po stronie R5.
+2. **R1 musi mieć użyteczną drogę do adresu docelowego.** W naszym przypadku 10.12.0.2 jest w sieci bezpośrednio połączonej.
+3. **Forwarding i wymagane zabezpieczenia muszą dopuścić ruch.** Na vSRX sama poprawna trasa nie omija stref i security policies.
+4. **Odpowiedź musi mieć drogę powrotną.** R2 powinien wiedzieć, jak dotrzeć do źródła 192.0.2.10, a R1 musi odpowiedź poprawnie przekazać.
+
+Nie trzeba znać jeszcze wszystkich poleceń, aby zrozumieć powyższy ciąg. Wyjaśnia on, dlaczego ping w jedną stronę może nie działać pomimo poprawnych tras na routerze środkowym.
+
+### Jak R1 widzi pakiet R5 → R2?
+
+R5 wysyła ICMP Echo Request z source 192.0.2.10 do destination 10.12.0.2. Ramka trafia na R1 przez LAN-A. Router rozpoznaje, że destination 10.12.0.2 nie jest lokalnym adresem R1. To jest potencjalny **tranzyt**.
+
+Na R1 istnieje connected 10.12.0.0/30. Dzięki temu router zna właściwy interfejs wyjściowy. Musi jednak sprawdzić, czy pakiet może zostać przekazany.
+
+W typowej konfiguracji **vSRX w trybie flow-based** sprawdza ruch zgodnie z obowiązującymi security zones i security policies. Dla pakietu R5→R2 potrzebna jest odpowiednia kontrola ruchu w kierunku od strefy przypisanej interfejsowi LAN-A do strefy po stronie R2. To jest **osobny mechanizm od routing table**.
+
+Jeśli ruch zostanie dopuszczony i zostanie utworzona odpowiednia sesja, pakiety należące do tej komunikacji mogą następnie korzystać z informacji zapisanych w stanie flow. Dokładna kolejność przetwarzania pakietów, NAT i filtrów na SRX zależy od trybu i konfiguracji. W rozdziale II nie musimy jej odtwarzać co do pojedynczego etapu wewnętrznego dataplane.
+
+R2 otrzymuje pakiet z destination 10.12.0.2. Jest to już **ruch do samego R2** — w tym miejscu nie jest tranzytem. I to bardzo ważny wniosek: **klasyfikacja pakietu jako tranzytowego lub lokalnego zależy od routera, na którym go obserwujesz**.
+
+### Co z odpowiedzią?
+
+R2 ma wysłać ICMP Echo Reply do 192.0.2.10. Ten adres należy do LAN-A R1, a nie do bezpośredniej sieci R2. R2 potrzebuje zatem trasy powrotnej przez **10.12.0.1**.
+
+Jeśli zapomnisz o tej drodze, R1 może poprawnie dostarczyć Echo Request do R2, lecz odpowiedź nie znajdzie powrotu do R5. Właśnie dlatego diagnoza połączenia powinna zawsze brać pod uwagę **request i reply**.
+
+W większej topologii R5→R6 problem jest jeszcze ciekawszy. W górnym korytarzu przekazywanie mogą wykonywać R1, R2 i R4. Ale droga powrotna z R6 do R5 może przebiegać inaczej, jeżeli trasy są skonfigurowane asymetrycznie. Na firewallach stateful taki wybór może mieć dodatkowe konsekwencje.
+
+### Jak odróżnić awarię routingu od odmowy security policy?
+
+Powiedzmy, że na R1 widzisz aktywną connected do R2 oraz poprawną trasę powrotną do R5. R5 nadal nie może pingować R2. Na vSRX sprawdź nie tylko routing, ale również interfejsy, strefy oraz polityki bezpieczeństwa.
+
+**R1-vSRX — Operational Mode, weryfikacja ruchu tranzytowego R5 → R2**
+
+~~~junos
+show interfaces terse
+show route 10.12.0.0/30 exact
+show route 192.0.2.0/24 exact
+show security zones
+show security policies
+show security flow session source-prefix 192.0.2.10
+~~~
+
+Co dostajemy? Pierwsze trzy polecenia pozwalają ustalić stan portów i tras. Odczyt security zones mówi, do jakich stref przypisane są interfejsy. Security policies pokazują zasady decydujące o dopuszczaniu sesji. Ostatnie polecenie pozwala szukać stanu sesji z danym źródłem.
+
+Nie jest błędem, jeśli nowa sesja **nie powstała**, bo ruch został wcześniej odrzucony. Właśnie dlatego sprawdzamy jednocześnie politykę i routing, a nie tylko obecność wpisu sesji.
+
+### „Ping z routera działa” nie znaczy „pakiet klienta przejdzie”
+
+Załóżmy, że z samego R1 wykonasz polecenie \`ping 10.12.0.2\`. Router będzie wówczas **nadawcą** pakietu. Nie będzie to identyczna komunikacja jak ping R5→R2.
+
+W pierwszym przypadku źródłem może być adres interfejsu R1 10.12.0.1. W drugim źródłem jest 192.0.2.10. Na SRX te dwa pakiety mogą przechodzić różne drogi logiczne i podlegać innym regułom niż nowa sesja tranzytowa między strefami.
+
+To częsta pułapka diagnostyczna. Administrator wpisuje ping na routerze, dostaje odpowiedź i stwierdza: „sieć działa”. W rzeczywistości przetestował tylko ruch wygenerowany lokalnie przez router, a nie zachowanie klienta.
+
+**R1-vSRX — Operational Mode, przykład ruchu wygenerowanego lokalnie**
+
+~~~junos
+ping 10.12.0.2 source 10.12.0.1 count 3
+~~~
+
+Wniosek po tym teście jest wąski, ale przydatny: **R1 może skomunikować się z R2 z podanego source**. Nie wyciągamy z niego dalej idących wniosków o tranzycie.
+
+### Co dokładnie zmienia Ethernet, a co IP?
+
+W typowym routingu bez NAT R1 **nie zmienia** source IP 192.0.2.10 ani destination IP 10.12.0.2. Zmniejsza TTL i przygotowuje odpowiednie nagłówki potrzebne do dalszego przesyłania, w tym nowy nagłówek Ethernet dla segmentu do R2.
+
+Zmiana MAC jest czymś normalnym i oczekiwanym. Router kończy jedną domenę L2 i zaczyna kolejną. Nie wysyła dalej tej samej ramki bez żadnych zmian, tak jak robiłby to zwykły switch przełączający Ethernet w ramach tej samej domeny.
+
+~~~mermaid
+flowchart TD
+  A["R5 generuje Echo Request<br/>SRC 192.0.2.10<br/>DST 10.12.0.2"] --> B["R1 odbiera na LAN-A"]
+  B --> C{"Czy celem jest własny adres R1?"}
+  C -->|nie| D["Lookup trasy i kontrola SRX flow"]
+  D --> E{"Czy można przekazać?"}
+  E -->|tak| F["Nowa ramka Ethernet<br/>do R2; TTL -1"]
+  E -->|nie| X["Odrzucenie / brak sesji"]
+  F --> G["R2 odbiera pakiet<br/>do własnego IP 10.12.0.2"]
+  G --> H["Echo Reply do 192.0.2.10<br/>potrzebna trasa powrotna"]
+~~~
+
+*Rysunek 2.6. Jeden pakiet jest tranzytowy na R1, ale kierowany do samego R2. To logiczny przebieg komunikacji, nie uniwersalna sekwencja funkcji bezpieczeństwa w dataplane.*
+
+**Pytanie kontrolne.** Czy dwa routery z poprawną tablicą routingu zawsze będą mogły pingować się przez trzeci router SRX? Nie. Oprócz tras trzeba uwzględnić strefy, polityki, obsługę lokalnego ICMP na odbiorcy, rozwiązywanie MAC i drogę powrotną. Dopiero pełny test pozwala stwierdzić, co działa.
+
+**Źródła Juniper:** [Traffic Processing on SRX Series](https://www.juniper.net/documentation/us/en/software/junos/flow-packet-processing/topics/topic-map/security-srx-devices-processing-overview.html), [Packet-Based Forwarding](https://www.juniper.net/documentation/us/en/software/junos/flow-packet-processing/topics/topic-map/security-packet-based-forwarding.html), [SRX Security Policies Overview](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html).
+
