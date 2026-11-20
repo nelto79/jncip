@@ -535,3 +535,311 @@ Jest to niezmiernie ważne przy pracy z operatorem. Przypadkowe \`community set\
 Dla dużych organizacji istnieją również **Large Communities** z formatem \`large:global-admin:local-data1:local-data2\`, przydatne m.in. przy 4-bajtowych numerach AS. Zasada jest ta sama: znacznik nabiera znaczenia dopiero wtedy, gdy jakaś polityka go interpretuje.
 
 *Dokumentacja: [Routing Policy Match Conditions](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-match-conditions-in-routing-policy-terms.html), [Walkup Route Filter](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/walkup-route-filter-policy-option-overview.html), [AS Path Regular Expressions](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-as-path-regular-expressions-to-use-as-routing-policy-match-conditions.html).*
+
+---
+
+## 8.7. Routing Policy, Firewall Filter i Security Policy SRX — trzy różne decyzje [A]
+
+Do tej pory pracowaliśmy z prefiksami 172.16.60.0/24 i 172.16.61.0/24. Zajmowaliśmy się tym, **czy R1 ma prawo przyjąć tę informację**, jak ją zmodyfikować i czy przekazać ją dalej. Teraz wysyłamy pierwszy pakiet od R5 do adresu \`172.16.60.1\` na R6.
+
+Jeśli wszystkie trasy są prawidłowe, R5 wyśle pakiet do R1, R1 wybierze ścieżkę przez R2, następnie przejdzie on przez R4 i dotrze do R6. Ale poprawne BGP to dopiero część historii. Na każdym vSRX działa mechanizm ochrony ruchu. Dlatego trzeba odróżnić trzy operacje:
+
+1. **Routing Policy** sprawdza **trasę**. Przykładowo: czy R1 może zaimportować \`172.16.60.0/24\` od R2 i nadać jej LOCAL_PREF 200?
+2. **Stateless Firewall Filter** sprawdza **pakiet**, np. source 172.16.50.1, destination 172.16.60.1, ICMP, kierunek input na R1. Nie ma tabeli sesji, która automatycznie przyznałaby zgodę na odpowiedź.
+3. **Stateful Security Policy SRX** sprawdza **nową sesję** w określonym kierunku między security zones. Dopasowuje m.in. adresy, aplikację i strefy; dla dopuszczonej sesji utrzymuje stan ruchu powrotnego.
+
+Na klasycznym routerze MX czy przełączniku EX/QFX najczęściej interesują Cię pierwsze dwa mechanizmy. Na SRX musisz uwzględnić również trzeci. To dlatego laboratorium na vSRX wymaga osobnego przygotowania stref oraz polityk bezpieczeństwa.
+
+~~~mermaid
+flowchart LR
+    UP["BGP UPDATE od R2/R3"] --> RP["Routing policy R1"]
+    RP --> RIB["RIB: 172.16.60.0/24"]
+    P["Pakiet z R5"] --> FF["Stateless filter<br/>R1 ingress"]
+    FF --> SRX["SRX flow / security policy<br/>dla nowej sesji"]
+    RIB --> F["Lookup / next-hop"]
+    SRX --> F
+    F --> WAN["R2 lub R3 → R4 → R6"]
+~~~
+
+*Rysunek 8.6. Informacja routingu i ruch użytkownika mają różne ścieżki oceny. Schemat przedstawia zależności diagnostyczne, a nie uniwersalną kolejność sprzętowego processingu na każdym wydaniu SRX.*
+
+### Przykład, w którym routing jest całkowicie poprawny, a aplikacja nadal nie działa
+
+Załóżmy, że na R1:
+
+- \`show route 172.16.60.0/24 exact\` pokazuje aktywną trasę BGP przez 10.12.0.2;
+- \`show route forwarding-table destination 172.16.60.1\` wskazuje właściwy next-hop;
+- na wejściu LAN-A pracuje filtr, który odrzuca ICMP z R5.
+
+W takim stanie zmiana BGP LOCAL_PREF niczego nie naprawi. Nawet gdy R1 wybierze inny korytarz, pakiet może zostać zatrzymany **wcześniej**, na interfejsie wejściowym.
+
+Rozważmy też przypadek odwrotny. Filtr stateless na R1 mówi \`accept\`, więc pakiet przechodzi przez jego ocenę. Czy to oznacza, że SRX na pewno pozwoli mu przejść przez router? **Nie.** Jeśli stateful policy \`from-zone LAB to-zone LAB\` lub odpowiednia polityka między innymi strefami nie dopuszcza nowej sesji, nadal możemy zobaczyć drop.
+
+W rozdziale 8 nie wyłączamy globalnie security flow, aby „routing zaczął działać”. Pozostawimy vSRX w normalnym trybie stanowym, a do demonstracji skonfigurujemy ściśle laboratoryjną politykę przepuszczającą potrzebne testy ICMP.
+
+### Ruch tranzytowy i ruch do własnego routera to nie to samo
+
+Gdy R5 pinguje **192.0.2.1**, pakiet jest skierowany do adresu R1. To ruch **host-bound**. Na SRX trzeba uwzględnić \`host-inbound-traffic\` i ewentualny filtr ochronny RE. Natomiast ping R5 → **172.16.60.1** ma charakter **tranzytowy przez R1**, choć ostatecznie kończy się na adresie własnym R6.
+
+To oznacza, że możesz uzyskać następujący zestaw wyników:
+
+- R5 pinguje bramę R1: PASS;
+- R1 pinguje R2 po transit: PASS;
+- R5 nie pinguje 172.16.60.1 na R6: FAIL.
+
+Takie wyniki **nie dowodzą**, że BGP jest zepsuty. Dwa pierwsze testy nie są testem całej ścieżki tranzytowej i obu security policies. Właściwa diagnostyka obejmuje RIB, next-hop, stateless filter, security session, ruch powrotny i lokalne host-inbound na R6.
+
+*Dokumentacja: [Comparison of Routing Policies and Firewall Filters](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-firewall-filters-comparison.html), [SRX Security Policies](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html), [Security Zones](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/topic-map/security-zone-configuration.html).*
+
+---
+
+## 8.8. Jak działa stateless firewall filter — i dlaczego \`count\` może przypadkowo przepuścić ruch [A]
+
+Stateless firewall filter ma znajomą strukturę: \`term\`, \`from\`, \`then\`. Zewnętrznie przypomina routing policy. To podobieństwo jest przydatne przy czytaniu konfiguracji, ale **nie wolno przenosić na niego reguł zakończenia oceny z routing policy**.
+
+Najważniejsza różnica brzmi:
+
+**Jeżeli pakiet przejdzie przez wszystkie termy standardowego firewall filter i żaden go nie dopasuje, zostanie odrzucony przez implicit discard.**
+
+To jest zachowanie bardzo podobne do końca Cisco ACL. Oznacza jednak, że filtr składający się tylko z jednej reguły \`BLOCK-X then discard\` nie „blokuje wyłącznie X”. Dla wszystkich pozostałych pakietów również zabraknie zezwolenia.
+
+### Filtr pozwalający wszystkim oprócz jednego źródła
+
+W naszym diamencie R5 ma prawidłowe adresy źródłowe 172.16.50.1 i 172.16.51.1. W oddzielnym teście dodamy mu tymczasowy adres \`203.0.113.9/32\`, którego R1 nie powinien traktować jako normalnego źródła CE-A.
+
+Najprostszy filtr mógłby zablokować ten konkretny adres, a całą resztę przepuścić do kolejnych etapów.
+
+**R1-vSRX — Configuration Mode, filtr na ruch wchodzący od R5**
+
+~~~junos
+set firewall family inet filter CE-A-IN term BLOCK-TEST-SOURCE from source-address 203.0.113.9/32
+set firewall family inet filter CE-A-IN term BLOCK-TEST-SOURCE then count BLOCKED-TEST
+set firewall family inet filter CE-A-IN term BLOCK-TEST-SOURCE then discard
+set firewall family inet filter CE-A-IN term PERMIT-REMAINDER then count OTHER-TRAFFIC
+set firewall family inet filter CE-A-IN term PERMIT-REMAINDER then accept
+set interfaces ge-0/0/2 unit 0 family inet filter input CE-A-IN
+~~~
+
+Czytamy go tak: pakiet przychodzi od R5 do R1 na interfejs \`ge-0/0/2.0\`. Jeśli ma testowy source, zwiększamy licznik i odrzucamy. Każdy inny pakiet pasuje do termu końcowego i przechodzi dalej — do zwykłego routingu i ewentualnie do security flow.
+
+To jest przykład **stateless filter**, nie stateful security policy. Nie założyliśmy nim żadnej sesji TCP ani nie przyznaliśmy automatycznej zgody na return traffic.
+
+### Dlaczego samo \`then count\` nie oznacza „sprawdź następny term”?
+
+Teraz ważniejszy przypadek. Załóżmy, że ktoś chce zliczać wszystkie pakiety ICMP na wejściu R1, ale niżej zostawić szczegółowe reguły blokujące. Pisze:
+
+**R1-vSRX — Configuration Mode, BŁĘDNY przykład do analizy, nie przypinać do interfejsu**
+
+~~~junos
+set firewall family inet filter BAD-COUNT term COUNT-ICMP from protocol icmp
+set firewall family inet filter BAD-COUNT term COUNT-ICMP then count ICMP-TOTAL
+set firewall family inet filter BAD-COUNT term BLOCK-TEST from source-address 203.0.113.9/32
+set firewall family inet filter BAD-COUNT term BLOCK-TEST then discard
+~~~
+
+Administrator myśli: „Pierwszy term tylko policzy, a potem drugi zablokuje nieprawidłowe źródło”. W standardowym Junos firewall filter jest inaczej: **pasujący term z akcją nieterminującą, taką jak \`count\`, ale bez jawnej akcji sterującej, dostaje domyślną akcję terminalną \`accept\`**. Pakiet ICMP ze źródła 203.0.113.9 pasuje już do pierwszego termu, zostaje zliczony i zaakceptowany. Drugi term nie zobaczy go wcale.
+
+Jeśli w danym typie standardowego filtra musisz **policzyć i kontynuować**, odpowiednią konstrukcją jest \`then next term\`. Trzeba jednak sprawdzić, czy konkretny ASIC/model/rodzina i wydanie Junos wspierają wymaganą kombinację akcji.
+
+**R1-vSRX — Configuration Mode, wersja poprawiona do analizy**
+
+~~~junos
+set firewall family inet filter COUNT-THEN-CHECK term COUNT-ICMP from protocol icmp
+set firewall family inet filter COUNT-THEN-CHECK term COUNT-ICMP then count ICMP-TOTAL
+set firewall family inet filter COUNT-THEN-CHECK term COUNT-ICMP then next term
+set firewall family inet filter COUNT-THEN-CHECK term BLOCK-TEST from source-address 203.0.113.9/32
+set firewall family inet filter COUNT-THEN-CHECK term BLOCK-TEST then discard
+set firewall family inet filter COUNT-THEN-CHECK term PERMIT-REST then accept
+~~~
+
+Zauważ różnicę wobec routing policy. W routing policy \`then local-preference 200\` bez \`accept\` zwykle nie kończy oceny. W standardowym firewall filter \`then count\` bez \`next term\` może zakończyć ocenę **akceptacją pakietu**.
+
+To jeden z najważniejszych mechanizmów całego rozdziału, bo składnia wygląda podobnie, lecz końcowe zachowanie jest odmienne.
+
+### Jakie kryteria i akcje warto rozpoznawać od razu?
+
+| Obszar | Przykłady | Do czego używamy |
+|---|---|---|
+| Adresacja | \`source-address\`, \`destination-address\`, \`source-prefix-list\` | Filtrowanie ruchu z określonych sieci |
+| Protokół | \`protocol tcp\`, \`udp\`, \`icmp\`, \`ospf\` | Dopasowanie IP protocol / L4 |
+| Port | \`source-port\`, \`destination-port\`, \`port\` | SSH, BGP, DNS, HTTPS itd. |
+| Pola dodatkowe | \`tcp-established\`, \`icmp-type\`, \`dscp\` | Szczegółowa kontrola i klasyfikacja |
+| Akcje terminalne | \`accept\`, \`discard\`, \`reject\` | Zgoda lub odrzucenie |
+| Monitorowanie | \`count\`, \`log\`, \`syslog\` | Liczniki i diagnostyka |
+| Przepływ | \`next term\`, \`routing-instance\` | Kontynuacja oceny lub FBF |
+| Policing / CoS | \`policer\`, \`forwarding-class\` | Rate limiting, klasyfikacja |
+
+\`port bgp\` w stateless filter dopasowuje port po odpowiedniej stronie pakietu (source lub destination), co jest przydatne dla sesji TCP/179; \`destination-port bgp\` nie jest równoważne dla obu kierunków komunikacji. Podobnie \`tcp-established\` nie jest pamięcią sesji — zwykle opiera się na flagach TCP, a nie na pełnym stanie trójstronnego handshake.
+
+Na platformach EX/QFX/MX różnią się możliwości ASIC i dostępne zasoby do instalacji filtrów, a na vSRX dochodzi ścieżka przetwarzania sesji. Nie wszystkie akcje można dowolnie połączyć we wszystkich rodzinach interfejsów; nie zakładaj, że przykład znaleziony dla MX będzie bez zmian działał na każdym EX czy vSRX.
+
+~~~mermaid
+flowchart TD
+  IN["Pakiet od R5 wchodzi na R1"] --> T1{"source 203.0.113.9?"}
+  T1 -->|"tak"| D["count BLOCKED-TEST<br/>discard"]
+  T1 -->|"nie"| T2["PERMIT-REMAINDER<br/>count OTHER<br/>accept"]
+  T2 --> OK["Dalszy routing / security"]
+~~~
+
+*Rysunek 8.7. Odrzucenie przez stateless filter nie usuwa tras BGP z RIB. Po odrzuceniu pakietu żadna zmiana BGP export nie będzie jego naprawą.*
+
+*Dokumentacja: [Stateless Firewall Filter Components](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-components.html), [Guidelines for Configuring Firewall Filters](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-stateless-guidelines-for-configuring.html).*
+
+---
+
+## 8.9. Filtr na \`lo0.0\` — ochrona Routing Engine przed skanowaniem i przeciążeniem [A]
+
+Na Cisco znasz ideę CoPP: chronić CPU/control plane przed ruchem, który nie musi być przekazywany do procesów routera. Junos oferuje ochronę ruchu przeznaczonego dla Routing Engine między innymi przez **stateless firewall filter na \`lo0.0\`**.
+
+W naszym diamencie R1 utrzymuje eBGP do trzech sąsiadów: **R5 192.0.2.10, R2 10.12.0.2, R3 10.13.0.2**. R1 może również potrzebować SSH z sieci OOB, synchronizacji NTP i odpowiedzi DNS/SNMP. Jeśli dołożymy filtr na \`lo0.0\` zezwalający tylko na ICMP, ale zapomnimy o BGP, możemy utracić wszystkie trzy sesje po czasie potrzebnym na wygaśnięcie timera.
+
+Dlatego ochrony RE nie projektujemy przez skopiowanie kilku reguł z internetu. Najpierw spisujemy **kto ma prawo łączyć się z routerem**, jakimi protokołami i skąd. To są wymagania dla filtra, a nie odwrotnie.
+
+### \`apply-path\` — prefix-list tworzona z rzeczywistych sąsiadów BGP
+
+W klasycznej konfiguracji miałbyś w filtrze wpisy dla R5, R2 i R3. Problem pojawia się za kilka miesięcy, gdy dodajesz kolejnego peera BGP, ale zapominasz zmienić ochronę RE. Junos może wygenerować listę adresów peerów bezpośrednio z konfiguracji BGP przez \`apply-path\`.
+
+**R1-vSRX — Configuration Mode, dynamiczna lista sąsiadów BGP**
+
+~~~junos
+set policy-options prefix-list BGP-PEERS apply-path "protocols bgp group <*> neighbor <*>"
+~~~
+
+Na R1 rozwinięcie tej listy powinno zawierać sąsiadów ze wszystkich właściwych grup BGP, m.in. 192.0.2.10, 10.12.0.2 i 10.13.0.2. To nie jest lista stworzona przez scanning sieci: \`apply-path\` czyta **aktualną konfigurację**, a nie odkrywa aktywnych hostów.
+
+**R1-vSRX — Operational Mode, sprawdzenie rozwinięcia \`apply-path\`**
+
+~~~junos
+show configuration policy-options prefix-list BGP-PEERS | display inheritance
+show configuration protocols bgp | display set
+~~~
+
+Jeżeli nowy peer nie pojawia się w rozwinięciu, sprawdź najpierw konfigurację BGP i ścieżkę wzorca. Nie zakładaj, że wszystkie adresy BGP w całym urządzeniu leżą pod tym samym \`protocols bgp\`: routing instances i logical systems wymagają uwzględnienia odpowiedniej hierarchii.
+
+### Prosty filtr ochronny — konstrukcja do review, nie gotowy baseline produkcyjny
+
+Pokażmy samą ideę. Mamy zezwolić na BGP wyłącznie od sąsiadów, na ICMP do sprawdzenia łączności, a wszystko inne odrzucać. **Nie przypinamy tego wzorca automatycznie na działającym R1**, bo nie znamy jeszcze adresacji OOB/SSH, NTP, DNS, monitoringu, a także wszystkich procesów host-bound i service permissions SRX.
+
+**R1-vSRX — Configuration Mode, SZKIC zasad do weryfikacji przed przyłożeniem**
+
+~~~junos
+set firewall family inet filter PROTECT-RE term ALLOW-BGP from source-prefix-list BGP-PEERS
+set firewall family inet filter PROTECT-RE term ALLOW-BGP from protocol tcp
+set firewall family inet filter PROTECT-RE term ALLOW-BGP from port bgp
+set firewall family inet filter PROTECT-RE term ALLOW-BGP then count RE-BGP-OK
+set firewall family inet filter PROTECT-RE term ALLOW-BGP then accept
+set firewall family inet filter PROTECT-RE term ALLOW-ICMP from protocol icmp
+set firewall family inet filter PROTECT-RE term ALLOW-ICMP then count RE-ICMP-OK
+set firewall family inet filter PROTECT-RE term ALLOW-ICMP then accept
+set firewall family inet filter PROTECT-RE term DENY-OTHER then count RE-DROPPED
+set firewall family inet filter PROTECT-RE term DENY-OTHER then discard
+~~~
+
+Nie ma tu reguły \`ALLOW-SSH\` ani odpowiedzi na pytania dotyczące NTP, DNS i pozostałych usług. Dlatego przykład jest **celowo niekompletny do wdrożenia na porcie zarządzanym zdalnie**. W głównym labie będziemy go analizować i ewentualnie testować tylko po zidentyfikowaniu wszystkich niezbędnych wyjątków, z konsolą/OOB i \`commit confirmed\`.
+
+Na vSRX obowiązuje dodatkowo \`security zones ... host-inbound-traffic\` — pozwolenie w filtrze \`lo0\` **nie zastępuje** odpowiednich uprawnień host-bound w security zones. Sam fakt, że firewall filter ma słowo \`accept\`, nie oznacza, że proces SSH lub BGP automatycznie otrzyma pakiet w każdej konfiguracji SRX.
+
+### Czego nie pomijać na liście dozwolonych usług?
+
+Przed review filtra trzeba sprawdzić działające usługi routera. Jeżeli R1 ma SSH z OOB, BGP do R5/R2/R3, OSPF na innych segmentach, NTP, SNMP, DNS, TACACS+/RADIUS albo BFD, każda funkcja może wymagać odpowiednich reguł zależnych od kierunku. Nie da się stworzyć „uniwersalnego filtra produkcyjnego” bez takiej inwentaryzacji.
+
+Policing ICMP może być bardzo przydatny, ale w sieci warto zostawić niezbędne komunikaty błędów, w tym istotne dla MTU/path diagnostics. Zbyt szerokie \`discard\` na RE może powodować awarie, których objawy wyglądają jak problemy routingu.
+
+**R1-vSRX — Operational Mode, monitoring ochrony RE po poprawnym, bezpiecznym wdrożeniu**
+
+~~~junos
+show firewall filter PROTECT-RE
+show firewall
+show bgp summary
+show security zones
+show log messages | last 30
+~~~
+
+Jeżeli stosujesz \`then log\` albo \`syslog\`, również monitoruj wpływ ilości logów na urządzenie. \`log\` i \`syslog\` nie muszą mieć identycznej implementacji na wszystkich platformach, a niekontrolowane logowanie intensywnego ruchu host-bound może samo stać się problemem operacyjnym.
+
+*Dokumentacja: [Applying Firewall Filters](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-stateless-guidelines-for-applying.html), [Firewall Filter Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-overview.html), [SRX Security Zones](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/topic-map/security-zone-configuration.html).*
+
+---
+
+## 8.10. uRPF — router sprawdza, czy źródło pakietu ma sens [A]
+
+Routing zwykle kojarzy się z destination IP. Router sprawdza, dokąd wysłać pakiet. W sieciach wielooperatorskich dochodzi jednak inne pytanie: **czy źródło pakietu wygląda wiarygodnie z perspektywy interfejsu, na którym go otrzymaliśmy?**
+
+Do takiej oceny służy **Unicast Reverse Path Forwarding (uRPF)**. Router korzysta z informacji o drodze **do źródła**, a nie do celu pakietu.
+
+W naszej topologii R1 przyjmuje pakiet od R5 na LAN-A. Normalny ruch R5 może mieć source \`172.16.50.1\`. Jeśli R1 zna trasę do \`172.16.50.0/24\` przez tego właśnie R5, source wygląda spójnie z topologią. Ale jeżeli R5 wygeneruje izolowany testowy pakiet ze źródłem \`203.0.113.9\`, którego R1 w ogóle nie zna lub zna przez inną stronę sieci, może zostać odrzucony przez uRPF.
+
+### Strict: czy pakiet przyszedł właściwym wejściem?
+
+W **strict uRPF** test polega na sprawdzeniu, czy kwalifikująca się droga powrotna do source IP wskazuje ten sam interfejs, na którym pakiet przyszedł (z uwzględnieniem szczegółów ECMP i wariantu platformowego). W nieskomplikowanej sieci klienckiej typu single-homed jest to silny mechanizm antyspoofingowy.
+
+**R1-vSRX — Configuration Mode, wariant strict na ingress od R5 — tylko przy potwierdzonym wsparciu**
+
+~~~junos
+set interfaces ge-0/0/2 unit 0 family inet rpf-check
+~~~
+
+W naszym diamencie działałoby to sensownie dla prefiksów CE-A, których droga powrotna prowadzi przez R5. Nie znaczy to jednak, że strict można bez analizy włączyć na wszystkich sześciu interfejsach.
+
+### Kiedy strict może zatrzymać legalny ruch?
+
+Załóżmy, że R1 preferuje drogę do **172.16.61.0/24** przez dolny R3. R1 otrzymuje jednak legalny pakiet ze źródłem **172.16.61.1** na górnym interfejsie od R2. Jeżeli strict uRPF ocenia reverse path tylko przez najlepszą aktywną drogę, to do source 172.16.61.1 wskazuje **R3**, nie R2. Pakiet może zostać odrzucony pomimo tego, że pochodzi z rzeczywistej sieci R6.
+
+To jest typowe zjawisko w topologiach z routingiem asymetrycznym. Z punktu widzenia biznesu droga pakietu jest poprawna. Z punktu widzenia strict uRPF nie odpowiada jednak najlepszej drodze powrotnej.
+
+### Loose: czy w ogóle istnieje droga do źródła?
+
+W **loose uRPF** nie wymagamy zgodności interfejsu wejściowego z reverse path. Wystarczy, że istnieje odpowiednia dopuszczalna droga do źródła według zasad danej implementacji. To może pomagać na łączach wielooperatorskich, ale nie jest równoważne ścisłej ochronie na pojedynczym interfejsie klienta.
+
+**R1-vSRX — Configuration Mode, alternatywa loose — nie wprowadzać razem ze strict jako dwóch niezależnych ustawień**
+
+~~~junos
+set interfaces ge-0/0/0 unit 0 family inet rpf-check mode loose
+~~~
+
+Jest jeszcze istotny niuans: jeśli router ma aktywną default route \`0.0.0.0/0\`, różne modele i wydania mogą inaczej traktować jej przydatność dla loose uRPF. Nie wyciągaj z samej obecności default wniosku, że mechanizm automatycznie przyjmie wszystkie możliwe źródła. Sprawdź zachowanie sprzętu i konkretną dokumentację.
+
+### Feasible paths: kiedy sama aktywna droga nie wystarcza
+
+Na poziomie Specialist/Professional spotkasz również **feasible-paths**. To wariant, w którym kontrola reverse path może uwzględnić inne wykonalne ścieżki niż pojedyncza aktywna droga z FIB. Jest przydatny w pewnych asymetrycznych sieciach, lecz nie jest uniwersalnym lekarstwem na wszystkie problemy strict uRPF.
+
+**R1-vSRX — Configuration Mode, schemat funkcji do weryfikacji modelu i wersji**
+
+~~~junos
+set routing-options forwarding-table unicast-reverse-path feasible-paths
+~~~
+
+Zanim włączysz tę opcję, sprawdź zgodność z routing instances, FBF i ECMP. Szczególnie na vSRX nie można bez testu zakładać, że zachowanie będzie identyczne z fizycznym MX.
+
+### Fail-filter i wyjątki, np. DHCP
+
+Stateless \`fail-filter\` może w niektórych implementacjach pomóc obsłużyć pakiety, które nie zdały kontroli uRPF, ale z konkretnego powodu trzeba je przepuścić. Klasyczny przykład to DHCPDISCOVER ze source \`0.0.0.0\`: klient nie ma jeszcze poprawnego adresu ani normalnej drogi powrotnej.
+
+Nie będziemy automatycznie łączyć pełnego filtra DHCP z FBF i BGP na wszystkich R1–R6. To osobne ćwiczenie. Przy produkcyjnym projekcie należy zweryfikować obsługę \`fail-filter\` i dokładną składnię na swojej platformie, a także to, czy DHCP relay/host-bound traffic jest faktycznie obecny w danym punkcie sieci.
+
+~~~mermaid
+flowchart TD
+  IN["Pakiet na ingress, source = X"] --> M{"Tryb uRPF?"}
+  M -->|"strict"| S{"Reverse path do X<br/>akceptuje ingress?"}
+  M -->|"loose"| L{"Istnieje dopuszczalna<br/>droga do X?"}
+  S -->|"tak"| OK["Dalszy processing"]
+  L -->|"tak"| OK
+  S -->|"nie"| F["uRPF failure / opcjonalny fail-filter"]
+  L -->|"nie"| F
+~~~
+
+*Rysunek 8.8. Strict porównuje drogę powrotną z interfejsem, loose koncentruje się na osiągalności źródła. Schemat nie modeluje każdej implementacji ECMP, FBF i PFE.*
+
+**R1-vSRX — Operational Mode, co sprawdzić, gdy uRPF odrzuca ruch z 172.16.61.1**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+show route 172.16.61.1
+show route forwarding-table destination 172.16.61.1
+show interfaces ge-0/0/0 extensive
+show configuration routing-options forwarding-table | display set
+~~~
+
+Pamiętaj, że tutaj pytasz o drogę **do źródła 172.16.61.1**, nie o drogę do destination IP konkretnej aplikacji. To odróżnia uRPF od zwykłego routingu i od BGP export policy.
+
+*Dokumentacja: [Understanding Unicast RPF](https://www.juniper.net/documentation/us/en/software/junos/security-services/topics/topic-map/interfaces-configuring-unicast-rpf.html), [rpf-check CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/rpf-check-edit-interfaces.html).*
