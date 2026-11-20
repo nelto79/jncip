@@ -118,7 +118,7 @@ W Junos OS **ZAPOMNIJ o perspektywie interfejsu** przy pisaniu polityk routingu!
 
 ### Istotny haczyk poziomu Specialist/Professional: Eksport widzi TYLKO trasy AKTYWNE!
 
-Wyobraź sobie sytuację z prawdziwej produkcji (tę samą, która wywróciła niejedną migrację Cisco → Juniper). Twój router brzegowy R1 zna podsieć `10.50.0.0/24` z **dwóch** źródeł jednocześnie:
+W osobnym wariancie DIAMOND-6R uruchamiasz OSPF w rdzeniu obok BGP, tylko po to, by pokazać konkurencję dwóch protokołów. R1 poznaje ten sam prefiks z dwóch źródeł. Router brzegowy zna podsieć `172.16.60.0/24` z **dwóch** źródeł jednocześnie:
 
 1. Z wewnętrznego **OSPF** (w Junos preferencja = **10**).
 
@@ -126,7 +126,7 @@ Wyobraź sobie sytuację z prawdziwej produkcji (tę samą, która wywróciła n
 
 Która trasa wygrywa i zostaje **aktywną trasą** (oznaczoną gwiazdką `*` w `show route`) w `inet.0`? Oczywiście **OSPF** (bo $10 < 170$). Trasa z BGP pozostaje w tablicy `inet.0` jako **nieaktywna (inactive)**.
 
-Teraz R1 ma rozgłosić `10.50.0.0/24` do drugiego operatora ISP-2 po BGP. Domyślna polityka eksportu BGP (albo Twoja własna polityka z warunkiem `from protocol bgp`) sprawdza tablicę `inet.0`. I co się dzieje?! **R1 w ogóle NIE rozgłosi `10.50.0.0/24` do ISP-2!**
+Teraz R1 ma rozgłosić `172.16.60.0/24` do drugiego operatora ISP-2 po BGP. Domyślna polityka eksportu BGP (albo Twoja własna polityka z warunkiem `from protocol bgp`) sprawdza tablicę `inet.0`. I co się dzieje?! **R1 w ogóle NIE rozgłosi `172.16.60.0/24` do ISP-2!**
 
 Dlaczego? Ponieważ **polityka `export` w Junos OS domyślnie ocenia WYŁĄCZNIE trasy AKTYWNE w tablicy RIB**! Skoro aktywną trasą w `inet.0` jest OSPF (a nie BGP), to:
 
@@ -134,7 +134,7 @@ Dlaczego? Ponieważ **polityka `export` w Junos OS domyślnie ocenia WYŁĄCZNIE
 
 * polityka `from protocol bgp` też jej nie dopasuje, bo aktywny protokół dla tego prefiksu to `ospf`!
 
-Jak rozwiązać ten problem w Junos? Masz dwie świadome drogi: albo jawnie wyeksportować ten prefiks z protokołu `ospf` (np. `from protocol ospf; from route-filter 10.50.0.0/24 exact; then accept`), albo — jeśli chcesz, aby BGP rozgłosił swoją własną, nieaktywną ścieżkę BGP wraz z jej oryginalnym `AS_PATH` — włączyć w konfiguracji BGP specjalną opcję **`set protocols bgp advertise-inactive`**.
+Jak rozwiązać ten problem w Junos? Masz dwie świadome drogi: albo jawnie wyeksportować ten prefiks z protokołu `ospf` (np. `from protocol ospf; from route-filter 172.16.60.0/24 exact; then accept`), albo — jeśli chcesz, aby BGP rozgłosił swoją własną, nieaktywną ścieżkę BGP wraz z jej oryginalnym `AS_PATH` — włączyć w konfiguracji BGP specjalną opcję **`set protocols bgp advertise-inactive`**.
 
 Spójrz na poniższy diagram, który utrwala Złoty Kompas Junosa raz na zawsze.
 
@@ -297,8 +297,8 @@ To jest mały detal składniowy, który robi ogromną różnicę:
 * **Różne rodzaje kryteriów `from` w tym samym termie = logiczne I (AND).**
   Przykład:
   `set policy-options policy-statement MY-POL term T1 from protocol static`
-  `set policy-options policy-statement MY-POL term T1 from route-filter 192.0.2.0/24 exact`
-  Aby ten term zadziałał, trasa musi być **jednocześnie** statyczna **I** mieć dokładnie prefiks `192.0.2.0/24`.
+  `set policy-options policy-statement MY-POL term T1 from route-filter 172.16.62.0/24 exact`
+  Aby ten term zadziałał, trasa musi być **jednocześnie** statyczna **I** mieć dokładnie prefiks `172.16.62.0/24`.
 
 * **Brak sekcji `from`:** Oznacza „dopasuj WSZYSTKO” (idealne dla końcowego termu `term DENY-ALL then reject` albo dla globalnego `next-hop self`).
 
@@ -499,7 +499,7 @@ Każdy bezstanowy Firewall Filter ma na samym końcu niewidzialny term: **`then 
 
 R1 ma trzech sąsiadów eBGP: R5 `192.0.2.10`, R2 `10.12.0.2` i R3 `10.13.0.2`. Ochrona Routing Engine musi uwzględnić dokładnie te źródła oraz administracyjny dostęp OOB, którego adresy trzeba odczytać z rzeczywistego środowiska.
 
-Wiesz już, jak podpiąć filtr na porcie tranzytowym (`set interfaces ge-0/0/2 unit 0 family inet filter input MOJ-FILTR`). Teraz poznasz najważniejszy, absolutnie obowiązkowy wzorzec architektoniczny w świecie Juniper Networks — coś, co każdy doświadczony inżynier wdraża w dniu pierwszym na każdym MX, EX, QFX i SRX: **ochronę Routing Engine za pomocą filtra na interfejsie `lo0.0`**.
+Wiesz już, jak podpiąć filtr na porcie tranzytowym (`set interfaces ge-0/0/2 unit 0 family inet filter input MOJ-FILTR`). Teraz poznasz częsty element ochrony control plane w sieciach z Junos, którego dokładne zastosowanie zależy od platformy i roli routera: **ochronę Routing Engine za pomocą filtra na interfejsie `lo0.0`**.
 
 ### Dlaczego filtr na `lo0.0` jest odpowiednikiem Cisco CoPP?
 
@@ -513,9 +513,9 @@ To prowadzi do genialnego zachowania: **filtr `input` na `lo0.0` jest typowym sp
 
 * Pakiet BGP od sąsiada kierowany na adres `10.12.0.1` na `ge-0/0/0.0`? Przejdzie przez filtr `lo0.0 input`!
 
-* Pakiet użytkownika lecący tranzytem z PC-A do PC-B przez `ge-0/0/2.0` → `ge-0/0/0.0`? **NIE** przechodzi przez filtr `lo0.0`, bo nie jest skierowany do RE!
+* Pakiet kierowany tranzytem z R5 (source `172.16.50.1`) do R6 (`172.16.60.1`) przez R1? **NIE** przechodzi przez filtr `lo0.0`, bo nie jest skierowany do RE!
 
-> **KRYTYCZNA PUŁAPKA (Samobójstwo na `lo0.0`!):** Skoro filtr na `lo0.0` ma na końcu niejawny `discard` i kontroluje KAŻDY pakiet trafiający do mózgu routera, pomyśl, co się stanie, jeśli wpuścisz w nim tylko SSH i zapomnisz dopisać:
+> **KRYTYCZNA PUŁAPKA (Ryzyko odcięcia control plane na `lo0.0`!):** Skoro filtr na `lo0.0` ma na końcu niejawny `discard` i kontroluje KAŻDY pakiet trafiający do mózgu routera, pomyśl, co się stanie, jeśli wpuścisz w nim tylko SSH i zapomnisz dopisać:
 >
 > * swoich sąsiadów **BGP** (TCP 179),
 > * protokołu **OSPF** (IP proto 89),
@@ -603,7 +603,7 @@ Po dodaniu R5, R2 lub R3 do konfiguracji BGP lista `apply-path` może zaktualizo
 
 Załóżmy, że R5 generuje ruch do usług R6 ze źródła `172.16.50.1`. R1 może zweryfikować, czy trasa powrotna do tego źródła prowadzi przez LAN-A. Inaczej będzie z ruchem przychodzącym od R2, gdy R1 preferuje drogę powrotną przez R3 — i właśnie w tym miejscu strict uRPF potrafi odrzucić legalny pakiet.
 
-Wyobraź sobie atak typu **IP Source Spoofing** albo odbity atak DDoS (DNS/NTP Amplification). Złośliwy serwer w sieci klienta (podłączonej do Twojego portu `ge-0/0/2.0`, gdzie legalnie żyje wyłącznie podsieć `192.0.2.0/24`) zaczyna wysyłać miliony pakietów z podrobionym adresem źródłowym `8.8.8.8` albo adresem serwera bankowego ofiary!
+Wyobraź sobie, że router klienta R5 podłączony do R1 zaczyna wysyłać testowy pakiet z podrobionym source `203.0.113.9` zamiast uzgodnionego `172.16.50.1`. Na wejściu R1 jest `ge-0/0/2.0`, ale poprawne źródła nie ograniczają się do bezpośredniego `192.0.2.0/24`: za R5 mogą leżeć również ogłaszane po BGP sieci `172.16.50.0/24` i `172.16.51.0/24`. uRPF pozwala sprawdzić drogę powrotną także do takich źródeł.
 
 Standardowy router IP patrzy wyłącznie na **Destination IP** — więc radośnie wyśle podrobiony pakiet w świat. Mógłbyś oczywiście pisać ręczne bezstanowe filtry ACL na setkach portów klienckich, wpisując w każdym z nich dozwoloną podsieć źródłową... ale przy każdej zmianie podsieci lub migracji routingu ręczne ACL-e zamienią się w koszmar utrzymaniowy.
 
@@ -703,7 +703,7 @@ admin@R1-vSRX> show firewall filter RPF-FAIL-FILTER
 
 Kiedy R5 zgłasza „nie widzę sieci R6”, nie zaczynamy od resetu BGP. Na R6 sprawdzamy export, na R4 odbiór i przekazywanie do R2/R3, na R1 import i wybór ścieżki, a na końcu reklamę do R5. `test policy` pomaga w analizie logiki, ale nie zastępuje tej sekwencji dowodów.
 
-Zanim wejdziemy w zaawansowane zastosowania w OSPF, IS-IS i BGP, zapoznaj się z **najbardziej praktycznych komend do weryfikacji routing policy w Junos OS**: **`test policy`**.
+Zanim wejdziemy w zaawansowane zastosowania w OSPF, IS-IS i BGP, poznaj **jedną z praktyczniejszych komend do sprawdzania routing policy w Junos OS**: **`test policy`**.
 
 W Cisco IOS, jeśli napisałeś 50-liniową `route-map` i chciałeś sprawdzić, co ona właściwie zrobi z prefiksami w tablicy routingu, najczęściej analizowałeś ją ręcznie albo testowałeś wynik przy konkretnym sąsiedzie!
 
@@ -786,7 +786,7 @@ Zatrzymaj go, zanim straci godzinę na szukaniu, dlaczego jego polityka nie dzia
 
 4. **A co robi OSPF `export` policy?** To juniperski odpowiednik Cisco `redistribute`! Pobiera aktywne trasy z `inet.0` (np. `static`, `direct`, `bgp`) i wstrzykuje je do OSPF jako zewnętrzne LSA (w typowym wariancie E2). Metrykę, typ external i tag ustal świadomie w polityce, zamiast polegać na przypadkowej wartości domyślnej.
 
-> **Pułapka na Cisco-engineera (Jak rozgłosić podsieć LAN do OSPF?):** Jeśli masz na routerze podsieć `192.0.2.0/24` na porcie `ge-0/0/2.0` i chcesz, żeby znali ją sąsiedzi OSPF, **NIE** rób tego polityką `export` dla `from protocol direct`, bo zamienisz swoją czystą podsieć wewnętrzną w brzydką trasę zewnętrzną **E2 (LSA Type 5, preferencja 150)**! Zamiast tego dodaj interfejs do OSPF jako pasywny: `set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 passive`. Wtedy trafi do OSPF jako natywna trasa wewnętrzna (**LSA Type 1, preferencja 10**)!
+> **Rozróżnij nativne OSPF od redystrybucji:** W osobnym wariancie, gdzie R1–R4 działają na OSPF, chcesz ogłosić sieć `192.0.2.0/24` z portu R1 `ge-0/0/2.0`. Nie musisz robić jej `export` jako zewnętrznej trasy E2. Możesz dodać port do OSPF jako pasywny: `set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 passive`. Wtedy prefiks jest związany z natywną informacją o topologii OSPF, a nie z redystrybucją. To **wariant alternatywny**, a nie zmiana działającego na tym samym łączu eBGP do R5.
 
 **Urządzenie: R1-vSRX — Configuration Mode**
 
