@@ -2,6 +2,8 @@
 
 **Status: PLANNED — opis ćwiczeń; jeszcze nie wygenerowano .unl i nie wykonano runtime w EVE-NG.**
 
+**Aktualizacja 2026-11-20:** [Rozdział III v3](../../docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md) prowadzi początkującego przez trzy poziomy: 1× vSRX (candidate, active, rollback, confirmed), 2× vSRX z dwiema sesjami operatorów na R1 (shared/private, import), a na końcu odczyty i nieszkodliwe zmiany opisów R1/R4 w DIAMOND-6R. To **rozszerzenie scenariuszy dydaktycznych**, nie twierdzenie, że wygenerowano nową topologię .unl ani że testy runtime zostały wykonane. Sama nauka commit nadal wymaga fizycznie tylko jednego vSRX i dwóch sesji.
+
 Powiązania:
 - [Pełny rozdział 3](../../docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md) — od początku 3.1 do 3.END;
 - [Unified Blueprint 3.1–3.11](../../docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md);
