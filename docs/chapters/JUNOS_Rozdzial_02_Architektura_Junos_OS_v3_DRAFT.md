@@ -114,3 +114,202 @@ Jeżeli dopiero zaczynasz Junos, nie musisz teraz znać wszystkich modeli Junipe
 
 **Źródła Juniper:** [Junos OS Architecture Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-architecture.html), [Routing Engine Components and Processes](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-components-and-processes.html), [Junos OS Evolved Differences](https://www.juniper.net/documentation/us/en/software/junos/overview-evo/topics/concept/evo-top-differences.html).
 
+
+---
+
+## 2.2. Control plane i forwarding plane — dwie różne odpowiedzi na problem sieciowy [A]
+
+### Skąd router wie, gdzie jest sieć, a skąd wie, jak wysłać następny pakiet?
+
+Wróćmy do R1 i R2. Łączy je sieć **10.12.0.0/30**. R1 ma adres 10.12.0.1, a R2 — 10.12.0.2. To jedno fizyczne połączenie między dwoma urządzeniami.
+
+Kiedy administrator nada R1 adres 10.12.0.1/30, router wie, że adres 10.12.0.2 znajduje się na tej samej podsieci. Później, gdy R5 wyśle do R2 pakiet przez R1, R1 będzie mógł wybrać port prowadzący do R2.
+
+Zauważ, że występują tu dwa różne momenty. W pierwszym **powstaje wiedza o drodze**. W drugim **przychodzi pakiet i trzeba tej wiedzy użyć**. To właśnie granica między control plane a forwarding plane.
+
+**Control plane** to funkcje sterujące routerem, czyli między innymi uczenie się tras, ustalanie sąsiedztw, wykrywanie zmian topologii i przygotowywanie odpowiednich tablic. W prostym labie wystarczy adres interfejsu. W dużej sieci informacje mogą pochodzić z OSPF lub BGP.
+
+**Forwarding plane**, nazywany również *data plane*, odpowiada za obsługę pakietów wchodzących na porty, wyszukiwanie drogi w odpowiedniej tablicy oraz ich przekazywanie na port wyjściowy. Na SRX towarzyszą temu operacje bezpieczeństwa i obsługa sesji, których dokładnej kolejności nie musisz jeszcze znać.
+
+Możemy wydzielić także **management plane**: dostęp SSH, konfigurację, logowanie administratorów, monitoring, zarządzanie oprogramowaniem. To funkcjonalnie odrębny obszar, choć na wielu platformach jest wykonywany przez procesy RE. Nie traktuj go jako trzeciego, identycznego sprzętowo silnika obok RE i PFE.
+
+### Dlaczego ping do routera nie dowodzi, że użytkownicy mogą przez niego pracować?
+
+Załóżmy, że R5 potrafi wykonać ping do R1, na adres **192.0.2.1**. To dobra wiadomość, ale bardzo ograniczona. Ping dotarł do **samego R1** i ten odpowiedział.
+
+Jeśli R5 próbuje pingować **10.12.0.2**, czyli R2, sytuacja jest inna. Pakiet najpierw trafia na R1, ale jego celem **nie jest R1**. R1 musi przekazać go dalej. Nawet gdy posiada prawidłową trasę, SRX może odmówić przekazania, jeżeli dla tej komunikacji nie ma odpowiedniej polityki bezpieczeństwa.
+
+Zatem dwa bardzo podobne testy odpowiadają na dwa różne pytania:
+
+| Test | O czym mówi? | Czego jeszcze nie dowodzi? |
+|---|---|---|
+| R5 → 192.0.2.1 | R1 odpowiada na ICMP do własnego adresu, z danej ścieżki | Że R1 przekazuje ruch do R2 |
+| R5 → 10.12.0.2 | R1 może przekazać pakiet do R2, a odpowiedź może wrócić | Że wszystkie inne sieci i aplikacje działają |
+| SSH z administratora do R1 | Działa konkretna ścieżka zarządzania oraz odpowiednia usługa | Że forwarding ruchu użytkowników jest sprawny |
+
+Uczymy się więc ważnej zasady: **wynik testu musi odpowiadać dokładnie na pytanie, które zadałeś**. Jeżeli testowałeś tylko dostęp do własnego adresu routera, nie potwierdziłeś tym ruchu tranzytowego.
+
+### A co, jeśli Routing Engine pracuje z wysokim obciążeniem?
+
+Może się zdarzyć, że proces \`rpd\` zużywa dużo CPU, ponieważ w sieci zachodzą liczne zmiany tras. Nie oznacza to automatycznie, że każdy już przekazywany pakiet zatrzymuje się i czeka na obliczenia RE. Na fizycznych urządzeniach z odrębnym PFE część forwarding może działać dalej z wcześniej przygotowaną tablicą.
+
+Ale jest ważna granica tego wniosku. Jeśli RE nie nadąża z przeliczaniem nowych dróg lub aktualizowaniem forwardingu, sieć może korzystać z **nieaktualnych informacji**, a nowe sesje i sytuacje wyjątkowe mogą zachowywać się inaczej. Na vSRX, gdzie wiele funkcji działa programowo w ramach jednego środowiska, wysokie użycie CPU przez maszynę wirtualną może też bezpośrednio pogorszyć forwarding.
+
+Dlatego zdanie „control plane i forwarding plane są rozdzielone” nie jest gwarancją, że usterka jednego nigdy nie wpłynie na drugi. To model architektoniczny, który pomaga rozpoznać rodzaj problemu.
+
+### Czy proces sterujący uczestniczy w każdej wymianie danych?
+
+Nie. Router nie pyta \`rpd\` o każdą następną porcję danych TCP. Protokół routingu i RIB dostarczają informację, która jest używana w przygotowanej tablicy forwardingu. Dla zwykłego, znanego ruchu szybka obsługa odbywa się poza takim pełnym cyklem obliczania tras.
+
+Natomiast pakiet skierowany do **samego routera** — na przykład wiadomość do lokalnej usługi SSH albo właściwy pakiet sterujący OSPF — musi trafić do części systemu, która potrafi go obsłużyć. Również część pakietów wyjątkowych może wymagać specjalnej obsługi przez RE. Nie utożsamiaj tego z wysyłaniem każdego pakietu do CPU.
+
+~~~mermaid
+flowchart LR
+    IN["Pakiet wchodzi na R1"] --> D{"Jaki jest cel pakietu?"}
+    D -->|"Cel jest dalej w sieci"| F["Forwarding plane:<br/>szukanie drogi i dalsze przetwarzanie"]
+    D -->|"Cel to R1 lub wyjątek"| C["Lokalna obsługa:<br/>RE / właściwy proces"]
+    F --> OUT["Interfejs w stronę R2"]
+    C --> S["Odpowiedź lokalna, aktualizacja stanu<br/>lub odrzucenie"]
+~~~
+
+*Rysunek 2.3. Dwie logicznie różne drogi obsługi. Na vSRX przed końcowym rezultatem może zadziałać również security flow. Nie jest to ścisły diagram kolejności operacji dla każdego PFE.*
+
+**Krótka sytuacja do rozważenia.** Ping R5 do 192.0.2.1 działa, ale ping R5 do 10.12.0.2 nie. Czy od razu restartujesz proces \`rpd\` na R1? Nie. Najpierw sprawdzasz, czy R5 ma trasę przez R1, czy R1 ma trasę do R2, czy R2 zna drogę powrotną do R5 i czy security policy R1 dopuszcza ruch tranzytowy. Każdy z tych warunków można sprawdzić bez restartu usługi.
+
+**Źródła Juniper:** [Junos OS Architecture Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-architecture.html), [Router Data Flow Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-router-data-flow-overview.html).
+
+---
+
+## 2.3. Routing Engine — miejsce, w którym router poznaje drogi i zarządza sobą [A]
+
+### Zacznijmy od pytania: skąd R1 bierze trasę do R2?
+
+Widzieliśmy już, że R1 ma bezpośrednie połączenie z R2. Z adresu interfejsu **10.12.0.1/30** Junos wyprowadza informację, że sieć **10.12.0.0/30** jest dostępna bezpośrednio. Tę informację przechowuje w **Routing Information Base (RIB)**, czyli bazie informacji o trasach. Na początku możesz myśleć o RIB po prostu jako o tablicy, w której router zapisuje znane drogi do sieci.
+
+W Junos domyślna tablica routingu dla IPv4 unicast nazywa się **\`inet.0\`**. To nazwa, którą bardzo często zobaczysz po wpisaniu \`show route\`.
+
+Przyjrzyjmy się trzem podstawowym rodzajom tras, które możemy spotkać już na starcie.
+
+**Direct** oznacza sieć, z którą router jest bezpośrednio połączony przez odpowiednio skonfigurowany interfejs. Dla R1 to na przykład 10.12.0.0/30.
+
+**Local** oznacza adres przypisany do samego routera. Na R1 istnieje lokalny adres 10.12.0.1/32; pakiet zaadresowany dokładnie do tego IP nie powinien być potraktowany jak zwykły pakiet do R2. Mamy więc osobno informację o całej podsieci i o własnym adresie urządzenia.
+
+**Static** oznacza trasę, którą administrator skonfigurował ręcznie, na przykład „do sieci 172.16.60.0/24 idź do następnego routera 10.12.0.2”. W przeciwieństwie do direct Junos nie wyprowadzi jej automatycznie z adresu interfejsu.
+
+Kiedy później uruchomimy OSPF czy BGP, pojawią się kolejne źródła informacji. Ale mechanizm odczytywania tablic pozostanie znajomy.
+
+### Jak odczytać pierwszą trasę, jeśli nigdy nie pracowałeś na Junos?
+
+W Junos są dwa podstawowe tryby interfejsu tekstowego. **Operational Mode** służy do odczytywania stanu i wykonywania diagnostyki; typowy prompt kończy się znakiem \`>\`. **Configuration Mode** służy do przygotowywania zmian i zwykle ma prompt kończący się \`#\`. Pełną naukę obu trybów dostaniesz w rozdziale III. Na razie wszystkie polecenia \`show\` poniżej wykonujesz w Operational Mode.
+
+**R1-vSRX — Operational Mode, podstawowy odczyt tras**
+
+~~~junos
+show route
+show route table inet.0
+show route 10.12.0.0/30 exact
+show route 10.12.0.1/32 exact
+show interfaces terse
+~~~
+
+Pierwsze polecenie wyświetla informacje routingu. Drugie wskazuje konkretną tabelę IPv4. Trzecie szuka dokładnie sieci 10.12.0.0/30, a czwarte sprawdza lokalny adres R1 jako /32. Ostatnie pokazuje stan interfejsów, abyśmy mogli powiązać trasę z rzeczywiście skonfigurowanym portem.
+
+Zwróć uwagę na słowo \`exact\`. W dokumentacji będziemy czasem pytać o konkretny prefix, nie o dowolny pasujący wpis. Dzięki \`exact\` wynik nie zostanie pomylony z inną, mniej lub bardziej szczegółową trasą.
+
+Na poprawnie skonfigurowanym R1 **oczekujemy** informacji podobnej do poniższej:
+
+~~~text
+inet.0:
+10.12.0.0/30       *[Direct/0] ... via ge-0/0/0.0
+10.12.0.1/32       *[Local/0] ... Local via ge-0/0/0.0
+~~~
+
+*Przykład ilustruje najważniejsze pola; celowo pominięto część metadanych, czasu i szczegółów next-hop. **To nie jest rzeczywisty output z EVE-NG.** Format i dodatkowe kolumny zależą od wydania Junos.*
+
+Jak to czytać? \`Direct\` albo \`Local\` mówi, skąd pochodzi wpis. Liczba po ukośniku w \`[Direct/0]\` to **route preference** używana przez Junos przy wyborze źródła trasy. Gwiazdka \`*\` przy trasie oznacza, że jest ona aktywna w danym kontekście RIB. Nie musisz znać na pamięć wszystkich preferencji — ich znaczenie wyjaśnimy na przykładzie.
+
+### Co, jeśli R1 zna dwie drogi do tej samej sieci?
+
+Wyobraź sobie, że R1 dowiaduje się o sieci 172.16.60.0/24 dwiema metodami. Pierwsza to statyczna trasa wprowadzona przez administratora. Druga przychodzi z protokołu routingu. System nie powinien losowo przełączać się między nimi.
+
+Junos ma reguły wyboru aktywnej trasy. Jednym z najważniejszych parametrów jest **route preference**: w standardowym porównaniu tras z różnych źródeł **niższa liczba jest lepsza**. Przykładowo typowa statyczna trasa ma domyślną preference 5, a trasa BGP — 170. Nie oznacza to jednak, że statyczna „zawsze wygrywa”. Musi być poprawna, mieć rozwiązywalny next-hop i odnosić się do właściwej tabeli. W bardziej zaawansowanych scenariuszach stosowane są dodatkowe zasady protokołów.
+
+Jest też inna reguła: **Longest Prefix Match (LPM)**. Kiedy router już przekazuje pakiet, wybiera najbardziej szczegółowy pasujący prefix w forwarding table. Jeśli istnieje 172.16.0.0/16 i 172.16.60.0/24, pakiet do 172.16.60.1 pasuje do obu, ale zostanie wybrana bardziej szczegółowa /24. To nie jest bezpośredni pojedynek preference 5 z preference 170: najpierw trzeba odróżnić wybór *trasy do tego samego prefixu* od wyszukania *najbardziej szczegółowego prefixu dla adresu docelowego*.
+
+Na tym etapie wystarczą nam dwa wnioski: **RIB może znać kilka dróg**, a **forwarding musi otrzymać użyteczną decyzję**. Nie każda znana trasa stanie się aktywna i nie każda aktywna trasa gwarantuje dostarczenie pakietu do odległej aplikacji.
+
+### RIB a FIB — dwa skróty, które będziesz stale spotykać
+
+**RIB — Routing Information Base** to miejsce przechowywania informacji o trasach, ich źródłach, next-hopach i statusach. Router potrzebuje tej bazy do podejmowania decyzji, która droga jest najlepsza.
+
+**FIB — Forwarding Information Base** to informacja przygotowana do samego wyszukiwania i przekazywania pakietów. Nie musi mieć identycznej postaci jak pełna RIB. W klasycznym modelu Junos kernel na RE utrzymuje **master forwarding table**, a potrzebne dane są synchronizowane do Packet Forwarding Engine.
+
+Dlatego nie wystarczy otworzyć \`show route\` i powiedzieć: „Wszystko działa”. Polecenie to przede wszystkim pokazuje wiedzę routingu. Aby zobaczyć, jaki forwarding jest przygotowany do konkretnego destination, wykonujemy drugi odczyt.
+
+**R1-vSRX — Operational Mode, od RIB do tabeli forwarding**
+
+~~~junos
+show route 10.12.0.0/30 exact extensive
+show route forwarding-table destination 10.12.0.2
+~~~
+
+Pierwsze polecenie pozwala przeanalizować konkretną trasę w RIB. Drugie pokazuje widok forwardingu dla adresu 10.12.0.2. **\`show route forwarding-table\` nie jest automatycznie bezpośrednim odczytem z pamięci układu PFE.** Juniper opisuje go jako widok master forwarding table po stronie RE; na wspieranych platformach istnieją odrębne polecenia, takie jak \`show pfe route\`, do inspekcji tablic zainstalowanych w PFE. Nie zakładaj ich dostępności na każdym vSRX.
+
+~~~mermaid
+flowchart TD
+  A["Adres R1: 10.12.0.1/30"] --> D["RIB: inet.0<br/>10.12.0.0/30 Direct"]
+  B["Trasy od administratora<br/>lub protokołu"] --> D
+  D --> W["Wybór aktywnej trasy<br/>i rozwiązanie next-hop"]
+  W --> M["Master forwarding table na RE"]
+  M --> P["Synchronizacja do forwarding/PFE"]
+  P --> N["Pakiet do 10.12.0.2<br/>wyjście do R2"]
+~~~
+
+*Rysunek 2.4. Przepływ informacji routingu do forwardingu. Nie jest to ścieżka, którą każdy pakiet musi fizycznie przejść przez procesy RE.*
+
+### Active, inactive, hidden — co oznacza, że trasa „jest”, ale nie działa?
+
+Kiedy router poznaje tę samą sieć z kilku źródeł, część kandydatów może przegrać wybór. Taką trasę możesz zobaczyć jako **inactive**: istnieje jako informacja, ale nie jest aktywną drogą do celu w danym RIB.
+
+Inna sytuacja to **hidden**. Trasa może być ukryta, ponieważ nie spełnia warunków użycia, na przykład jej next-hop nie daje się rozwiązać albo została odrzucona przez odpowiednią politykę. Nie utożsamiaj \`hidden\` z „drugą najlepszą drogą”, bo przyczyny mogą być zupełnie inne.
+
+**R1-vSRX — Operational Mode, rozszerzona diagnoza**
+
+~~~junos
+show route 172.16.60.0/24 exact extensive
+show route hidden
+show route protocol static
+~~~
+
+Te trzy polecenia mają sens dopiero, gdy takie trasy rzeczywiście występują. Jeśli na początku ćwiczenia nie masz jeszcze statycznej ani dynamicznej drogi do 172.16.60.0/24, pusty wynik nie oznacza awarii. Oznacza, że nie skonfigurowałeś jeszcze odpowiedniego źródła informacji.
+
+### Routing Engine nie służy tylko do routingu
+
+RE obsługuje również wiele funkcji administracyjnych. To tutaj działają procesy odpowiedzialne za konfigurację i dostęp operatora, zbierane są wybrane alarmy oraz pracują usługi wymagające udziału systemu operacyjnego.
+
+Przyjrzyj się spokojnie kilku read-only poleceniom.
+
+**R1-vSRX — Operational Mode, stan systemu i procesów**
+
+~~~junos
+show version
+show system uptime
+show system processes extensive
+show system alarms
+show chassis alarms
+~~~
+
+\`show version\` mówi, z jaką wersją systemu pracujesz. \`show system uptime\` pozwala sprawdzić czas działania. \`show system processes extensive\` pokazuje aktywność procesów i obciążenie systemu; przy dużej liczbie procesów możesz wyszukać nazwy \`rpd\` oraz \`mgd\`. Alarmy mogą wskazywać problemy z elementami platformy i nie zawsze występują w każdym wirtualnym labie.
+
+Początkujący administrator nie powinien odruchowo restartować \`rpd\` tylko dlatego, że wynik \`show system processes\` wygląda nietypowo. Najpierw trzeba potwierdzić objaw, ustalić wpływ na routing i forwarding oraz zebrać dane. Restart procesów sterujących może spowodować utratę sąsiedztw i zakłócenia w sieci.
+
+### A jeśli fizyczne urządzenie ma dwa Routing Engines?
+
+W większych routerach Juniper mogą występować redundantne Routing Engines. Jeden jest aktywny, a drugi pełni rolę zapasową, zależnie od modelu i konfiguracji. Funkcje wysokiej dostępności, takie jak GRES czy nonstop routing, ograniczają skutki pewnych przełączeń, ale **samo posiadanie dwóch RE nie zapewnia bezprzerwowego działania wszystkich protokołów i wszystkich przepływów**.
+
+Nasz vSRX w EVE-NG nie jest laboratoryjnym odpowiednikiem modułowego MX z dwiema osobnymi kartami Routing Engine. Możemy zrozumieć architekturę logiczną, ale nie będziemy udawać, że przeprowadziliśmy sprzętowy test GRES.
+
+**Pytanie do samodzielnego rozwiązania.** W \`show route\` R1 widać aktywną trasę, ale użytkownik nie dostaje odpowiedzi. Czy to znaczy, że RIB jest uszkodzona? Nie. Trasa może być poprawna, a problem występuje podczas instalacji/realizacji forwardingu, w security policy, na dalszym routerze, na drodze powrotnej lub na samym urządzeniu docelowym. W kolejnej części zobaczymy, jak w praktyce oddzielać te możliwości.
+
+**Źródła Juniper:** [Routing Databases Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-protocols-routing-databases-overview.html), [Junos Routing and Forwarding Tables](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-routing-forwarding-table-overview.html), [show route forwarding-table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
+
