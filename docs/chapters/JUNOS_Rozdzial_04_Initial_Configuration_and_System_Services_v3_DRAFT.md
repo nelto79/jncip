@@ -1792,3 +1792,162 @@ Do zakończenia labu potrzebujesz jeszcze potwierdzić, że nie pozostały przyp
 
 ---
 
+## 4.TEST. Sprawdź rozumienie — nie odpowiadaj na pamięć [EXT]
+
+Pytania poniżej są autorskimi ćwiczeniami opartymi na opisywanych mechanizmach Junos. Nie pochodzą z rzeczywistej bazy egzaminacyjnej. Spróbuj najpierw **przewidzieć zachowanie R1** i dopiero potem porównaj odpowiedź.
+
+### Pytania
+
+**1.** Nowy vSRX uruchamia się i odpowiada przez konsolę, ale nie przez SSH. Czy brak SSH dowodzi, że system operacyjny się nie uruchomił? Jakie elementy musisz jeszcze sprawdzić?
+
+**2.** W EVE-NG widzisz kilka wirtualnych kart sieciowych. Czy możesz bez sprawdzenia uznać, że pierwsza to \`fxp0\`, i skonfigurować na niej IP management?
+
+**3.** Dlaczego \`set system host-name R1-vSRX\` nie oznacza automatycznie, że router może rozwiązać nazwę \`ntp.lab.example\`?
+
+**4.** Router ma skonfigurowane \`system root-authentication\`. Czy to samo w sobie oznacza, że powinno być dozwolone zdalne logowanie jako root przez SSH?
+
+**5.** Dlaczego warto najpierw utworzyć i przetestować \`labadmin\`, a dopiero potem wykonać \`root-login deny\`?
+
+**6.** \`nocview\` poprawnie wpisuje hasło, lecz nie może zmodyfikować konfiguracji interfejsu. Czy uwierzytelnianie było nieudane?
+
+**7.** Która z klas, \`operator\` czy \`read-only\`, jest bezpieczniejszym domyślnym punktem startowym dla konta mającego jedynie oglądać urządzenie? Dlaczego nazwa klasy nie wystarczy do ostatecznej decyzji?
+
+**8.** Na R1 ustawiono \`authentication-order tacplus\`. Serwer TACACS+ nie odpowiada. Czy taki przypadek musi zachowywać się tak samo jak prawidłowa odpowiedź reject?
+
+**9.** Co może zmienić jawne wpisanie \`[ tacplus password ]\` w porównaniu do samego \`tacplus\` po odpowiedzi reject serwera?
+
+**10.** R1 ma poprawny shared secret TACACS+, ale nie może się zalogować przez AAA. Dlaczego warto sprawdzić source-address, trasę management i routing instance?
+
+**11.** Na R1 skonfigurowano \`ge-0/0/0 unit 0 family inet address 10.12.0.1/30\`. Jakie dwie podstawowe informacje o IPv4 mogą dzięki temu pojawić się w tablicy routingu?
+
+**12.** Dlaczego \`ge-0/0/0 up\` nie dowodzi, że SSH, ping i tranzyt z R5 przez R1 będą działały?
+
+**13.** Dodałeś \`groups CH04-BASE\`, ale nie wykonałeś \`apply-groups\`. Czy system musi już używać wartości z grupy?
+
+**14.** Dlaczego \`display inheritance\` może pokazać ustawienie niewidoczne bezpośrednio w lokalnej gałęzi konfiguracji?
+
+**15.** R1 ma \`set system time-zone Europe/Warsaw\`, a \`show ntp status\` nie pokazuje synchronizacji. Czy godzina w logach jest teraz na pewno wiarygodna?
+
+**16.** Ping R1→203.0.113.30 odpowiada. Czy dowodzi to, że NTP UDP/123 działa, a serwer czasu jest wybranym źródłem?
+
+**17.** Router ma SNMPv3 \`authPriv\`, ale konfiguracja VACM nie dopuszcza odczytu \`sysUpTime.0\`. Czy poprawne hasła SNMP wystarczą do prawidłowego GET?
+
+**18.** NMS potrafi wykonać SNMPv3 GET, ale nie otrzymuje trapów. Dlaczego nie jest to sprzeczność?
+
+**19.** W lokalnym \`show log messages\` widzisz błąd interfejsu, lecz zdalny SIEM nie ma tego zdarzenia. Co z tego wynika — czy router nie wygenerował logu?
+
+**20.** Po \`commit\` na R1 serwer archiwizacji nie ma nowego pliku. Czy możesz oznaczyć configuration archival jako działające?
+
+**21.** Dlaczego szerokie traceoptions pozostawione na aktywnym routerze mogą być problemem, nawet gdy nie wykonujesz już ręcznie żadnego debugowania?
+
+**22.** Co różni \`request system configuration rescue save\` od \`rollback rescue\`?
+
+**23.** Wykonałeś \`commit confirmed 5\`, a następnie \`commit check\`, bo chciałeś sprawdzić składnię po zmianie. Dlaczego taka kolejność jest niebezpieczna?
+
+**24.** R1 jest poprawnie skonfigurowany do NTP na 203.0.113.30. Kopiujesz tę samą konfigurację na R4, który nie ma żadnej sieci management. Czy poprawna składnia oznacza, że R4 będzie synchronizował zegar?
+
+**25.** W handover widzisz PASS dla lokalnego logu, ale NOT TESTED dla centralnego syslog. Czy można uczciwie napisać, że integracja R1 z SIEM została zweryfikowana?
+
+### Odpowiedzi z wyjaśnieniami
+
+**1.** Nie. Możliwa jest prawidłowa praca systemu z niedostępnym SSH. Sprawdź usługę \`system services ssh\`, adres IP i trasę management, konto, uwierzytelnianie, host-inbound na SRX i odpowiednią kontrolę filtrowania.
+
+**2.** Nie. Model, release i mapping QEMU/EVE-NG muszą zostać potwierdzone przez \`show interfaces terse\` i faktyczne połączenia. Na wybranych urządzeniach występują inne nazwy i modele zarządzania.
+
+**3.** Hostname ustawia nazwę lokalną. Rozwiązywanie nazw wymaga sprawnej konfiguracji DNS, dostępnego resolvera i łączności do serwera.
+
+**4.** Nie. Konto root może być używane przez konsolę, ale dostęp root przez SSH powinien podlegać osobnej polityce bezpieczeństwa.
+
+**5.** Bo jeśli zablokujesz root SSH przed zweryfikowaniem alternatywnego loginu, możesz odciąć jedyną działającą ścieżkę administracyjną. Niezależna konsola pozostaje zabezpieczeniem.
+
+**6.** Niekoniecznie. Authentication mogło się udać, a authorization świadomie nie dopuściło edycji. Klasa \`read-only\` nie powinna mieć nieograniczonego prawa konfiguracji.
+
+**7.** Jako domyślny punkt startowy do samego odczytu wybierz \`read-only\`. \`operator\` może mieć uprawnienia operacyjne szersze niż podgląd. Konkretne polecenia należy przetestować na właściwym release.
+
+**8.** Nie. Timeout i reject są różnymi wynikami. Typowy Junos może przejść do local password awaryjnie po niedostępności remote, ale świadoma odmowa z serwera ma znaczenie zależne od jawnej kolejności metod.
+
+**9.** Jawne \`password\` pozwala próbować lokalnego hasła po metodzie zdalnej w odpowiednich warunkach, również gdy server zwraca reject. Wynik zależy od rzeczywistego lokalnego konta i polityki uwierzytelniania.
+
+**10.** Router może nadawać zapytanie z innego IP albo szukać drogi w niewłaściwej instancji. Serwer AAA może odrzucać nieznanego klienta mimo poprawnych informacji uwierzytelniających.
+
+**11.** Przy aktywnym interfejsie router może mieć trasę \`Direct\` do 10.12.0.0/30 i trasę \`Local\` do własnego IP 10.12.0.1/32.
+
+**12.** Stan warstwy fizycznej nie jest testem adresacji, usługi SSH, host-inbound ani security policy dla ruchu tranzytowego.
+
+**13.** Nie. Sama definicja group nie oznacza automatycznego zastosowania. Należy ustalić odpowiedni \`apply-groups\`.
+
+**14.** Parametr może pochodzić z grupy i być dziedziczony. Weryfikacja wynikowej konfiguracji wymaga uwzględnienia tego mechanizmu.
+
+**15.** Nie. Strefa czasowa dotyczy prezentacji czasu; nie dowodzi synchronizacji zegara. Sprawdź NTP association i status synchronizacji.
+
+**16.** Nie. Ping to ICMP, a NTP wykorzystuje własną komunikację, typowo UDP/123, i mechanizm wyboru źródła czasu.
+
+**17.** Nie. W SNMPv3 USM i VACM mają odrębne zadania. Użytkownik może być poprawnie uwierzytelniony, ale nie mieć uprawnień do konkretnego OID.
+
+**18.** Polling do routera i wysyłanie powiadomień z routera mają inne kierunki i zwykle inne porty UDP (161 i 162), a także inne wymagania konfiguracyjne.
+
+**19.** Nie. Router zarejestrował zdarzenie lokalnie. Problem może dotyczyć wysyłania, trasy, odbiornika albo filtracji. Trzeba sprawdzić oba końce.
+
+**20.** Nie. \`transfer-on-commit\` może być skonfigurowany, ale archiwizacja jest potwierdzona dopiero po znalezieniu poprawnego pliku na serwerze.
+
+**21.** Tracing może dalej generować dużą liczbę wpisów i obciążać system lub dysk. Po zakończeniu diagnostyki powinien zostać usunięty albo świadomie ograniczony.
+
+**22.** \`request ... rescue save\` zapisuje aktualnie zatwierdzoną konfigurację jako punkt ratunkowy. \`rollback rescue\` wczytuje tę konfigurację do candidate i sam nie aktywuje jej w systemie.
+
+**23.** \`commit check\` wykonany w trakcie oczekującego \`commit confirmed\` może **potwierdzić warunkową zmianę**, zamiast zachować możliwość automatycznego cofnięcia. Pre-check wykonujemy przed aktywacją.
+
+**24.** Nie. R4 musi mieć własną osiągalną drogę do serwera i poprawne ustawienia źródła oraz routing instance. Skopiowany config nie tworzy sieci OOB.
+
+**25.** Nie. PASS dla logu lokalnego dowodzi tylko, że zdarzenie zostało zapisane na R1. Integracja z SIEM wymaga prawdziwego odbioru po stronie serwera.
+
+---
+
+## 4.REF. Mapa usług administracyjnych — do powtórki po zrozumieniu mechanizmów [EXT]
+
+| Pytanie inżyniera | Gdzie szukam w Junos? | Co jest dowodem sukcesu? |
+|---|---|---|
+| Która wersja OS i urządzenia? | \`show version\`, \`show chassis hardware\` | Zgodność z inventory i planem |
+| Co było fabryczne, co zmieniono? | \`show configuration\`, \`show system commit\` | Znana konfiguracja bazowa |
+| Jak urządzenie się nazywa? | \`system host-name\` | Właściwy prompt i identyfikacja |
+| Czy działa management? | \`show interfaces terse\`, \`show route\` | Nowa sesja z właściwej sieci |
+| Czy działa SSH? | \`system services ssh\` | Nowe logowanie z LAB-ADMIN |
+| Kto może się logować? | \`system login user\` | Test indywidualnego konta |
+| Co wolno użytkownikowi? | \`system login class\` | Test dostępnych i zabronionych poleceń |
+| Gdzie jest centralne AAA? | \`authentication-order\`, TACACS+/RADIUS | Accept, reject, timeout i logi |
+| Czy działa dziedziczenie? | \`groups\`, \`apply-groups\` | \`display inheritance\` |
+| Czy zegar jest wiarygodny? | \`system ntp\` | \`show ntp status\` synchronized |
+| Czy NMS odczytuje router? | \`snmp v3\` USM/VACM | SNMPv3 authPriv GET |
+| Czy logi docierają do SIEM? | \`system syslog\` | Ten sam event lokalnie i zdalnie |
+| Czy mamy backup poza routerem? | \`system archival configuration\` | Plik na serwerze + próba odtworzenia |
+| Czy tracing nadal jest aktywny? | \`traceoptions\` | Kontrola zakresu i cleanup |
+| Czy mamy znaną dobrą rescue? | \`request system configuration rescue save\` | Odczyt rescue i plan restore |
+| Czy wdrożenie jest gotowe? | Zestaw odczytów i testy serwerowe | PASS/FAIL/NOT TESTED z dowodami |
+
+---
+
+## Źródła, zakres i ograniczenia
+
+Ten rozdział zachowuje kompletny zakres **4.1–4.14 [A] oraz 4.15 [LAB]** z [Unified Blueprint](../JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md). Materiał opracowano od nowa dla czytelnika z około rocznym doświadczeniem, odchodząc od założenia o wcześniejszej znajomości Cisco. Starszą wersję zachowano w [archiwum](../archive/JUNOS_Rozdzial_04_pre_beginner_rewrite_2026-11-20.md). Laboratorium rozwija [oficjalną dla repozytorium referencję DIAMOND-6R](../../labs/reference-diamond-6vsrx/README.md) oraz [specyfikację CH04](../../labs/ch04-initial-config/README.md). Rejestr punktów weryfikacyjnych: [CH04 research](../research/CH04_GOTCHAS_ZRODLA_I_WERYFIKACJA.md).
+
+**Oficjalne materiały Juniper użyte jako odniesienie:**
+
+- [Initial Configuration on SRX](https://www.juniper.net/documentation/us/en/hardware/srx300/topics/topic-map/srx300-configuring-junos.html).
+- [EX4400 Initial Configuration](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html).
+- [Root and SSH Remote Access](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-software-remote-access-overview.html).
+- [User Access Privileges / Login Classes](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html).
+- [Authentication Order, TACACS+, RADIUS and Local](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-authentication-order.html).
+- [Management Interface and Non-default Instance](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/topic-map/management-interface-in-non-default-instance.html).
+- [Configuration Groups and Inheritance](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html).
+- [NTP Setup and Behavior](https://www.juniper.net/documentation/us/en/software/junos/time-mgmt/topics/example/ntp-configuration.html).
+- [Configure SNMPv3](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html).
+- [System Syslog](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/syslog-edit-system.html).
+- [Configuration Archival](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/cli/topics/task/junos-software-system-management-router-configuration-archiving.html).
+- [Traceoptions for Routing Protocols](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-is-is-ospf.html).
+- [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html).
+- [Commit Workflow](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html).
+
+**Granice weryfikacji:** dokumentacja potwierdza opisane mechanizmy, ale zachowanie i dostępność poszczególnych funkcji może różnić się zależnie od modelu oraz Junos release. Szczególnie dotyczy to management NIC vSRX, \`mgmt_junos\`, wersji algorytmów SNMPv3, metody transportu SCP/SFTP i opcji trace. Żadna przykładowa konfiguracja nie została uruchomiona na rzeczywistym obrazie vSRX w EVE-NG, a wszystkie statusy usług pozostają **PLANNED / NOT RUNTIME VALIDATED**, dopóki nie ma dowodów z routera i właściwego serwera.
+
+**Następny rozdział V:** będziemy obserwować i utrzymywać urządzenie, które już zostało uruchomione — dowiemy się, jak czytać stan interfejsów, logi, liczniki, alarmy, wykonywać pre-checki przed konserwacją i diagnozować awarie bez niepotrzebnego ryzyka.
+
+*Konfiguracja początkowa jest naprawdę zakończona dopiero wtedy, gdy inny administrator potrafi bezpiecznie przejąć urządzenie, zdiagnozować problem i przywrócić dostęp — bez zgadywania, jak autor wdrożenia zamierzał go utrzymywać.*
