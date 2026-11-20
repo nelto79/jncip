@@ -57,7 +57,7 @@ W Junos OS każdy protokół routingu posiada wbudowaną, niewidoczną w konfigu
 
    * **Default Export:** Rozgłaszaj wszystkie **aktywne** trasy BGP z tablicy RIB do sąsiadów BGP (z zachowaniem reguły iBGP Split Horizon — trasy nauczonej od jednego sąsiada iBGP nie rozgłaszasz do innego sąsiada iBGP, chyba że jesteś Route Reflectorem).
 
-   * **Uwaga o nowoczesnych standardach (RFC 8212):** Jeśli pracowałeś na Cisco IOS XR, wiesz, że IOS XR implementuje standard RFC 8212 domyślnie (sesja eBGP bez polityki nie przyjmuje ani nie wysyła żadnych tras). Klasyczny Cisco IOS/IOS XE oraz klasyczny Junos OS **NIE blokują** domyślnie tras eBGP ze względu na wsteczną kompatybilność! Warto jednak wiedzieć na poziomie Professional, że od **Junos OS 20.3R1** możesz dobrowolnie włączyć zachowanie zgodne z RFC 8212 poleceniem `set protocols bgp defaults ebgp no-policy` (podobnie jak `bgp safe-ebgp-policy` w nowszym IOS XE 17.2+). Na egzaminach JNCIA/JNCIS/JNCIP i w standardowych konfiguracjach przyjmuje się jednak klasyczne zachowanie domyślne Junosa: **BGP domyślnie akceptuje wszystko na imporcie i rozgłasza wszystkie aktywne trasy BGP na eksporcie**.
+   * **Uwaga o nowoczesnych standardach (RFC 8212):** Jeśli pracowałeś na Cisco IOS XR, wiesz, że IOS XR implementuje standard RFC 8212 domyślnie (sesja eBGP bez polityki nie przyjmuje ani nie wysyła żadnych tras). Klasyczny Cisco IOS/IOS XE oraz klasyczny Junos OS **NIE blokują** domyślnie tras eBGP ze względu na wsteczną kompatybilność! Warto jednak wiedzieć na poziomie Professional, że na **wybranych platformach i wydaniach Junos od 20.3R1** można włączyć zachowanie ograniczające wymianę eBGP bez polityk przez `set protocols bgp defaults ebgp no-policy`. **Nie zakładaj obsługi tej opcji na vSRX bez sprawdzenia Feature Explorer i CLI konkretnego release**; analogię do IOS XR traktuj jako koncepcję, nie gwarancję identycznej implementacji. Na egzaminach JNCIA/JNCIS/JNCIP i w standardowych konfiguracjach przyjmuje się jednak klasyczne zachowanie domyślne Junosa: **BGP domyślnie akceptuje wszystko na imporcie i rozgłasza wszystkie aktywne trasy BGP na eksporcie**.
 
 2. **OSPF (Open Shortest Path First):**
 
@@ -67,7 +67,7 @@ W Junos OS każdy protokół routingu posiada wbudowaną, niewidoczną w konfigu
 
    * **Zatrzymaj się na sekundę!** Inżynier Cisco patrzy na zdanie „Default Export OSPF = Reject everything” i marszczy brwi: *„Chwileczkę, skoro OSPF domyślnie wszystko odrzuca na eksporcie, to jak do cholery routery OSPF wymieniają się trasami?!”*.
 
-   * Genialne pytanie! Odpowiedź kryje się w różnicy między **natywnym działaniem protokołu (flooding LSA)** a **eksportem z tablicy RIB (redystrybucją)**. Gdy dodajesz interfejs do `protocols ospf area 0 interface ge-0/0/0.0`, demon OSPF sam natywnie rozsyła informacje o tym łączu (LSA Type 1/2/3) między sąsiadami — to **nie jest** eksport z tablicy RIB! Natomiast polityka `export` w OSPF służy **wyłącznie do wstrzykiwania tras obcych (zewnętrznych — Static, Direct spoza OSPF, BGP, RIP)** z tablicy `inet.0` do domeny OSPF jako LSA Type 5 lub Type 7. A domyślnie żaden szanujący się router nie redystrybuuje obcych tras automatycznie!
+   * Trafne pytanie! Odpowiedź kryje się w różnicy między **natywnym działaniem protokołu (flooding LSA)** a **eksportem z tablicy RIB (redystrybucją)**. Gdy dodajesz interfejs do `protocols ospf area 0 interface ge-0/0/0.0`, demon OSPF sam natywnie rozsyła informacje o tym łączu (LSA Type 1/2/3) między sąsiadami — to **nie jest** eksport z tablicy RIB! Natomiast polityka `export` w OSPF służy **wyłącznie do wstrzykiwania tras obcych (zewnętrznych — Static, Direct spoza OSPF, BGP, RIP)** z tablicy `inet.0` do domeny OSPF jako LSA Type 5 lub Type 7. A domyślnie żaden szanujący się router nie redystrybuuje obcych tras automatycznie!
 
 3. **IS-IS (Intermediate System to Intermediate System):**
 
@@ -112,7 +112,7 @@ W Junos OS **ZAPOMNIJ o perspektywie interfejsu** przy pisaniu polityk routingu!
 
 > **Pułapka na Cisco-engineera (Gdzie podziało się `redistribute` oraz BGP `network`?):** Szukasz w Junos komendy `redistribute static subnets` w OSPF albo `network 192.0.2.0 mask 255.255.255.0` w BGP? **One w Junos OS nie istnieją!** W Junosie zarówno filtrowanie wychodzących tras BGP, jak i rozgłoszenie własnej podsieci `Direct` do BGP, jak i redystrybucja tras statycznych do OSPF — to jest **dokładnie ta sama operacja: `export` z tablicy RIB do wybranego protokołu!** Dzięki temu nie musisz uczyć się czterech różnych mechanizmów — jedna polityka `export` robi wszystko.
 
-### Zabójczy haczyk poziomu Specialist/Professional: Eksport widzi TYLKO trasy AKTYWNE!
+### Istotny haczyk poziomu Specialist/Professional: Eksport widzi TYLKO trasy AKTYWNE!
 
 Wyobraź sobie sytuację z prawdziwej produkcji (tę samą, która wywróciła niejedną migrację Cisco → Juniper). Twój router brzegowy R1 zna podsieć `10.50.0.0/24` z **dwóch** źródeł jednocześnie:
 
@@ -180,9 +180,9 @@ W Routing Policy istnieją **trzy klasy akcji**:
 
 3. **Akcje nieterminujące (modyfikujące atrybuty):** Np. `local-preference 200`, `metric 50`, `community add CUST-GOLD`, `as-path-prepend "65001 65001"`, `next-hop self`.
 
-> **Gigantyczna pułapka na Cisco-engineera #1 (Brak zatrzymania po modyfikacji atrybutu!):** W Cisco IOS, jeśli w `route-map TEST permit 10` dopasujesz prefiks i zrobisz `set local-preference 200`, to ewaluacja **NATYCHMIAST SIĘ KOŃCZY** (trasa zostaje zaakceptowana z nową wartością, a sekwencja `20` w ogóle nie jest sprawdzana, chyba że jawnie dopiszesz `continue`). W Junos OS jest **DOKŁADNIE ODWROTNIE**! Jeśli term w Junos zawiera wyłącznie akcję modyfikującą (`then local-preference 200`) **bez** słowa kluczowego `accept` lub `reject`, demon `rpd` modyfikuje atrybut i **idzie dalej do kolejnego termu!** Jeśli kolejny term na dole mówi `then reject`, Twoja pięknie zmodyfikowana trasa wyląduje w koszu!
+> **Ważna pułapka na Cisco-engineera #1 (Brak zatrzymania po modyfikacji atrybutu!):** W Cisco IOS, jeśli w `route-map TEST permit 10` dopasujesz prefiks i zrobisz `set local-preference 200`, to ewaluacja **NATYCHMIAST SIĘ KOŃCZY** (trasa zostaje zaakceptowana z nową wartością, a sekwencja `20` w ogóle nie jest sprawdzana, chyba że jawnie dopiszesz `continue`). W Junos OS jest **DOKŁADNIE ODWROTNIE**! Jeśli term w Junos zawiera wyłącznie akcję modyfikującą (`then local-preference 200`) **bez** słowa kluczowego `accept` lub `reject`, demon `rpd` modyfikuje atrybut i **idzie dalej do kolejnego termu!** Jeśli kolejny term na dole mówi `then reject`, Twoja pięknie zmodyfikowana trasa wyląduje w koszu!
 
-> **Gigantyczna pułapka na Cisco-engineera #2 (Wypadnięcie za ostatni term = Default Policy, NIE `reject`!):** A co się stanie, gdy trasa przejdzie przez wszystkie termy wszystkich polityk w łańcuchu i **nigdzie nie natrafiła na `accept` ani `reject`** (np. nie pasowała do żadnego `from`, albo przeszła przez term, który tylko zmienił `local-preference`)? W Cisco `route-map` na końcu ma ukryte `deny any`. W Junos OS Routing Policy **NIE MA** ukrytego `reject`! Trasa wypada za koniec łańcucha i wpada prosto w ręce **Default Protocol Policy** z sekcji 8.1!
+> **Ważna pułapka na Cisco-engineera #2 (Wypadnięcie za ostatni term = Default Policy, NIE `reject`!):** A co się stanie, gdy trasa przejdzie przez wszystkie termy wszystkich polityk w łańcuchu i **nigdzie nie natrafiła na `accept` ani `reject`** (np. nie pasowała do żadnego `from`, albo przeszła przez term, który tylko zmienił `local-preference`)? W Cisco `route-map` na końcu ma ukryte `deny any`. W Junos OS Routing Policy **NIE MA** ukrytego `reject`! Trasa wypada za koniec łańcucha i wpada prosto w ręce **Default Protocol Policy** z sekcji 8.1!
 >
 > * Dla **OSPF/IS-IS/RIP na eksporcie** skończy się to odrzuceniem (bo ich domyślny eksport to `reject`).
 > * Dla **BGP na eksporcie** skończy się to **ZAAKCEPTOWANIEM i rozgłoszeniem wszystkich aktywnych tras BGP** — dokładnie tak powstał nasz gigantyczny wyciek tras z historii na początku rozdziału! Dlatego w produkcyjnych politykach BGP **zawsze** stawiaj na końcu jawny, czytelny term końcowy (np. `term REJECT-ALL then reject`), nigdy nie polegaj na „domyślnym działaniu” w ciemno.
@@ -225,11 +225,11 @@ Prześledźmy drogę prefiksu w BGP (który ma najbardziej rozbudowany cykl życ
 
 2. **Polityka Importu (Import Policy):** Filtruje i modyfikuje trasy z `Adj-RIB-In` w drodze do `inet.0`.
 
-   * **Ważny szczegół operacyjny (`keep all`):** Co robi Junos z trasą BGP, którą Twoja polityka importu odrzuciła (`then reject`)? Domyślnie Junos **wyrzuca ją z pamięci RAM**, aby oszczędzać zasoby (odpowiednik braku `soft-reconfiguration inbound` w Cisco; gdy zmienisz politykę, Junos używa mechanizmu BGP Route Refresh RFC 2918, żeby poprosić sąsiada o ponowne przesłanie tras). Jeśli jednak podczas debugowania chcesz widzieć trasy odrzucone przez politykę importu w `show route receive-protocol bgp` oraz w `show route hidden`, możesz włączyć opcję **`set protocols bgp keep all`** (uwaga na zużycie RAM przy pełnej tablicy Internetu!).
+   * **Ważny szczegół operacyjny (`keep all`):** Co dzieje się z trasą, którą `import policy` odrzuciła? W typowym Junos trasy BGP **są domyślnie zachowywane jako hidden**, z wyjątkami m.in. dla ścieżek zawierających pętlę lokalnego AS_PATH. `keep all` rozszerza retencję także na takie przypadki, a `keep none` pozwala usuwać trasy odrzucone przez import policy lub kontrolę poprawności. Dlatego najpierw sprawdź `show route hidden`, a dopiero później rozważ zmianę ustawienia `keep` — szczególnie przy dużej tablicy BGP. [Juniper: keep](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/keep-edit-protocols-bgp.html).
 
 3. **Główna Tablica RIB (`inet.0` — komenda `show route`):** Tu trafiają zaakceptowane trasy. Jeśli dla tego samego prefiksu istnieje kilka ścieżek (z różnych protokołów lub sąsiadów), `rpd` uruchamia proces wyboru najlepszej ścieżki (Route Preference → BGP Path Selection) i oznacza zwycięzcę gwiazdką `*` (**Active Route**).
 
-   * Pamiętaj o różnicy z Rozdziału 2 i 7: trasa **Hidden** (np. nierozwiązywalny next-hop albo odrzucona przy `keep all`) siedzi w `show route hidden`, trasa **Inactive** (przegrała z lepszą preferencją, np. BGP przegrał z OSPF) jest w `show route` bez gwiazdki `*`, a trasa odrzucona bez `keep all` po prostu znika!
+   * Pamiętaj o różnicy z Rozdziału 2 i 7: trasa **Hidden** (np. nierozwiązywalny next-hop albo odrzucona przy `keep all`) siedzi w `show route hidden`, trasa **Inactive** (przegrała z lepszą preferencją, np. BGP przegrał z OSPF) jest w `show route` bez gwiazdki `*`, a trasa odrzucona przez import może pozostać jako `hidden`; przy `keep none` można utracić jej szczegóły.
 
 4. **Polityka Eksportu (Export Policy):** Pobiera **tylko aktywne trasy (`*`)** z `inet.0`, filtruje je, modyfikuje atrybuty wychodzące (np. `as-path-prepend`, `metric`, `next-hop self`) i umieszcza wynik w `Adj-RIB-Out`.
 
@@ -316,7 +316,7 @@ W Cisco IOS do dopasowania prefiksów z zakresem masek piszesz `ip prefix-list M
 
 6. **`through <drugi-prefiks>`** — rzadziej używany, specyficzny modyfikator dopasowujący wyłącznie prefiksy leżące wzdłuż dokładnej ścieżki w drzewie binarnym od prefiksu pierwszego do drugiego (np. `10.0.0.0/8 through 10.0.0.0/10` dopasuje `/8`, `/9` i `/10` o adresie bazowym `10.0.0.0`, nie dopasuje `10.64.0.0/10`!).
 
-> **LEGENDARNA PUŁAPKA TIER 3 (Longest Match wewnątrz jednego termu `route-filter`!):** Zatrzymaj wszystko, co robisz, i przeczytaj to uważnie, bo to jedno z najsłynniejszych zaskoczeń w całym Junos OS!
+> **Ważna PUŁAPKA TIER 3 (Longest Match wewnątrz jednego termu `route-filter`!):** Zatrzymaj wszystko, co robisz, i przeczytaj to uważnie, bo to jedno z najsłynniejszych zaskoczeń w całym Junos OS!
 >
 > Wyobraź sobie, że piszesz w jednym termie dwa filtry — pierwszy szeroki, drugi szczegółowy z akcją lokalną `reject` bezpośrednio w linii `route-filter`:
 >
@@ -424,7 +424,7 @@ flowchart LR
     FF_OUT --> OUT(["Pakiet wychodzi<br/>z portu wyjściowego"])
 ```
 
-Zwróć uwagę na niesamowicie ważną kolejność na vSRX: **bezstanowy Firewall Filter (`input`) zawsze uruchamia się PRZED stanową Security Policy** (a na wyjściu `output` uruchamia się PO stanowej Security Policy). To dlatego na vSRX bezstanowy filtr `input` może zrobić FBF i zmienić tablicę routingu, zanim jeszcze silnik sesyjny wyznaczy strefę wyjściową!
+Na vSRX **stateless filter, tablica routingu i stateful security policy są różnymi punktami decyzji**. Ich dokładna kolejność przetwarzania zależy od platformy, trybu flow i konkretnej funkcji (np. FBF/NAT); diagram jest poglądową mapą diagnostyczną, nie uniwersalnym schematem wykonania w każdym PFE. Dla R1 najpierw ustalimy, co odrzuca pakiet, a dopiero potem będziemy zmieniać konfigurację.
 
 ---
 
@@ -467,7 +467,7 @@ Każdy bezstanowy Firewall Filter ma na samym końcu niewidzialny term: **`then 
 
 * **Akcje nieterminujące (pamiętaj o `next term`, jeśli mają nie kończyć filtra!):**
 
-  * **`count <NAZWA-LICZNIKA>`** — bezcenny, darmowy sprzętowy licznik pakietów i bajtów w PFE (w Cisco musiałbyś tworzyć osobne linie ACL albo class-mapy; w Junos nazywasz licznik jak chcesz i czytasz go komendą `show firewall`).
+  * **`count <NAZWA-LICZNIKA>`** — licznik pakietów i bajtów, o ile jest wspierany w danym PFE/rodzinie filtra (w Cisco musiałbyś tworzyć osobne linie ACL albo class-mapy; w Junos nazywasz licznik jak chcesz i czytasz go komendą `show firewall`).
 
   * **`log`** — zapisuje nagłówek pakietu w lokalnym buforze PFE (oglądasz go komendą **`show firewall log`** — bezpieczne dla CPU!).
 
@@ -489,7 +489,7 @@ W Cisco IOS/IOS XE, aby ochronić procesor routera (Control Plane) przed zmasowa
 
 W Junos OS interfejs logiczny **`lo0.0` jest reprezentacją samego Routing Engine (RE)** dla wszystkich pakietów **host-bound** (czyli zaadresowanych bezpośrednio do routera)!
 
-To prowadzi do genialnego zachowania: **filtr zaaplikowany jako `input` na `lo0.0` kontroluje WSZYSTKIE pakiety przeznaczone dla lokalnego Routing Engine — NIEZALEŻNIE od tego, na który fizyczny port weszły i na który lokalny adres IP routera były zaadresowane!**
+To prowadzi do genialnego zachowania: **filtr `input` na `lo0.0` jest typowym sposobem ochrony ruchu **do Routing Engine** na interfejsach danych. Nie oznacza to identycznego zachowania wszystkich ścieżek management/OOB, interfejsu `fxp0` ani każdej platformy Junos. Na vSRX kontrolę uzupełniają `host-inbound-traffic` i ewentualnie polityki `junos-host`.**
 
 * Pakiet SSH z Internetu kierowany na publiczny adres portu WAN `ge-0/0/0.0`? Przejdzie przez filtr `lo0.0 input`!
 
@@ -513,7 +513,7 @@ Wyobraź sobie, że masz na routerze 40 sąsiadów BGP i co tydzień dochodzą n
 
 Junos OS ma absolutnie genialną funkcję o nazwie **`apply-path`**, której inżynierowie Cisco szczerze zazdroszczą. Pozwala ona zbudować `prefix-list`, który **samoczynnie wysysa adresy IP wprost z Twojej aktualnej konfiguracji!**
 
-Spójrz, jak wygląda to arcydzieło automatyzacji w CLI:
+Spójrz, jak wygląda to rozwiązanie automatyzacji w CLI:
 
 **Urządzenie: R1-vSRX — Configuration Mode**
 
