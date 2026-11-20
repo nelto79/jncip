@@ -1112,3 +1112,382 @@ Warto uwzględnić również informację, czego **nie przetestowano**. Router mo
 
 ---
 
+## 4.15. Laboratorium — trzy poziomy od pierwszego vSRX do wdrożenia na DIAMOND-6R [LAB]
+
+Wszystkie poprzednie sekcje były częściami jednego projektu: uruchomić router, na którym pracować może nie tylko autor konfiguracji, ale również następna zmiana dyżuru. Teraz przejdziemy przez ten proces w laboratorium.
+
+**Status: PLANNED / NOT RUNTIME VALIDATED.** Nie mamy informacji, że maszyny vSRX, serwer NTP, TACACS+, SNMP collector lub archiwum SCP rzeczywiście zostały uruchomione. Poniższe procedury to **projekt wykonania**. Przewidywane wyniki są oznaczone jako oczekiwane; żadna linia nie udaje rzeczywistego outputu z Twojego EVE-NG.
+
+### Zanim zbudujesz laboratorium: czego potrzebujesz, a czego nie?
+
+Dla pierwszego etapu wystarczy **jedna odizolowana maszyna R1-vSRX** i niezależna konsola EVE-NG. Aby przetestować **SSH z sieci**, potrzebujesz osobnej sesji z R5 lub z Linux VM \`LAB-ADMIN\`. Aby sprawdzić NTP, syslog, SNMPv3 i archiwizację, musisz rzeczywiście uruchomić odpowiednie usługi na Linux VM \`LAB-SERVICES\` albo dostępnych usługach laboratoryjnych.
+
+W drugim etapie nie zastępujemy R5 nowym komputerem: **R5 nadal jest vSRX**, tak jak w referencyjnym DIAMOND-6R. Dodatkowe Linux VMs pełnią rolę **narzędzi administracyjnych i serwerów**, nie nowych routerów sieci danych.
+
+Połączenia R1–R4 i adresacja rdzenia **pozostają niezmienione**. Jeśli wykorzystujesz osobną wirtualną sieć OOB \`203.0.113.0/24\`, nie łącz jej do przypadkowego mostu w firmowej sieci i nie nadaj adresu \`203.0.113.10\` na istniejącym porcie \`ge-0/0/0\` R1. Najpierw upewnij się, że dany obraz vSRX ma właściwy interfejs management i że jest poprawnie mapowany przez QEMU/EVE.
+
+~~~mermaid
+flowchart TB
+   subgraph DATA["Stała sieć DIAMOND-6R (bez modyfikacji)"]
+      R5["R5 CE-A"] --- R1["R1 EDGE-A"]
+      R1 --- R2["R2 CORE-1"]
+      R1 --- R3["R3 CORE-2"]
+      R2 --- R4["R4 EDGE-B"]
+      R3 --- R4
+      R4 --- R6["R6 CE-B"]
+   end
+   subgraph OOB["Opcjonalny, niezależny segment management — wyłącznie izolowany lab"]
+      A["LAB-ADMIN<br/>203.0.113.20"]
+      S["LAB-SERVICES<br/>203.0.113.30<br/>NTP/syslog/SNMP client/SCP"]
+      M["Zweryfikowany OOB NIC R1<br/>adres 203.0.113.10"]
+      A --- M
+      S --- M
+   end
+   M -. "OOB do R1; mapowanie portu potwierdzić" .- R1
+   C["Konsola EVE-NG"] -. "niezależny recovery" .- R1
+~~~
+
+*Rysunek 4.2. OOB nie jest dodatkową trasą między R2 i R3 ani nową ścieżką ruchu użytkowników. Dokładny typ NIC i routing management muszą zostać potwierdzone na vSRX.*
+
+---
+
+### Poziom 1 [A] — jeden router: bezpiecznie uzyskaj dostęp i utwórz pierwsze konta
+
+#### Krok 0. Rozpoznanie bez zmian
+
+Wyobraź sobie, że logujesz się pierwszy raz do nowego R1. Nawet jeśli plik został opisany „factory-default”, nie wiesz jeszcze, czy poprzedni uczeń go nie modyfikował. Wykonaj pre-checki **read-only**.
+
+**R1-vSRX — Operational Mode, baseline przed zmianą**
+
+~~~junos
+show version
+show chassis hardware
+show interfaces terse
+show configuration system | display set
+show configuration interfaces | display set
+show system commit
+show system alarms
+~~~
+
+Zapisz odpowiedzi na pytania: jaki jest release Junos, czy R1 ma już hostname, jakie ma interfejsy i czy istnieją lokalne konta? Szczególnie istotne jest, czy \`fxp0\` lub inny interfejs OOB rzeczywiście istnieje w tym obrazie.
+
+Nie wklejaj pełnego wyniku do publicznego repozytorium. Jeśli zajdzie potrzeba dokumentacji, zanotuj sam wynik weryfikacji bez sekretów i prawdziwych adresów management.
+
+#### Krok 1. Ustaw hostname i bezpieczne uwierzytelnianie root
+
+W świeżym labie administrator zaczyna od identyfikacji urządzenia. Nie konfigurujemy jeszcze zdalnego AAA — najpierw musimy mieć lokalny dostęp ratunkowy.
+
+**R1-vSRX — Operational Mode, wejście do prywatnej edycji**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], pierwsze ustawienia**
+
+~~~junos
+set system host-name R1-vSRX
+set system domain-name lab.example
+set system time-zone Europe/Warsaw
+set system root-authentication plain-text-password
+show | compare
+~~~
+
+Ostatnie polecenie uruchamia **interaktywne wprowadzenie hasła**, jeśli wspiera je Twój wariant CLI; nie jest miejscem do dopisania hasła w pliku. Ustawienie root jest wymaganym elementem pierwszej konfiguracji w wielu wariantach Junos. Nie zapisuj hasła ani jego odpowiednika w publicznym repozytorium.
+
+**R1-vSRX — Configuration Mode [edit private], dopiero po sprawdzeniu diffu**
+
+~~~junos
+commit check
+commit confirmed 5
+~~~
+
+W osobnej sesji konsolowej odczytaj nową nazwę i historię commit. Jeśli wszystko jest poprawne, potwierdź warunkową zmianę w tej samej edycji; nie wykonuj kolejnego \`commit check\` po aktywacji.
+
+**R1-vSRX — Operational Mode, osobna sesja, post-check**
+
+~~~junos
+show configuration system host-name
+show configuration system domain-name
+show system commit
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], po PASS**
+
+~~~junos
+commit
+~~~
+
+Jeżeli coś poszło nie tak, najpierw sprawdź, czy warunkowa zmiana w ogóle została zatwierdzona. Nie przechodź do następnego etapu z niejasnym stanem candidate.
+
+#### Krok 2. Utwórz własne konto administracyjne
+
+Teraz dodajemy \`labadmin\` i \`nocview\`. To lepsza praktyka niż codzienne używanie konta root. Nie musimy jeszcze wymagać centralnego AAA.
+
+**R1-vSRX — Configuration Mode [edit private], konta lokalne z hasłami wprowadzanymi interaktywnie**
+
+~~~junos
+set system login user labadmin full-name "Administrator DIAMOND-6R"
+set system login user labadmin class super-user
+set system login user labadmin authentication plain-text-password
+set system login user nocview full-name "Monitoring Operator"
+set system login user nocview class read-only
+set system login user nocview authentication plain-text-password
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Podczas wpisywania \`plain-text-password\` Junos poprosi o hasło. Nie kopiuj bloków z prawdziwymi hasłami do logów ani repozytorium. Przed potwierdzeniem zmian zaloguj się jako obaj użytkownicy w **nowych sesjach**.
+
+**R1-vSRX — Operational Mode, nowa sesja jako labadmin**
+
+~~~junos
+show cli authorization
+show version
+show interfaces terse
+~~~
+
+**R1-vSRX — Operational Mode, nowa sesja jako nocview**
+
+~~~junos
+show cli authorization
+show system uptime
+show interfaces terse
+~~~
+
+Sprawdź, czy \`nocview\` nie może wykonać nieprzewidzianych zmian. Samo zalogowanie nie potwierdza prawidłowej autoryzacji. Po PASS wróć do edytora i świadomie potwierdź \`commit\`.
+
+#### Krok 3. SSH — najpierw nowy dostęp, potem ograniczenie root
+
+Włącz SSH, ale nie zakładaj, że usługa będzie dostępna przez dowolny interfejs SRX. Przeanalizuj faktyczną sieć zarządzania i strefy.
+
+**R1-vSRX — Configuration Mode [edit private], usługa SSH**
+
+~~~junos
+set system services ssh
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Gdy masz już działającą sieć OOB, spróbuj zalogować się z Linux \`LAB-ADMIN\` jako \`labadmin\`, a potem jako \`nocview\`. Jeżeli chcesz sprawdzić SSH przez link danych LAN-A, jest to **osobny, izolowany wariant**. Na SRX może wymagać dopuszczenia \`host-inbound-traffic system-services ssh\` na odpowiednim interfejsie/strefie; nie otwieraj SSH globalnie na całym ruchu CE bez potrzeby.
+
+Dopiero po pozytywnym nowym logowaniu i potwierdzeniu konsoli rozważ blokadę root SSH.
+
+**R1-vSRX — Configuration Mode [edit private], ograniczenie root SSH po działającym labadmin**
+
+~~~junos
+set system services ssh root-login deny
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Z nowej sesji sprawdź, czy \`labadmin\` nadal działa. Z konsoli potwierdź możliwość odzyskania dostępu. Nie polegaj na starej, już otwartej sesji SSH — mogłaby przetrwać mimo zmiany zasad nowego logowania.
+
+Po pozytywnym teście potwierdź \`commit\`. Jeśli nie masz klienta SSH lub nie możesz przetestować management, zaznacz **NOT TESTED**, nie PASS. W takim przypadku nie ograniczaj dostępu root wyłącznie na podstawie poprawnego \`commit check\`.
+
+#### Krok 4. Uprawnienia do odczytu i lokalne role
+
+Teraz zmienimy \`nocview\` na własną klasę i sprawdzimy jej zakres.
+
+**R1-vSRX — Configuration Mode [edit private], rola laboratoryjna NOC**
+
+~~~junos
+set system login class CH04-NOC permissions view
+set system login class CH04-NOC idle-timeout 15
+set system login user nocview class CH04-NOC
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Po warunkowym zatwierdzeniu otwórz nową sesję jako \`nocview\`. Zobacz, jakie polecenia odczytu są dostępne, a jakie wymagają innej klasy. Jeśli zadanie operatora obejmuje wgląd w konfigurację, rozważ również odpowiednie uprawnienia do jej wyświetlania, ale nie zwiększaj ich przypadkowo.
+
+W tym miejscu powinieneś już rozumieć różnicę między kontem, hasłem i uprawnieniami. Wszystkie trzy elementy muszą się ze sobą zgadzać.
+
+#### Krok 5. Pierwszy punkt ratunkowy
+
+Kiedy logowanie, konto administracyjne i dostęp konsolowy są potwierdzone, możesz zapisać rescue. Nie musisz czekać na wszystkie usługi NMS — rescue zadziała jako **punkt bazowy**, ale po zakończeniu całego onboardingu trzeba ją zaktualizować do docelowego stanu.
+
+**R1-vSRX — Operational Mode, zapis świadomie zaakceptowanego baseline**
+
+~~~junos
+request system configuration rescue save
+show system configuration rescue
+~~~
+
+**Warunek zaliczenia poziomu 1:** R1 ma znaną tożsamość, działa niezależna konsola, poprawne lokalne konto administracyjne i osobne konto z ograniczonymi uprawnieniami. SSH został potwierdzony z nowej sesji, jeśli istnieje poprawna sieć management. Rescue istnieje, ale nie została jeszcze przetestowana przez odtwarzanie.
+
+---
+
+### Poziom 2 [A → S] — usługi zarządzania i serwery zewnętrzne
+
+Drugi poziom opiera się na działającym R1 oraz **izolowanej sieci management** i prawdziwej Linux VM \`LAB-SERVICES\`. Załóżmy, że po zweryfikowaniu mappingu NIC R1 ma adres 203.0.113.10 w właściwym kontekście zarządzania, \`LAB-ADMIN\` ma 203.0.113.20, a \`LAB-SERVICES\` 203.0.113.30.
+
+W tym etapie ważna jest uczciwość testu. Jeżeli żadna Linux VM nie uruchamia NTP, to brak synchronizacji NTP jest spodziewany. Nie twórz zmyślonego outputu z udaną synchronizacją. Usługi oznaczaj jako **PASS, FAIL albo NOT TESTED**.
+
+#### Krok A. Najpierw routing do serwerów
+
+Sprawdź, czy R1 zna trasę do 203.0.113.30. Nie przypisuj adresu mgmt do R1 w ciemno — masz już sprawdzić właściwy port i jego routing instance.
+
+**R1-vSRX — Operational Mode, pre-check management**
+
+~~~junos
+show interfaces terse
+show route 203.0.113.30
+show route table mgmt_junos.inet.0
+show configuration system management-instance
+~~~
+
+Jeśli wyświetlenie \`mgmt_junos.inet.0\` nie pokazuje danych lub instancja nie jest skonfigurowana, nie zmieniaj modelu routingu ad hoc. Ustal, czy używasz default \`inet.0\` czy odrębnej instancji management; wpisy \`source-address\` muszą być zgodne z faktyczną trasą.
+
+#### Krok B. Configuration groups — wspólny szablon dla R1
+
+**R1-vSRX — Configuration Mode [edit private], grupa laboratoryjna**
+
+~~~junos
+set groups CH04-BASE system login message "DIAMOND-6R: Authorised access only"
+set apply-groups CH04-BASE
+show system login | display inheritance
+show | compare
+~~~
+
+Najpierw sprawdź, że dziedziczony tekst rzeczywiście pojawia się w wyniku. Potem ustaw lokalny wyjątek i zobacz, która wartość wygrywa. Nie używamy grup do przepisywania adresów OOB ani sekretów.
+
+**R1-vSRX — Configuration Mode [edit private], lokalny wyjątek od grupy**
+
+~~~junos
+set system login message "R1: Authorised access only"
+show system login | display inheritance
+show | compare
+~~~
+
+Wartością ćwiczenia nie jest sam komunikat logowania, tylko umiejętność rozpoznania pochodzenia ustawienia: czy zostało wpisane lokalnie, czy przyszło z grupy.
+
+#### Krok C. NTP — potwierdzamy czas, nie tylko adres
+
+Na \`LAB-SERVICES\` musi działać **prawdziwy serwer NTP**. Dopiero potem konfigurujemy jego adres na R1.
+
+**R1-vSRX — Configuration Mode [edit private], serwer czasu**
+
+~~~junos
+set system ntp server 203.0.113.30
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Podczas oczekującego commitu sprawdź status NTP w sesji Operational Mode. Nie wykonuj kolejnego \`commit check\`. Jeżeli serwer jest osiągalny, może być potrzebny czas, aby uzyskać pełną synchronizację.
+
+**R1-vSRX — Operational Mode, test synchronizacji**
+
+~~~junos
+show ntp associations
+show ntp status
+show route 203.0.113.30
+~~~
+
+Sprawdź, czy właściwy serwer jest wybrany i czy urządzenie rzeczywiście jest zsynchronizowane. Jeśli widzisz tylko skonfigurowany adres bez synchronizacji, nie wpisuj PASS. Potwierdź warunkową zmianę po właściwym teście i osiągnięciu oczekiwanego stanu.
+
+#### Krok D. Syslog — ten sam komunikat na obu końcach
+
+**R1-vSRX — Configuration Mode [edit private], lokalny i zdalny syslog**
+
+~~~junos
+set system syslog file messages any notice
+set system syslog file messages authorization info
+set system syslog host 203.0.113.30 any notice
+set system syslog host 203.0.113.30 authorization info
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Teraz potrzebujesz rzeczywistego odbiornika syslog na \`LAB-SERVICES\`. Wybierz nieszkodliwe zdarzenie, np. kontrolowany commit opisu lub logowanie w labie. Porównaj jego zapis lokalny i zdalny. Jeżeli serwer nie odbiera wiadomości, sprawdź routing, filtr, źródłowy IP i konfigurację kolektora.
+
+**R1-vSRX — Operational Mode, lokalny dowód zdarzenia**
+
+~~~junos
+show configuration system syslog | display set
+show log messages | last 30
+~~~
+
+Wynik zdalny wymaga odczytu logu na \`LAB-SERVICES\`. Nie jest zastępowany przez kolejne polecenie \`show\` na R1.
+
+#### Krok E. SNMPv3 — najpierw zakres danych, potem prawdziwe authPriv
+
+**R1-vSRX — Configuration Mode [edit private], widok i grupa SNMPv3 bez sekretów**
+
+~~~junos
+set snmp view CH04-RO oid .1 include
+set snmp v3 vacm security-to-group security-model usm security-name CH04-NMS group CH04-MON
+set snmp v3 vacm access group CH04-MON default-context-prefix security-model usm security-level privacy read-view CH04-RO
+show | compare
+~~~
+
+W tej chwili to nadal **nie jest kompletna konfiguracja użytkownika SNMPv3**. Konieczne są jeszcze zgodne z platformą parametry USM: użytkownik, algorytm uwierzytelniania, klucze i szyfrowanie. Wprowadź je bezpiecznie, korzystając z odpowiedniej instrukcji producenta i vault — nie kopiuj prawdziwych sekretów do plików \`.set\`.
+
+Gdy konfiguracja zostanie uzupełniona, z \`LAB-SERVICES\` wykonaj rzeczywisty **SNMPv3 authPriv GET**, najlepiej do \`sysUpTime.0\`. Potwierdź odpowiedź i odczytaj liczniki SNMP na R1.
+
+**R1-vSRX — Operational Mode, lokalna kontrola SNMP**
+
+~~~junos
+show snmp statistics
+show snmp v3
+show configuration snmp | display set
+~~~
+
+Jeśli NMS nie odpowiada na GET, przeanalizuj nie tylko osiągalność IP, ale także engine ID, USM, VACM, security-level oraz filtrację UDP/161. Trap UDP/162 nie jest tym samym testem.
+
+#### Krok F. Archiwizacja — backup naprawdę musi dotrzeć
+
+Teraz \`LAB-SERVICES\` pełni również rolę serwera archiwizacji. Konto \`junos-backup\` oraz katalog na serwerze muszą być przygotowane i zabezpieczone. R1 musi znać i ufać właściwemu kluczowi serwera; należy zapewnić bezpieczne uwierzytelnianie transferu.
+
+**R1-vSRX — Configuration Mode [edit private], szablon niekompletnego SCP archival**
+
+~~~junos
+set system archival configuration transfer-on-commit
+set system archival configuration archive-sites "scp://junos-backup@203.0.113.30/backup/junos/"
+show | compare
+~~~
+
+Nie zatwierdzaj szablonu jako kompletnego rozwiązania, dopóki nie przygotowano autoryzacji transferu. W rzeczywistym teście po kontrolowanym commit należy znaleźć plik **na serwerze**, sprawdzić jego zawartość i ewentualnie wczytać kopię w izolowanym środowisku do porównania.
+
+**R1-vSRX — Operational Mode, lokalna diagnostyka archival**
+
+~~~junos
+show configuration system archival | display set
+show log messages | match "archive|scp|transfer"
+~~~
+
+Jeśli po stronie serwera brak pliku, wynik to FAIL lub NOT TESTED zależnie od tego, czy usługa była uruchomiona, a nie PASS.
+
+#### Krok G. AAA — osobny, opcjonalny eksperyment za konsolą
+
+Ten etap jest opcjonalny, bo wymaga rzeczywistego TACACS+ lub RADIUS na \`LAB-SERVICES\`. Nie kopiujemy fikcyjnych sekretów ani nie tworzymy konfiguracji \`authentication-order\`, której skutki nie zostały zrozumiane.
+
+Przygotuj trzy kontrolowane przypadki:
+
+- **Accept:** serwer rozpoznaje testowego użytkownika i zwraca zgodną autoryzację.
+- **Timeout:** serwer lub ścieżka są niedostępne; sprawdzasz możliwość lokalnego dostępu awaryjnego.
+- **Reject:** serwer świadomie odmawia; porównujesz zachowanie \`tacplus\` i \`[ tacplus password ]\` zgodnie z dokumentacją Junos.
+
+Zachowaj konsolę niezależną od AAA i działające konto lokalne. Nie wykonuj globalnego wyłączania interfejsu management na działającym urządzeniu tylko po to, by zasymulować timeout. Ruch testowy blokuj w **izolowanym środowisku**, najlepiej po stronie kontrolowanego serwera lub jego firewall.
+
+**R1-vSRX — Operational Mode, read-only test środowiska AAA**
+
+~~~junos
+show configuration system authentication-order
+show configuration system tacplus-server
+show log messages | match "tac|radius|sshd|login"
+show system users
+~~~
+
+Bez prawdziwej odpowiedzi serwera i nowej sesji logowania ten scenariusz pozostaje NOT TESTED.
+
+**Warunek zaliczenia poziomu 2:** potrafisz rozróżnić skonfigurowanie usługi od jej działania. NTP naprawdę synchronizuje, syslog dociera do kolektora, SNMPv3 odpowiada na authPriv GET, backup jest widoczny na serwerze, a AAA ma przetestowane scenariusze awaryjne. Jeśli nie wdrożono któregoś serwera, status tej usługi pozostaje NOT TESTED.
+
+---
+
