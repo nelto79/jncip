@@ -1,369 +1,230 @@
-# Rozdział 3. Junos User Interfaces — CLI, konfiguracja, bezpieczny change i J-Web
+# Rozdział III. Junos User Interfaces — od pierwszego logowania do bezpiecznego zatwierdzania zmian
 
-**Podręcznik:** JUNOS Enterprise Routing & Switching · JNCIA-Junos → JNCIS-ENT → JNCIP-ENT  
-**Zakres Unified Blueprint:** **3.1–3.10 [A]** oraz **3.11 [EXT]**  
-**Redakcja:** 16 listopada 2026 · materiał wykładowy, Cisco IOS/IOS XE → Junos OS  
-**Platforma labowa:** vSRX w EVE-NG; odpowiedniki Cisco IOS XE oraz uwagi dla EX/QFX/MX i Junos OS Evolved  
-**Status weryfikacji:** dokumentacja producenta sprawdzona; przykłady konfiguracji i laboratorium są **PLANNED / NOT RUNTIME VALIDATED** (nie wykonano ich na żywym vSRX).  
-**Następna lekcja:** Rozdział 4 — initial configuration, użytkownicy, AAA, usługi i rescue configuration.
+**Podręcznik Junos Enterprise Routing & Switching • JNCIA-Junos → JNCIS-ENT → JNCIP-ENT**  
+**Blueprint:** 3.1–3.10 [A] i 3.11 [EXT]  
+**Odbiorca:** Network Engineer z około rocznym doświadczeniem. Zna znaczenie routera, adresu IP, VLAN i bramy domyślnej, ale nie musi znać Cisco, CCNA, JNCIA ani wcześniej konfigurować Junos.  
+**Wersja redakcyjna:** 3.0, 20.11.2026  
+**Topologia:** [DIAMOND-6R](../../labs/reference-diamond-6vsrx/README.md), stopniowo od jednego routera do całego układu.  
+**Status laboratoriów:** **PLANNED / NOT RUNTIME VALIDATED** — przykłady są projektem do wykonania, a nie outputem uzyskanym z uruchomionego vSRX.
 
-> **Umowa z uczniem:** nie będziemy zapamiętywać przypadkowych komend. Każda komenda odpowiada na konkretne pytanie: **co chcę zmienić, co system przygotował, co rzeczywiście działa, co może się nie udać i jak odzyskać dostęp?** Masz doświadczenie Cisco, więc wykorzystamy je jak trampolinę. Nie będziemy od nowa uczyć się routingu, tylko innego sposobu prowadzenia zmiany.
+---
 
-## 03:07 — incydent, od którego zaczyna się ta lekcja
+## Zanim wydasz pierwszą komendę
 
-W środku nocnego maintenance window masz przygotować nowe peeringi BGP, dopisać trzy prefiksy i zmodyfikować filtr wejściowy. Na Cisco IOS XE wydajesz kolejne polecenia `configure terminal`. Większość z nich działa od razu na bieżącej konfiguracji. Ktoś pomylił kolejność, zastosował błędny filtr lub niechcący odciął SSH. Teraz dowiadujesz się, jak dobra była Twoja ścieżka OOB i czy uruchomiłeś mechanizm bezpiecznego cofania zmian.
+W poprzednim rozdziale poznaliśmy dwa ważne elementy Junos. Routing Engine (RE) zajmuje się m.in. informacjami o trasach i administracją, a Packet Forwarding Engine (PFE) wykorzystuje przygotowane informacje do przekazywania ruchu. Teraz pora nauczyć się rozmawiać z urządzeniem: sprawdzać jego stan i zmieniać konfigurację bez narażania całej sieci.
 
-Na Junos także możesz odciąć sobie sieć. **To nie jest system magicznie wolny od błędów operatora.** Ale filozofia pracy zmienia się radykalnie: konfiguracja przygotowywana jest jako **candidate**, a dopiero commit aktywuje ją jako nową **active configuration**. Zanim naciśniesz przycisk, możesz zobaczyć różnicę, zweryfikować poprawność i ustawić automatyczne przywrócenie poprzedniej wersji.
+Zacznijmy od bardzo zwyczajnego zadania. W firmie masz router R1 i otrzymujesz prośbę o wpisanie opisu jednego łącza: „Połączenie do R2 — górny korytarz”. Taka zmiana nie powinna przełączyć routingu, odciąć użytkowników ani zmienić adresu IP. Mimo to warto wiedzieć, jak dokładnie trafi do działającej konfiguracji.
 
-Wyobraź sobie pilota samolotu. Pilot nie zmienia ustawień nawigacji całego lotniska za każdym razem, gdy edytuje plan lotu na ekranie. Najpierw przygotowuje i sprawdza plan, potem go aktywuje. **Candidate** jest planem przygotowanym; **active** — planem, według którego system aktualnie pracuje. Ale ważne: nawet plan zatwierdzony przez komputer może poprowadzić Cię na niewłaściwe lotnisko, jeśli podałeś niewłaściwy cel. To ograniczenie `commit check`.
+W wielu systemach, gdy zmienisz ustawienie, zaczyna ono działać od razu. **Junos rozdziela przygotowanie konfiguracji od jej aktywowania.** Administrator tworzy nową wersję roboczą, może obejrzeć różnice i dopiero potem świadomie ją zatwierdza.
 
-### Zanim przejdziemy do CLI — trzy rodzaje wiedzy
+To główna idea całego rozdziału. Każda nowa komenda będzie miała sens, jeśli będziesz potrafił odpowiedzieć: *czy właśnie tylko oglądam urządzenie, czy edytuję wersję roboczą, czy już zmieniłem działający system?*
 
-**Na pamięć:** znaki promptu `>` i `#`; operational vs configuration; `set/delete/activate/deactivate`; `show | compare`; `commit`, `commit confirmed`, `rollback 0/1`; `configure private`; różnice `load merge/replace/override/set`.
+### Nasza wspólna topologia
 
-**Do zrozumienia:** shared vs private candidate; dlaczego `commit check` nie jest testem reachability; co oznacza „zapisano plik” vs „zatwierdzono konfigurację”; czemu utrata sesji po `commit confirmed` nie zawsze oznacza, że SSH samo odżyje.
-
-**Do przećwiczenia:** wejście do hierarchii, szybkie `?` i `Tab`, filtrowanie outputu, porównanie dwóch konfiguracji, bezpieczny import fragmentu, dwa równoległe logowania administracyjne, celowy rollback i weryfikacja historii zmian.
+Nie budujemy nowej sieci tylko dla rozdziału o CLI. Obowiązuje ten sam układ **DIAMOND-6R**:
 
 ~~~mermaid
 flowchart LR
-  subgraph IOS["Cisco IOS/IOS XE — typowy ręczny workflow"]
-    A1["conf t"] --> A2["polecenie 1, 2, 3..."]
-    A2 --> A3["zmiany zwykle od razu w running-config"]
-    A3 --> A4["test / ewentualnie rollback mechanizmami Cisco"]
-  end
-  subgraph JUN["Junos OS — workflow transakcyjny"]
-    B1["configure"] --> B2["candidate: set/delete/load"]
-    B2 --> B3["show | compare"]
-    B3 --> B4["commit check"]
-    B4 --> B5["commit confirmed"]
-    B5 --> B6["test produkcyjny"]
-    B6 --> B7["commit lub automatyczny rollback"]
-  end
+  R5["R5 CE-A<br/>192.0.2.10/24"] ---|"192.0.2.0/24"| R1["R1 EDGE-A<br/>192.0.2.1/24"]
+  R1 ---|"10.12.0.0/30"| R2["R2 CORE-1"]
+  R1 ---|"10.13.0.0/30"| R3["R3 CORE-2"]
+  R2 ---|"10.24.0.0/30"| R4["R4 EDGE-B<br/>198.51.100.1/24"]
+  R3 ---|"10.34.0.0/30"| R4
+  R4 ---|"198.51.100.0/24"| R6["R6 CE-B<br/>198.51.100.10/24"]
 ~~~
 
-*Diagram dydaktyczny: na wybranych platformach IOS XE istnieją również archiwizacja, configuration replace i confirmed rollback. Porównanie przedstawia typowy styl pracy CLI, a nie twierdzenie, że Cisco nie ma mechanizmów transakcyjnych.*
+*Rysunek 3.1. Do nauki samego CLI wystarczy R1. R5 posłuży później jako drugi router do kontrolowanego testu konfiguracji, a R1–R6 jako kontekst dużej zmiany. Wszystkie adresy końców łączy i nazwy portów są w [referencji DIAMOND-6R](../../labs/reference-diamond-6vsrx/README.md).*
+
+R1 ma `ge-0/0/0.0` do R2 (10.12.0.1/30), `ge-0/0/1.0` do R3 (10.13.0.1/30) i `ge-0/0/2.0` do R5 (192.0.2.1/24). W tym rozdziale **nie będziemy zmieniać adresacji ani protokołów routingu**. Ćwiczymy narzędzia administracyjne, nie złożony routing. Nie ma powodu, aby początkujący uczeń uruchamiał sześć routerów tylko po to, by nauczyć się polecenia `show`.
 
 ---
 
-## Wspólna topologia szkoleniowa DIAMOND — obowiązująca adresacja
+## 3.1. Czym jest CLI i jak rozmawia się z Junos? [A]
 
-**Źródło prawdy:** [DIAMOND — Mermaid + pełne adresy obu końców każdego łącza](../../labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) oraz [tabela interfejsów i loopbacków](../../labs/reference-diamond-4vsrx-2vpcs/README.md). Diagram poniżej jest ten sam we wszystkich rozdziałach — **4×vSRX + 2×VPCS, sześć segmentów**.
+**CLI** oznacza *Command-Line Interface* — interfejs tekstowy, w którym wydajesz polecenia urządzeniu. Komendami można odczytywać informacje, wykonywać testy, zmieniać ustawienia i sprawdzać wyniki.
 
-```mermaid
-flowchart LR
-  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
-  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
-  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
-  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
-  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
-  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+Do CLI Junos najczęściej trafisz przez **konsolę** albo przez **SSH**. Konsola jest bezpośrednim kanałem dostępu do urządzenia lub jego maszyny wirtualnej. SSH to szyfrowana sesja sieciowa, wymagająca działającej drogi do adresu zarządzania oraz odpowiedniej usługi. W EVE-NG konsola jest szczególnie przydatna, ponieważ może pozostać dostępna nawet wtedy, gdy sam przypadkowo popsujesz konfigurację sieciową.
 
-  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
-  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
-  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
-  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
-  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
-  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
-
-  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
-  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
-  class R1,R2,R3,R4 vsrx;
-  class PCA,PCB vpcs;
-```
-
-Wszystkie demonstracje `candidate`, `commit confirmed`, `rollback`, `load set` i `configure private` wykonujemy na **R1-vSRX z tej topologii** albo jego izolowanej kopii. R1 ma uplink do R2 na `ge-0/0/0.0` (`10.12.0.1/30`), uplink do R3 na `ge-0/0/1.0` (`10.13.0.1/30`) i LAN PC-A na `ge-0/0/2.0` (`192.0.2.1/24`). Diagramy procesów konfiguracji i administracji nadal pokazują *workflow*, nie inną sieć fizyczną.
-
----
-
-## 3.1. Funkcje CLI i zasady interakcji z systemem [A]
-
-### 3.1.1. Dlaczego Junos CLI nie przypomina „samego routera z komendami”
-
-W poprzednim rozdziale poznaliśmy RE i daemony. CLI nie jest osobną magiczną instancją routingu: jest interfejsem człowieka do stanu urządzenia i systemu konfiguracji, powiązanym z usługami zarządzania (m.in. `mgd`). Możesz zarządzać urządzeniem przez konsolę, SSH, protokoły automatyzacyjne, a na wspieranych platformach także J-Web.
-
-Przy pierwszym logowaniu do Junos zwykle widzisz prompt podobny do `user@R1>`. Pierwsza ważna różnica względem Cisco: **nie używasz polecenia `enable`**, by podnieść uprawnienia. Klasa użytkownika / autoryzacja określa, jakie polecenia możesz wykonywać. Sam prompt `>` **nie oznacza**, że masz uprawnienia superuser.
-
-**Most z Cisco:** w IOS/IOS XE przyzwyczaiłeś się do user EXEC, privileged EXEC i global configuration. W Junos rozdział opiera się na **trybie operational i configuration**, a poziom uprawnień wynika z konta/klasy oraz konfiguracji uwierzytelniania i autoryzacji. Pełne login classes i TACACS/RADIUS pojawią się w rozdziale 4.
-
-### 3.1.2. Trzy środowiska, z których nie wszystkie są „trybem CLI”
-
-**Operational CLI** to interfejs diagnostyczny/zarządczy. **Configuration CLI** to edytor hierarchii. **System shell** to środowisko leżącego pod Junos systemu operacyjnego: zwykle powłoka FreeBSD w klasycznym Junos, a na Junos OS Evolved — środowisko Linux.
-
-Nie nazywaj każdego promptu z `%` „trybem jądra”. To powłoka **użytkownika systemu operacyjnego**, nie jądro. I nie zakładaj, że na każdej platformie shell musi wyglądać identycznie.
-
-**Urządzenie: R1-vSRX — Operational Mode (przykładowa sesja, ilustracyjna)**
+Po zalogowaniu możesz zobaczyć coś takiego:
 
 ~~~text
-user@R1-vSRX> show version
-user@R1-vSRX> show cli
-user@R1-vSRX> show system users
+operator@R1-vSRX>
 ~~~
 
-`show cli` odpowiada na pytanie o ustawienia sesji (terminal, screen length/width, completion). `show system users` pomaga zobaczyć, kto jeszcze jest zalogowany. Właśnie od tego zaczyna się dobry precheck do nocnego change'u.
+To **prompt**, czyli znak zachęty. Pokazuje, że system czeka na kolejne polecenie. Nazwa po znaku `@` oznacza urządzenie, do którego jesteś zalogowany. W przykładach stosujemy nazwy zgodne z topologią; Twój realny vSRX może początkowo pokazywać inną nazwę.
 
-**Pytanie kontrolne:** czy `>` oznacza „bezpieczny read-only”? **Nie.** W operational mode możesz także wykonać `clear`, `request`, wyłączenie urządzenia i inne działania zmieniające stan systemu, zależnie od uprawnień. Polecenia **nie edytują candidate configuration**, ale to nie znaczy, że nie mogą wywołać przestoju.
-
-### 3.1.3. Shell i gotcha z bezpieczeństwem
-
-**Urządzenie: R1-vSRX — Operational Mode, tylko w LAB z odpowiednimi uprawnieniami**
+**R1-vSRX — Operational Mode: pierwszy, bezpieczny odczyt**
 
 ~~~junos
-start shell
+show version
+show system uptime
+show interfaces terse
+show system users
 ~~~
 
-**Urządzenie: R1-vSRX — shell systemowy, przykład klasycznego Junos**
+Co mówią te polecenia? `show version` pokazuje model i wersję systemu. `show system uptime` mówi, jak długo działa urządzenie. `show interfaces terse` wyświetla krótką listę interfejsów i ich stanu. `show system users` pomaga sprawdzić, kto jeszcze jest zalogowany.
 
-~~~sh
-pwd
-exit
+Pamiętaj o jednej rzeczy: **tryb operational nie oznacza automatycznie trybu tylko do odczytu**. Można w nim także wykonywać działania operacyjne o poważnych skutkach — na przykład restart lub czyszczenie określonego stanu. Na początku ograniczamy się do poleceń kontrolnych.
+
+### CLI, Configuration Mode i shell nie są tym samym
+
+Junos udostępnia dwa główne obszary pracy administratora: tryb wykonywania poleceń operacyjnych oraz tryb edycji konfiguracji. W tle działa również system operacyjny, a na wybranych platformach można wejść do jego **shella**, czyli powłoki systemowej.
+
+Shell nie jest „wyższym poziomem CLI” ani skrótem do konfiguracji routera. Daje dostęp do innej warstwy systemu i nie obejmuje go zwykły model edycji candidate/commit. Dlatego nie będziemy używać go do zmieniania plików konfiguracji. Dla początkującego inżyniera bezpieczniejszym wyborem jest standardowy Junos CLI.
+
+**R1-vSRX — Operational Mode: rozpoznanie własnego środowiska**
+
+~~~junos
+show cli
+show version
+help apropos commit
 ~~~
 
-Nie używaj shella do rutynowego monitoringu, skoro istnieją komendy CLI. Nie edytuj `juniper.conf` bezpośrednio edytorem systemowym ani nie traktuj dostępu do shella jako odpowiednika `configure`. Ewentualne problemy z plikami i recovery wymagają jawnej procedury oraz zgodności z wersją.
-
-**Gotcha Cisco:** `start shell` nie jest „bezpieczniejszym enable”. To przejście do innej warstwy systemu, gdzie błędy nie są objęte zwykłą transakcją `candidate/commit`.
+Polecenie `help apropos` pozwala szukać pomocy po słowie kluczowym. Nie musisz znać składni wszystkich komend; ważne, żeby wiedzieć, jak bezpiecznie ją odnaleźć.
 
 ---
 
-## 3.2. Operational mode vs configuration mode [A]
+## 3.2. Operational Mode i Configuration Mode — co właściwie zmienia znak promptu? [A]
 
-### 3.2.1. Co naprawdę zmienia znak promptu?
+Po zalogowaniu zobaczyłeś znak **`>`**. Zwykle oznacza **Operational Mode**, w którym sprawdzasz stan i wykonujesz polecenia operacyjne. Aby zmienić konfigurację, musisz przejść do osobnego trybu.
 
-W Junos zwykle zobaczysz:
-
-- `user@host>`: **operational** — obserwacja i działania operacyjne.
-- `[edit]` nad `user@host#`: **configuration** — budowanie/zmiana candidate.
-
-Bardzo ważne: na Cisco `#` kojarzy Ci się z uprzywilejowanym EXEC. Na Junos jest znakiem promptu konfiguracji. Nie próbuj bezmyślnie kopiować poleceń Cisco z `#` do Junos `#`.
-
-**Urządzenie: R1-vSRX — Operational → Configuration Mode**
+**R1-vSRX — Operational Mode: przejście do edycji**
 
 ~~~junos
 configure
 ~~~
 
-**Urządzenie: R1-vSRX — Configuration Mode**
+Teraz prompt może wyglądać tak:
+
+~~~text
+[edit]
+operator@R1-vSRX#
+~~~
+
+Znak **`#`** oznacza, że znajdujesz się w **Configuration Mode**. Wiersz `[edit]` informuje, że oglądasz najwyższy poziom drzewa konfiguracji.
+
+Nie chodzi tylko o inny znak. W Configuration Mode pracujesz z **candidate configuration** — konfiguracją przygotowywaną do zatwierdzenia. Samo wpisanie nowej wartości nie musi jeszcze zmienić zachowania routera.
+
+**R1-vSRX — Configuration Mode [edit]: pierwsze polecenia**
 
 ~~~junos
-show
+show system
 top
 run show version
+~~~
+
+`show system` pokazuje gałąź **konfiguracji**, nie bieżący stan CPU ani interfejsów. `top` wraca do najwyższego poziomu hierarchii. `run show version` pozwala wykonać polecenie operacyjne, nie opuszczając edytora.
+
+Słowo `run` jest przydatne, gdy przeglądasz konfigurację i chcesz szybko sprawdzić np. stan portu. Nie wszystkie działania dostępne w Operational Mode da się jednak uruchamiać w każdym kontekście przez `run`; to zależy od polecenia i wydania Junos.
+
+**R1-vSRX — Configuration Mode [edit]: powrót do trybu operacyjnego**
+
+~~~junos
 exit
 ~~~
 
-Co właśnie zrobiłeś? **`show` w configuration mode** pokazuje kontekst konfiguracji, a **`run show version`** pozwala wykonać polecenie operacyjne bez opuszczania edytora. `top` przenosi do korzenia hierarchii. `exit` na głównym poziomie wraca do operational; jeśli w candidate pozostały niezatwierdzone zmiany, system może poprosić o potwierdzenie opuszczenia trybu.
+Gdy na urządzeniu są niezapisane zmiany w candidate, system może poprosić o decyzję przy wyjściu. Nie klikaj ani nie zatwierdzaj komunikatu mechanicznie — sprawdź, czy w edytorze nie ma potrzebnych zmian.
 
-**Most z Cisco:** w `(config)#` do komend operacyjnych często używasz `do show ...`. W Junos najbliższym funkcjonalnym odpowiednikiem jest `run show ...`.
+### Pierwsze rozróżnienie, które warto zapamiętać
 
-### 3.2.2. Istotny wyjątek: nie wszystkie polecenia operational wolno poprzedzić run
+`show interfaces terse` w Operational Mode to odczyt stanu interfejsów. Natomiast `show interfaces` w Configuration Mode to odczyt części konfiguracji, którą przygotowujesz do aktywacji.
 
-Przykładowo dokumentacja polecenia `show system rollback` zaznacza, że **nie działa ono przez `run` z configuration mode**. Dlatego zasada „wystarczy dać `run` przed dowolnym operational show” byłaby zbyt prosta.
+Podobne słowa, lecz dwa różne pytania. Dlatego przy każdym bloku CLI w podręczniku będziemy wskazywać **hostname i tryb pracy**. Jeśli kopiujesz polecenie, najpierw zobacz, czy router pokazuje `>`, czy `#`.
 
-**Urządzenie: R1-vSRX — Operational Mode**
-
-~~~junos
-show system rollback 1
-show system commit
-~~~
-
-**Zapamiętaj:** `run` rozwiązuje większość codziennych potrzeb, ale CLI ma ograniczenia poleceń. W razie problemu sprawdź dokumentację konkretnej komendy, zamiast szukać „błędu Junos”.
-
-### 3.2.3. Jak nie pomylić edycji z natychmiastową zmianą sieci
-
-Wpisanie `set interfaces ...` w configuration mode zazwyczaj zmienia **candidate**, nie bieżący forwarding. Dopóki nie wykonasz skutecznego commit, Active pozostaje bez zmian. To nie znaczy, że wszystkie polecenia w configuration mode są nieszkodliwe: **`commit`, `load override`, `rollback` i polecenia masowej edycji mogą mieć poważne skutki po zatwierdzeniu**.
-
-Urządzenie i jego wersja mogą także posiadać mechanizmy dynamicznej/ephemeral configuration. Na poziomie tego rozdziału uczymy się **standardowej bazy konfiguracji Junos**, z którą najczęściej pracujesz w CLI.
-
-### 3.2.4. Prosta próba z własną hipotezą
-
-**Urządzenie: R1-vSRX — Configuration Mode, wyłącznie izolowany LAB**
+**R1-vSRX — Operational Mode: odczyt aktywnej konfiguracji bez przechodzenia do edytora**
 
 ~~~junos
-set system login message "LAB CH03 - test candidate"
-show | compare
-rollback 0
-show | compare
+show configuration interfaces ge-0/0/0
 ~~~
 
-Przewidywanie: po `set` diff będzie zawierał dodany login message; po `rollback 0` różnica z active zniknie (zakładając brak innych zmian). **Żaden commit nie został wykonany**, więc aktywna konfiguracja nie została zmieniona.
-
-Jeśli nie zniknie — sprawdź, czy edytujesz wspólną konfigurację równocześnie z inną sesją, czy pozostajesz w innym edit level, czy w międzyczasie ktoś wykonał commit.
-
-
+To ważny most między trybami: w Operational Mode można wyświetlić aktualnie **zatwierdzoną konfigurację**, nawet gdy nie chcesz niczego zmieniać.
 
 ---
 
-## 3.3. Nawigacja po hierarchii konfiguracji i poleceniach CLI [A]
+## 3.3. Hierarchia konfiguracji — dlaczego drzewo jest lepsze niż przypadkowa lista linii? [A]
 
-### 3.3.1. Dlaczego hierarchia jest wielką zaletą — i pierwszą pułapką inżyniera Cisco?
+W Junos konfiguracja ma budowę **hierarchiczną**. To znaczy, że ustawienia znajdują się w odpowiednich gałęziach drzewa, podobnie jak pliki w katalogach na komputerze.
 
-Na Cisco znasz takie podejście: `interface GigabitEthernet1/0/12`, potem `description`, `switchport mode access`, następnie `exit` i kolejna sekcja. W Junos prawie cała konfiguracja jest **drzewem**, a nie jedynie sekwencją poleceń. Zamiast zapamiętać plik od góry do dołu, możesz odnaleźć właściwą **gałąź**: `system`, `interfaces`, `routing-options`, `protocols`, `policy-options`, `security`.
+Wyobraź sobie, że opisujesz port R1 do R2. Informacja nie istnieje w próżni. Należy do konkretnego interfejsu, który z kolei należy do gałęzi `interfaces`.
 
-Wyobraź sobie wielki biurowiec, a w nim pokoje. Jeśli przebywasz w pokoju `[edit interfaces ge-0/0/1]` i dopisujesz `set description "UPLINK"`, to edytujesz **opis tylko tego interfejsu**. Jeżeli z tego miejsca zaczniesz wpisywać `set system host-name...`, polecenie nie odwoła się automatycznie do root. W Junos **kontekst ma znaczenie**.
-
-Zobacz najpierw jeden fragment hierarchii. To **przykład struktury**, a nie wynik odczytany z Twojego vSRX.
-
-**Urządzenie: R1-vSRX — przykład widoku Configuration Mode [edit interfaces]**
-
-~~~junos
-interfaces {
-    ge-0/0/0 {
-        description "P2P-TO-R2";
-        unit 0 {
-            family inet {
-                address 10.12.0.1/30;
-            }
-        }
-    }
-}
+~~~text
+interfaces
+└── ge-0/0/0
+    ├── description
+    └── unit 0
+        └── family inet
+            └── address 10.12.0.1/30
 ~~~
 
-`ge-0/0/0` to port fizyczny, `unit 0` to logiczny interfejs, `family inet` określa rodzaj adresowania, a `address` konkretną wartość. Dla Cisco intuicyjnie możesz to porównać do interfejsu z adresem L3, ale **Juniper rozdziela interfejs fizyczny, logiczną jednostkę i family**.
+To uproszczony obraz jednej małej części konfiguracji R1. `ge-0/0/0` to nazwa interfejsu. `unit 0` oznacza jednostkę logiczną, a `family inet` — rodzinę protokołów IPv4. Dokładniej omówimy interfejsy i jednostki logiczne w rozdziale IV. Teraz ważne jest to, **gdzie** wpisujesz polecenie.
 
-Teraz to samo zobaczymy jako polecenia **set**:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
+**R1-vSRX — Operational Mode: wejście do edycji**
 
 ~~~junos
-set interfaces ge-0/0/0 description "P2P-TO-R2"
-set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.1/30
-show interfaces ge-0/0/0
-show | compare
+configure
 ~~~
 
-Jeśli R1 ma już taką adresację od wcześniejszego laboratorium, traktuj te linie jako **odczyt/rekonstrukcję istniejącej konfiguracji**, nie jako bezrefleksyjną zmianę. Prawidłowy workflow zaczyna się od `show interfaces ge-0/0/1` oraz sprawdzenia rzeczywistej roli portu.
-
-### 3.3.2. Poruszamy się po drzewie — praktyka zamiast listy pojęć
-
-Wolisz wejść do pokoju i pisać krócej? Tak, ale pamiętaj, gdzie jesteś.
-
-**Urządzenie: R1-vSRX — Configuration Mode, demonstracja na istniejącym interfejsie**
+**R1-vSRX — Configuration Mode [edit]: nawigacja do konkretnej gałęzi**
 
 ~~~junos
-top
-edit interfaces ge-0/0/1
+edit interfaces ge-0/0/0
 show
 up
 top
-show interfaces ge-0/0/1
+show interfaces ge-0/0/0
 ~~~
 
-Po `edit interfaces ge-0/0/1` prompt powinien wskazywać `[edit interfaces ge-0/0/1]`; `up` wraca do `[edit interfaces]`; `top` przenosi do `[edit]`. Nie musisz powtarzać pełnej ścieżki, gdy jesteś głęboko zagnieżdżony.
+Gdy jesteś w `[edit interfaces ge-0/0/0]`, `show` dotyczy właśnie tego interfejsu. `up` przechodzi poziom wyżej, a `top` wraca do początku drzewa. To tak, jakbyś przechodził do katalogu, wracał do katalogu nadrzędnego albo wracał do korzenia.
 
-**Haczyk:** `exit` **nie zawsze wychodzi z configuration mode**. W zagnieżdżonym miejscu zwykle przechodzi poziom wyżej; dopiero przy `[edit]` kończy tryb konfiguracji. Jest też jawne `exit configuration-mode`.
+Możesz też używać pełnej ścieżki bez wchodzenia do każdej gałęzi. To wygodne podczas automatyzacji i dla osób, które na początku łatwo gubią się w hierarchii.
 
-**Urządzenie: R1-vSRX — Configuration Mode**
+**R1-vSRX — Configuration Mode [edit]: pełna ścieżka do ustawienia**
 
 ~~~junos
-top
-edit interfaces ge-0/0/1 unit 0
-up
-exit
-top
-exit
+show interfaces ge-0/0/0 | display set
 ~~~
 
-Ostatnie `exit` kończy tryb configuration, ale przy niezapisanych zmianach może pojawić się pytanie. **Nie ucz się mechanicznie polecenia `exit` bez obserwacji `[edit ...]` nad promptem.**
+Wynik w formacie `set` pokazuje hierarchię spłaszczoną do pojedynczych poleceń. Ułatwia to odczyt i kopiowanie **konfiguracji**, ale nie oznacza, że system przechowuje dwie różne jej wersje.
 
-### 3.3.3. `top`, `up`, `edit`, `run` — mapa piętra
+### Co robi `delete`, gdy jesteś w niewłaściwej gałęzi?
 
-~~~mermaid
-flowchart TB
-  ROOT["[edit]"] --> SYS["[edit system]"]
-  ROOT --> IF["[edit interfaces]"]
-  IF --> GE["[edit interfaces ge-0/0/1]"]
-  GE --> UNIT["[edit interfaces ge-0/0/1 unit 0]"]
-  UNIT --> IP["[edit interfaces ge-0/0/1 unit 0 family inet]"]
-  IP -. "up" .-> UNIT
-  IP -. "top" .-> ROOT
-  GE -. "edit unit 0" .-> UNIT
-  GE -. "run show interfaces terse" .-> OP["Operational command"]
-~~~
+Konfiguracja hierarchiczna jest wygodna, ale wymaga ostrożności. Usunięcie jednej wartości, np. opisu portu, ma zupełnie inne konsekwencje niż usunięcie całej gałęzi `interfaces ge-0/0/0`, która może zawierać adresy i inne parametry.
 
-Przygodne pytanie instruktora: stoisz w `[edit interfaces ge-0/0/1 unit 0 family inet]`. Chcesz sprawdzić, czy routing table pokazuje trasę connected. Czy musisz wyjść pięć razy przez `exit`? **Nie.** Używasz `run show route`.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit interfaces ge-0/0/1 unit 0 family inet]**
-
-~~~junos
-run show route
-top
-~~~
-
-### 3.3.4. Wybieranie dokładnej ścieżki i pułapka z `delete`
-
-Załóżmy, że w hierarchii portu znajduje się opis, MTU i adres. Chcesz usunąć sam opis. Na Cisco to `no description`. W Junos to `delete interfaces ge-0/0/1 description` z root konfiguracji albo po wejściu do interfejsu po prostu `delete description`.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
-
-~~~junos
-delete interfaces ge-0/0/1 description
-show | compare
-~~~
-
-**Gotcha:** `delete interfaces ge-0/0/1` usuwa **całą gałąź**, w tym adres, unit i inne parametry. To fundamentalna różnica między odłączeniem jednego liścia a wycięciem całego drzewa. Dlatego zanim wykonasz `delete`, przeczytaj ścieżkę i sprawdź `show | compare`.
-
-Jeżeli komenda była jedynie ćwiczeniem, cofnij niezatwierdzoną zmianę:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit], tylko jeśli nie chcesz zachować żadnych niezacommitowanych zmian**
-
-~~~junos
-rollback 0
-show | compare
-~~~
-
-**Nie rób `rollback 0` w shared candidate, jeśli inni administratorzy mają tam własne niezatwierdzone poprawki.**
+W kolejnej sekcji nauczysz się używać `set` i `delete` na nieszkodliwym opisie. Na razie zapamiętaj: **przed usunięciem czegokolwiek sprawdź aktualną hierarchię**, a po zmianie zobacz `show | compare`.
 
 ---
 
-## 3.4. Pomoc kontekstowa i uzupełnianie poleceń [A]
+## 3.4. Pomoc kontekstowa — nie musisz znać całego CLI na pamięć [A]
 
-### 3.4.1. Najbardziej niedoceniane narzędzie inżyniera: nie Google, tylko `?`
+Kiedy pierwszy raz otworzysz Configuration Mode, liczba możliwych poleceń może wydawać się ogromna. Nie ma sensu uczyć się wszystkich hierarchii od pierwszego dnia. Ważniejsze jest zrozumienie, **jak Junos podpowiada dostępne możliwości**.
 
-W Cisco możesz wpisywać `?` i wybierać możliwe opcje. Junos również oferuje pomoc kontekstową, często bardzo bogatą. Podczas egzaminu, laboratorium i change'u **nie musisz pamiętać pełnej składni każdej komendy**. Musisz wiedzieć, gdzie znaleźć dalszy element drzewa.
+Wyobraź sobie, że chcesz sprawdzić składnię konfiguracji opisu interfejsu. Znasz gałąź `interfaces`, ale nie pamiętasz reszty. W Junos znak **`?`** pokazuje pomoc w miejscu, w którym się znajdujesz. W tym przypadku wpisz polecenie częściowo, a potem znak zapytania.
 
-Powiedzmy, że nigdy wcześniej nie konfigurowałeś konkretnie `system login message`. Nie googluj przypadkowego wpisu z forum. Zapytaj CLI o możliwe następne parametry.
-
-**Urządzenie: R1-vSRX — Operational Mode**
+**R1-vSRX — Configuration Mode [edit]: pomoc w gałęzi interfejsu**
 
 ~~~junos
-show ?
-show interfaces ?
-help apropos "commit"
-help topic interfaces
+set interfaces ge-0/0/0 ?
 ~~~
 
-**Urządzenie: R1-vSRX — Configuration Mode**
+To nie jest próba zatwierdzenia niepełnej konfiguracji. System ma pokazać, jakie słowa i argumenty są możliwe w tym miejscu.
+
+Drugi przydatny mechanizm to **uzupełnianie poleceń** klawiszem `Tab`. Gdy wpiszesz początek jednoznacznej komendy, CLI może uzupełnić resztę. Jeśli jest kilka możliwości, poproś o listę. Część zachowań zależy od ustawień sesji, wersji Junos i liczby pasujących słów.
+
+**R1-vSRX — Operational Mode: pomoc opisowa i ustawienia sesji**
 
 ~~~junos
-top
-set system ?
-set interfaces ?
-help reference system
-~~~
-
-**Uwaga:** znaki `?` oznaczają interaktywny mechanizm pomocy. Jeżeli wgrywasz plik poleceń, nie traktuj tych przykładów jako linijek konfiguracji do `load set`. Dostępność konkretnych tematów `help topic`/`help reference` zależy od wydania i obecności pakietu dokumentacji.
-
-### 3.4.2. Tab, Space i jednoznaczność
-
-`Tab` pomaga dokończyć rozpoznawalne słowo kluczowe i nazwy. Junos może również wykorzystywać spację jako autocomplete, zgodnie z ustawieniem `CLI complete-on-space`. Jeśli wpisałeś zbyt krótki, niejednoznaczny fragment, CLI nie powinno zgadywać, czy chodzi Ci o `interfaces`, `interface-range` czy inną opcję.
-
-**Urządzenie: R1-vSRX — Operational Mode**
-
-~~~junos
-show cli
-set cli complete-on-space on
+help apropos interface
+help apropos rollback
 show cli
 ~~~
 
-**To ustawienie wpływa na Twoją interaktywną sesję CLI**, nie jest zmianą konfiguracji wszystkich interfejsów urządzenia. Sprawdź wersję przed użyciem konkretnej formy polecenia.
+Dwie pierwsze linie wyszukują informacje po słowie. Ostatnia pozwala sprawdzić ustawienia terminala. Zobacz, dlaczego to wygodniejsze od losowego wklejania komend znalezionych w Internecie: CLI odpowiada z uwzględnieniem tego, czego **Twoja platforma i wydanie** rzeczywiście potrafią oczekiwać.
 
-**Ćwiczenie:** wpisz `show int`, naciśnij `Tab`, a następnie porównaj zachowanie przy `show interfaces te`. Klucz do skutecznego używania autocomplete to znalezienie **wystarczająco jednoznacznego prefiksu**, a nie liczenie na magię.
+### Długa odpowiedź z routera nie musi zasypać terminala
 
-### 3.4.3. Ustawienia terminala, które ratują długą noc
+Przy niektórych poleceniach wynik ma kilkaset linii. Junos może zatrzymywać ekran i czekać na dalsze przewijanie — to nazywamy **paginacją**. Jeśli potrzebujesz skopiować cały output, możesz ją czasowo wyłączyć w swojej sesji.
 
-Gdy analizujesz długi output, stronicowanie `---(more)---` pomaga go czytać. Przy automatyzacji może przeszkadzać. Junos pozwala sterować liczbą wierszy i szerokością terminala.
-
-**Urządzenie: R1-vSRX — Operational Mode**
+**R1-vSRX — Operational Mode: ustawienia czytelności terminala**
 
 ~~~junos
 show cli
@@ -372,265 +233,254 @@ set cli screen-width 160
 show cli
 ~~~
 
-`screen-length 0` oznacza brak pauz po każdym ekranie. Jest wygodne dla skryptów i kopiowania outputu, ale przy dużej tablicy BGP terminal może zalać Cię tysiącami linii. Wtedy zamiast zwiększać scrollback, użyj `| match`, `| find` albo `| no-more` tylko dla konkretnej komendy.
+`screen-length 0` wyłącza pauzy między ekranami. Ustawienie dotyczy sesji CLI, a nie działania portów routera. Przy bardzo obszernych wynikach brak paginacji może być uciążliwy, więc warto przywrócić normalną długość ekranu.
 
-**Urządzenie: R1-vSRX — Operational Mode**
+**R1-vSRX — Operational Mode: ponowne włączenie paginacji**
 
 ~~~junos
 set cli screen-length 24
-show cli
 ~~~
 
-**Cisco-moment:** `terminal length 0` w Cisco i `set cli screen-length 0` w Junos rozwiązują bardzo podobny problem z paginacją.
-
-### 3.4.4. Co, jeśli CLI nie zna komendy?
-
-Podczas migracji Cisco → Junos łatwo wpaść w nawyk „komenda powinna istnieć, bo jest logiczna”. Ale CLI Junos jest **zależny od platformy i wydania**. Polecenie PFE z MX nie musi działać na vSRX, a funkcje J-Web dostępne na EX nie muszą działać na innym urządzeniu.
-
-Rzetelna reakcja:
-1. Wpisz `?` w miejscu, gdzie spodziewasz się argumentu.
-2. Sprawdź `show version`.
-3. Sprawdź [Junos CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/).
-4. Zweryfikuj rodzaj platformy (EX, MX, QFX, SRX, Junos Evolved).
-5. Dopiero potem twierdź, że polecenie jest niedostępne lub ma inną nazwę.
-
-Nie ucz się diagnozy „router zepsuty” na podstawie `syntax error` po wklejeniu cudzej komendy.
+Jeśli polecenie nie istnieje na danym vSRX, nie zakładaj od razu, że urządzenie jest zepsute. Sprawdź `show version`, użyj `?` i odpowiedniej dokumentacji. W Juniper podobna funkcja może mieć inną implementację na EX, MX, QFX i SRX.
 
 ---
 
-## 3.5. Filtrowanie wyników poleceń — twoja lupa do CLI [A]
+## 3.5. Filtrowanie wyników — znajduj potrzebne informacje zamiast czytać każdą linię [A]
 
-### 3.5.1. Nie odczytujesz całej książki telefonicznej, żeby znaleźć jeden numer
+W rozdziale II wykonywałeś `show interfaces terse` i `show route`. W małym labie ich wyniki nie są szczególnie długie. W dużej firmie router może mieć setki interfejsów, wiele wpisów logów i ogromną tablicę tras. Szybko zobaczysz, że samo `show` nie wystarcza.
 
-Na C9500 znasz `show run | section`, `show ... | include`, `exclude` i `begin`. W Junos filtrujesz wyniki przez znak pipe `|`, ale masz też narzędzia typowe dla wyświetlania **konfiguracji jako danych strukturalnych**.
+Junos pozwala dopisać do polecenia znak **`|`**, nazywany *pipe*. Po nim umieszczasz sposób przetworzenia wyniku. Najpierw nauczmy się czterech najprostszych.
 
-**Najważniejszy błąd, którego chcę Cię oduczyć:** `show route | count` **nie liczy tras**. Zlicza **wiersze tekstu powstałego z danego polecenia**. Jeśli wiersz route zajmuje trzy linie, wynik count nie odpowiada liczbie prefiksów.
-
-### 3.5.2. Szukasz jednej wiadomości, nie tysiąca linii
-
-Przypuśćmy, że monitorujesz incydent z interfejsem `ge-0/0/1` i BGP. W logu jest kilkadziesiąt tysięcy wpisów. Nie kopiuj wszystkiego do ticketu.
-
-**Urządzenie: R1-vSRX — Operational Mode**
+**R1-vSRX — Operational Mode: ograniczenie liczby linii**
 
 ~~~junos
-show interfaces terse | match ge-0/0/1
-show log messages | match "rpd|bgp|ge-0/0/1"
-show log messages | except "SNMP"
-show log messages | last 30
-show interfaces extensive | find "ge-0/0/1"
+show interfaces terse | match ge-0/0
+show interfaces terse | except lo0
+show log messages | last 20
+show interfaces extensive | find ge-0/0/0
 ~~~
 
-- `match` — wybiera linie pasujące do wzorca.
-- `except` — wyklucza linie pasujące do wzorca.
-- `last` — pokazuje końcową część wyjścia (w pewnych warunkach co najmniej rozmiar ekranu).
-- `find` — zaczyna wyświetlanie od pierwszego trafienia i pokazuje także **dalszy kontekst**, nie tylko pasujące linie.
+`match` pokazuje tylko linie zawierające dopasowanie do wzorca. `except` odrzuca pasujące linie. `last` pomaga zobaczyć końcówkę outputu. `find` zaczyna wyświetlanie od znalezionego miejsca, często zachowując dalszy kontekst.
 
-**Gotcha:** `find` i `match` **nie są zamienne**. Gdy szukasz statusu portu wraz z kolejnymi licznikami, `find` może dać potrzebny kontekst. Gdy chcesz jedynie wpisy ze słowem „error”, `match` da krótszy wynik.
+Przy pierwszym czytaniu wyników `show interfaces extensive` łatwo pomylić `find` z `match`. Pierwsze polecenie zwykle pokaże również tekst **po** odnalezionym miejscu, podczas gdy `match` ograniczy wynik do dopasowanych linii. Jeśli szukasz całego bloku liczników portu, `find` może być właściwsze; jeśli potrzebujesz tylko komunikatów zawierających określone słowo, użyj `match`.
 
-### 3.5.3. Dwa filtry mogą naraz zmienić sens wyniku
+### A co, jeśli musisz znaleźć dwie informacje jednocześnie?
 
-**Urządzenie: R1-vSRX — Operational Mode**
+W filtrach można używać dopasowań do wzorców tekstowych. W wielu przypadkach zamiast dwóch oddzielnych `match` wygodniej zastosować wyrażenie z alternatywą, np. `"error|down"`. To znaczy „linia zawierająca error **lub** down”.
+
+**R1-vSRX — Operational Mode: prosty wzorzec alternatywny**
 
 ~~~junos
-show log messages | match "rpd" | match "BGP"
-show interfaces terse | match "ge-" | count
-show log messages | no-more
+show log messages | match "error|down"
+show interfaces terse | match "ge-0/0/0|ge-0/0/1"
 ~~~
 
-Przy dwóch `match` wynik to linie spełniające **oba** warunki, a nie „rpd lub BGP”. Wzorzec z `|` **wewnątrz cytowanego regex** oznacza alternatywę. To zachowanie przydaje się przy analizie określonego procesu.
+Jeżeli dopiszesz następny `| match` **po pierwszym**, drugie filtrowanie dotyczy tylko wyników, które przeszły przez pierwsze. W efekcie możesz uzyskać inne znaczenie niż „albo to, albo tamto”.
 
-W przypadku `| count` zatrzymaj się i zapytaj: **co właśnie policzyłem?** Jeżeli wcześniej filtrowałeś linie z `ge-`, policzyłeś linie tekstu pasujące do wzorca. Nie porty „up”, nie trasy „active”, chyba że wynik był specjalnie przetworzony w taki sposób, by każda linia odpowiadała dokładnie jednej pozycji.
+### Uważaj na `count`
 
-### 3.5.4. `display set` — najlepszy pomost do modelu „linia po linii”
+`| count` nie jest uniwersalnym licznikiem interfejsów czy tras. **Liczy linie tekstowego wyniku**. Jeśli jedno logiczne zdarzenie zajmuje kilka wierszy, wynik może być większy niż liczba zdarzeń.
 
-Wyobraź sobie, że musisz przekazać koledze konfigurację pojedynczego interfejsu. W Cisco wysyłasz fragment `show run interface`. W Junos możesz wybrać czytelny **widok hierarchiczny** albo **linie set**. To nie są dwie niezależne konfiguracje. To dwa sposoby oglądania tej samej konfiguracji.
-
-**Urządzenie: R1-vSRX — Operational Mode**
+**R1-vSRX — Operational Mode: liczba wyświetlonych wierszy, nie liczba portów**
 
 ~~~junos
-show configuration interfaces ge-0/0/1
-show configuration interfaces ge-0/0/1 | display set
+show interfaces terse | match ge- | count
+~~~
+
+Jeżeli zobaczysz liczbę 15, nie pisz w raporcie „router ma 15 aktywnych interfejsów”. Policzyłeś wiersze, które spełniały filtr. Liczba interfejsów administracyjnie lub fizycznie aktywnych wymaga osobnego kryterium i świadomej interpretacji.
+
+### Dlaczego konfiguracja może wyglądać inaczej w dwóch widokach?
+
+Junos przechowuje konfigurację hierarchicznie, ale może pokazać ją jako zestaw poleceń `set`. To szczególnie pomocne, gdy porównujesz dwa routery.
+
+**R1-vSRX — Operational Mode: dwa widoki tej samej konfiguracji**
+
+~~~junos
+show configuration interfaces ge-0/0/0
+show configuration interfaces ge-0/0/0 | display set
 show configuration system | display set
 ~~~
 
-**Urządzenie: R1-vSRX — Configuration Mode**
+Pierwszy wynik ma strukturę z nawiasami klamrowymi. Drugi prezentuje pojedyncze linie rozpoczynające się od `set`. Oba opisują tę samą aktywną konfigurację; `display set` nie tworzy jej kopii ani nie zapisuje pliku.
+
+W dalszych rozdziałach spotkasz **configuration groups**. To mechanizm, dzięki któremu różne fragmenty konfiguracji mogą dziedziczyć ustawienia z wspólnego szablonu. Gdy parametr nie jest widoczny bezpośrednio w interfejsie, pomocne jest `display inheritance`.
+
+**R1-vSRX — Operational Mode: odczyt dziedziczonych ustawień, jeśli istnieją**
 
 ~~~junos
-top
-show interfaces ge-0/0/1
-show interfaces ge-0/0/1 | display set
-show | display inheritance
+show configuration interfaces ge-0/0/0 | display inheritance
 ~~~
 
-`display set` pokazuje konfigurację jako polecenia możliwe do odtworzenia. **Nie zmienia** bieżącej konfiguracji. I nie używaj go jako rzekomego „tłumacza” dowolnych wyników `show route` na komendy set — dotyczy **struktury konfiguracji**.
+Szczegółowe `apply-groups` poznasz później. Tutaj zapamiętaj, że wynik `show configuration interfaces` nie musi zawierać wszystkich ustawień wynikających z dziedziczenia. To ważne podczas diagnostyki.
 
-### 3.5.5. Właściwy obraz konfiguracji bywa ukryty przez dziedziczenie
+### Filtr nie zawsze daje pełny obraz
 
-Na Junos istnieją **configuration groups**. Interfejs może dziedziczyć parametry, których **nie zobaczysz wprost** w jego bezpośredniej sekcji. To podobne do sytuacji, gdy w Cisco przyzwyczaiłeś się do jednego miejsca na konfigurację, a część stanu pochodzi z template, policy lub domyślnego profilu.
+Jeśli w logu wyszukasz tylko `error`, możesz przeoczyć wcześniejszy komunikat, który wyjaśnia przyczynę awarii. Jeśli wyślesz do ticketu tylko jedną linię `show interfaces`, zgubisz informację o licznikach i czasie ostatniej zmiany stanu. Dlatego podczas diagnozy zaczynamy od pełnego odczytu właściwego obszaru, a dopiero potem ograniczamy go filtrami.
 
-**Urządzenie: EX-ACCESS-01 — Operational Mode (w przypadku używania groups)**
-
-~~~junos
-show configuration interfaces ge-0/0/1
-show configuration interfaces ge-0/0/1 | display inheritance
-show configuration interfaces ge-0/0/1 | display set
-~~~
-
-**Praktyczne pytanie:** dlaczego port ma określony MTU, choć nie widzę go w zwykłym `show configuration interfaces ge-0/0/1`? Jednym z tropów jest **inheritance**. Szczegółowa konfiguracja `apply-groups` należy do rozdziału 4, lecz już teraz musisz wiedzieć, że brak linii w widoku lokalnym **nie musi oznaczać braku efektu**.
-
-### 3.5.6. Widoki do archiwizacji i automatyzacji
-
-**Urządzenie: R1-vSRX — Operational Mode**
-
-~~~junos
-show configuration | display set
-show configuration | display xml
-show configuration | display json
-~~~
-
-Wyświetlanie XML/JSON zależy od rodzaju danych i wydania; ma znaczenie przy automatyzacji oraz integracjach NETCONF. Nie uczmy się tutaj całego YANG/NETCONF — zapamiętaj, że hierarchiczny Junos **dobrze nadaje się do strukturalnego przetwarzania konfiguracji**, a nie tylko do tekstowych zrzutów.
-
-**Nie umieszczaj w publicznym repozytorium bez filtrowania pełnych `show configuration`: mogą zawierać adresy zarządzania, informacje o kontach, community, sekrety albo dane infrastruktury.**
-
-Źródła sekcji: [CLI pipe command](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/pipe.html), [Filtering Operational Command Output](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/filtering-operational-command.html), [configuration groups](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html).
-
-
+Przy udostępnianiu konfiguracji pamiętaj również o bezpieczeństwie: całe `show configuration` może zawierać hasła w postaci zaszyfrowanej, klucze, dane management oraz informacje o architekturze klienta. **Nigdy nie publikuj pełnego zrzutu w publicznym repozytorium bez weryfikacji i anonimizacji.**
 
 ---
 
-## 3.6. Active vs candidate — architektura transakcji, która zmienia styl pracy [A]
+## 3.6. Active i candidate — najważniejszy mechanizm konfiguracji Junos [A]
 
-### 3.6.1. Dlaczego „brudnopis” nie oznacza „prywatny brudnopis”
+Teraz przejdziemy do zagadnienia, bez którego wcześniejsze polecenia `set` byłyby tylko słowami w terminalu.
 
-W naszej historii z 03:07 opisałem **candidate** jako projekt zmiany. Teraz pojawia się pierwsza pułapka. W typowym **`configure`**, gdy dwóch administratorów otworzy konfigurację jednocześnie, korzystają z **wspólnego candidate**. To nie są dwie niezależne kopie.
+Wyobraź sobie dwie wersje jednego dokumentu. Pierwsza jest opublikowana i wszyscy z niej korzystają. Druga to wersja robocza, w której poprawiasz treść. Możesz ją edytować, porównywać i wycofywać zmiany bez ruszania dokumentu opublikowanego. Dopiero świadome zatwierdzenie zastępuje opublikowaną wersję nową.
 
-Wyobraź sobie dwóch inżynierów edytujących jeden wspólny dokument online:
-- Ty dodajesz opis portu uplink.
-- Kolega zmienia politykę dla BGP.
-- Ty wykonujesz `commit`.
+Tak Junos oddziela **active configuration** od **candidate configuration**.
 
-W zależności od sposobu pracy **zatwierdziłeś obie zmiany**, choć zgłoszenie ServiceNow obejmowało wyłącznie Twój port. To potencjalny problem audytowy, a nie wada jakiejś jednej komendy.
+**Active** to konfiguracja aktualnie zatwierdzona i wykorzystywana przez system. **Candidate** to wersja, którą przygotowujesz w Configuration Mode. Candidate może różnić się od active, ale samo wpisanie do niej polecenia jeszcze nie aktywuje nowej wartości.
 
-~~~mermaid
-flowchart TD
-  AA["Administrator A: set interface description"] --> SH["Shared candidate (configure)"]
-  BB["Administrator B: set routing policy"] --> SH
-  SH --> COM["Commit z dowolnej sesji uprawnionej"]
-  COM --> ACT["Nowa active config: obie zmiany"]
-  PA["Administrator A: configure private"] --> P1["Private candidate A"]
-  PB["Administrator B: configure private"] --> P2["Private candidate B"]
-  P1 --> CHECK["Sprawdzenie aktualnego active i konfliktów"]
-  P2 --> CHECK
-  CHECK --> ACT
-~~~
+### Pierwszy eksperyment na nieszkodliwym opisie
 
-**Do zapamiętania na pamięć:** `configure` = zwykle wspólny candidate; `configure private` = prywatna kopia robocza; `configure exclusive` = blokada edycji/commit shared candidate dla innych administratorów. **Do zrozumienia:** private nie oznacza, że stan sieci w tle przestaje się zmieniać.
+R1 ma port `ge-0/0/0` prowadzący do R2. Dodamy opis tylko w candidate. Na początku nie wykonamy `commit`.
 
-### 3.6.2. Który tryb edycji wybrać o 03:07?
-
-Jeśli musisz przygotować niewielką zmianę, zwykły `configure` wystarczy **tylko wtedy, gdy świadomie kontrolujesz współdzielony stan konfiguracji**. W większym zespole częściej rozważysz `configure private` lub formalnie uzgodniony `configure exclusive`. Nie używaj `exclusive` bez uzgodnienia z innymi operatorami — może blokować potrzebne zmiany i utrudniać incydent.
-
-**Urządzenie: R1-vSRX — Operational Mode, wariant wspólny**
+**R1-vSRX — Operational Mode: wejście do edytora**
 
 ~~~junos
 configure
 ~~~
 
-**Urządzenie: R1-vSRX — Operational Mode, wariant prywatny**
+**R1-vSRX — Configuration Mode [edit]: przygotowanie zmiany**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-LAB-DO-R2"
+show interfaces ge-0/0/0
+show | compare
+~~~
+
+Pierwsza linia dodaje opis do wersji roboczej. Druga pokazuje ten fragment candidate. Trzecia odpowiada na bardzo praktyczne pytanie: **co dokładnie zmieniłem względem działającej konfiguracji?**
+
+Jeżeli opis nie był wcześniej ustawiony, diff powinien pokazywać dodaną linię. Jeśli istnieje inny opis, zobaczysz zastąpienie starej wartości nową. W żadnym przypadku nie jest to jeszcze dowód, że router przestał korzystać z poprzedniej aktywnej konfiguracji.
+
+**R1-vSRX — Operational Mode, osobna druga sesja lub po wyjściu z edytora bez porzucania zmian: odczyt active**
+
+~~~junos
+show configuration interfaces ge-0/0/0
+~~~
+
+To odczyt konfiguracji zatwierdzonej. Jeżeli jeszcze nie wykonałeś commit, nowy opis może być widoczny w candidate, ale nie w active. Właśnie to chcieliśmy zobaczyć.
+
+### Co rzeczywiście robi `commit`?
+
+`commit` każe systemowi sprawdzić przygotowaną konfigurację i — jeśli zostanie przyjęta — aktywować ją jako nową. To nie jest tylko „zapisanie tekstu w pliku”.
+
+**R1-vSRX — Configuration Mode [edit]: zatwierdzenie tylko w osobnym, bezpiecznym labie**
+
+~~~junos
+show | compare
+commit check
+commit
+~~~
+
+`commit check` jest kontrolą konfiguracji przed aktywacją. Nie zastępuje testu działającego pingu, aplikacji ani utrzymania dostępu przez SSH. Poprawny commit może aktywować logicznie błędną konfigurację — na przykład trasę przez niewłaściwego operatora lub filtr blokujący użytkowników.
+
+W tej prostej próbie zmieniamy wyłącznie opis portu danych, więc ryzyko jest niewielkie. Przy zmianach adresacji, stref, routingu czy managementu zastosujemy później **`commit confirmed`**.
+
+### A jeśli dwie osoby jednocześnie edytują konfigurację?
+
+Do tej pory pracowaliśmy jako jedyny administrator. W prawdziwej firmie urządzenie może mieć dwóch operatorów w tym samym czasie. Tu pojawia się niuans: zwykłe **`configure` prowadzi do wspólnej candidate**, jeśli kilku administratorów korzysta z tego trybu.
+
+Załóżmy, że administrator A zmienia opis portu R1→R2, a administrator B przygotowuje zmianę opisu portu R1→R3. Oboje są w zwykłym `configure`. Jeśli A wykona `commit`, może zatwierdzić również zmiany B. To nie musi być błąd systemu; to konsekwencja **wspólnej wersji roboczej**.
+
+Junos pozwala jednak pracować inaczej.
+
+**R1-vSRX — Operational Mode, trzy alternatywne sposoby wejścia do edytora**
+
+~~~junos
+configure
+~~~
+
+Pierwszy wariant daje współdzielony candidate. Pozostałych nie wpisuj po nim w tej samej sekwencji; to **alternatywne wejścia**, wybierane z Operational Mode po zakończeniu poprzedniej sesji edycji.
+
+**R1-vSRX — Operational Mode, alternatywa: prywatna wersja robocza**
 
 ~~~junos
 configure private
 ~~~
 
-**Urządzenie: R1-vSRX — Operational Mode, wariant wyłączny (tylko przy zgodzie zespołu)**
+W `configure private` tworzysz własną candidate. Inni operatorzy mogą równolegle mieć własne prywatne zmiany. Nie oznacza to jednak, że konfiguracja aktywna w tle przestaje się zmieniać. Jeśli inny operator zatwierdzi konfigurację wcześniej, Twoja prywatna wersja może wymagać aktualizacji i rozstrzygnięcia konfliktu.
+
+**R1-vSRX — Operational Mode, alternatywa: wyłączna blokada edycji**
 
 ~~~junos
 configure exclusive
 ~~~
 
-**To warianty alternatywne**, nie trzy następujące po sobie linijki. Każda rozpoczyna inny model współpracy; po eksperymencie kończ konfigurację przed wybraniem następnego wariantu.
+`configure exclusive` służy do zajęcia globalnego edytora na wyłączność. Może blokować zatwierdzanie zmian przez innych operatorów, dlatego nie jest czymś, co włącza się bez uzgodnienia w dużej firmie. To mechanizm organizacji pracy, a nie rozwiązanie wysokiej dostępności routera.
 
-### 3.6.3. Gotcha private: kolega zatwierdził zmianę, gdy Ty pracowałeś
+### Co, jeśli moja prywatna konfiguracja powstała przed zmianą kolegi?
 
-Wyobraź sobie, że na początku Twojej prywatnej sesji active ma numer wersji X. W międzyczasie administrator B zmienia hostname lub politykę i wykonuje commit. Teraz Twoja private candidate powstała ze **starszego active**. Junos nie musi automatycznie przyjąć jej jako nowej konfiguracji systemu.
+Wyobraź sobie, że administrator A otworzył `configure private` i zaczął pracować nad opisem portu. Tymczasem B zmienił inny parametr i wykonał commit. Wersja robocza A jest oparta na wcześniejszym stanie active.
 
-Dokumentacja Juniper mówi o sprawdzaniu zmian dokonanych przez innych; w zależności od sytuacji commit może zgłosić konflikt. Polecenie **`update`** synchronizuje prywatną kopię z ostatnio zatwierdzoną konfiguracją, próbując zachować Twoje zmiany. Przy konflikcie trzeba go rozwiązać — `update` nie jest magicznym narzędziem „always merge”.
+Junos udostępnia polecenie **`update`**, które w private mode pozwala spróbować zsynchronizować prywatną kandydacką konfigurację z nowszym active, zachowując własne zmiany, jeśli nie ma nieusuwalnego konfliktu. **Nie działa to jak magiczny automatyczny merge wszystkiego**.
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit private]**
+**R1-vSRX — Configuration Mode [edit private], tylko po stwierdzeniu zmiany active przez innego operatora**
 
 ~~~junos
 status
 show | compare
 update
 show | compare
-commit check
 ~~~
 
-**Nie wykonuj tego jak mechanicznego skryptu**: najpierw sprawdź, czy rzeczywiście potrzebujesz `update` i jaki konflikt wystąpił. Jeśli private candidate zawiera niezależne zmiany, `update` może się powieść. Jeśli dotykaliście tych samych obiektów, wymagana będzie ręczna decyzja inżyniera.
+Przed i po `update` sprawdź różnicę. Jeśli dwie osoby modyfikowały te same obiekty, potrzebna może być ręczna decyzja. Nie wciskaj potem `commit` tylko dlatego, że polecenie `update` zakończyło się bez komunikatu o błędzie.
 
-**Most z Cisco:** możesz pomyśleć o „configuration lock” w IOS XE i automatyzacji przez controller, ale **Junos configure private** ma własną semantykę candidate i konfliktów. Sam fakt pracy w prywatnym edytorze nie zamraża live routing.
+### Czemu nawet w trybie operational sprawdzamy innych administratorów?
 
-### 3.6.4. Gotcha exclusive: lock nie jest HA
+Dwie przydatne komendy to `show system users` i `show system commit`. Pierwsza pozwala zobaczyć zalogowanych użytkowników. Druga zawiera historię zatwierdzania i informację o niektórych oczekujących operacjach, w tym o niepotwierdzonym `commit confirmed`.
 
-Dokumentacja producenta podaje, że `configure exclusive` blokuje shared candidate dla innych operatorów. Jeśli w trakcie takiej sesji wykonasz `commit confirmed`, a potem nastąpi automatyczny rollback z powodu braku potwierdzenia, **blokada exclusive może zostać zdjęta**. Możesz zobaczyć komunikat o cofniętym dostępie do lock, mimo że nadal masz sesję.
-
-To ma sens: nie chcemy, żeby opuszczone okno serwisowe trzymało „zamek” przez wieczność.
-
-**Do zrozumienia:** blokada konfiguracji jest zabezpieczeniem organizacyjnym, nie zapewnia redundancji routera ani ochrony przed niepoprawną trasą.
-
-### 3.6.5. Kandydat po zmianach — czy on jeszcze jest prywatny?
-
-**Urządzenie: R1-vSRX — Operational Mode**
+**R1-vSRX — Operational Mode: zanim rozpoczniesz zmianę w zespole**
 
 ~~~junos
 show system users
 show system commit
-show configuration system host-name
 ~~~
 
-**Urządzenie: R1-vSRX — Configuration Mode**
+Zanim uruchomisz `configure` w produkcyjnym change window, ustal, czy ktoś inny właśnie nie pracuje nad tym samym routerem. Czas poświęcony na to pytanie jest mniejszy niż koszt wyjaśniania, dlaczego Twój commit przypadkowo aktywował cudzą konfigurację.
 
-~~~junos
-status
-show | compare
-run show system users
+~~~mermaid
+flowchart TD
+  A["Administrator wpisuje configure"] --> SH["Shared candidate"]
+  B["Drugi administrator w configure"] --> SH
+  SH --> C["Commit może zatwierdzić<br/>wspólne zmiany"]
+  D["Administrator A: configure private"] --> PA["Private candidate A"]
+  E["Administrator B: configure private"] --> PB["Private candidate B"]
+  PA --> X["Sprawdzenie aktualnego active<br/>oraz konfliktów przy commit"]
+  PB --> X
+  X --> ACT["Active configuration"]
 ~~~
 
-Zbierz trzy dowody: kto pracuje na urządzeniu, jaki jest stan pending commit oraz czy candidate różni się od active. **Nie traktuj samego promptu `#` jako dowodu prywatności sesji.**
-
-Źródła: [Overview of the Configure Command](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configure-command.html), [configure CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/configure.html).
+*Rysunek 3.2. Wspólny i prywatny model edycji. W prywatnym modelu nadal trzeba uwzględniać zmiany zatwierdzane przez innych administratorów.*
 
 ---
 
-## 3.7. Modyfikowanie, usuwanie, zarządzanie i zapisywanie [A]
+## 3.7. Zmiana konfiguracji: `set`, `delete`, `activate`, `deactivate` i zapisywanie [A]
 
-### 3.7.1. Zanim użyjesz `set`, zrozum różnicę między parametrem a gałęzią
+Skoro znamy candidate, wróćmy do podstawowych działań edytora. W Junos masz kilka komend, których działanie warto odróżniać już na początku.
 
-W Cisco znasz `no ip address`, `no description`, `shutdown`, `default interface`. W Junos konfiguracja jest drzewem, więc możesz usunąć **wartość**, **statement** albo **całą gałąź**. Skutki zależą od miejsca drzewa, nie tylko od słowa `delete`.
+**`set`** tworzy albo zmienia wskazany fragment konfiguracji. **`delete`** usuwa wskazany fragment z candidate. **`deactivate`** pozostawia dany element w konfiguracji, lecz oznacza go jako nieaktywny. **`activate`** przywraca go do użycia. Wszystkie te zmiany wpływają na działającą konfigurację dopiero po odpowiednim commit.
 
-Rozważmy dwa przykłady:
-- Usuń `description` z interfejsu — zwykle mały wpływ operacyjny.
-- Usuń cały `interfaces ge-0/0/1` — możesz stracić adres, L2/L3 i dostęp do urządzenia.
+### Najpierw dodanie i usunięcie jednego opisu
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit], wyłącznie LAB**
+**R1-vSRX — Configuration Mode [edit], izolowany lab**
 
 ~~~junos
-set interfaces ge-0/0/1 description "WAN-PRIMARY-LAB"
-show interfaces ge-0/0/1
-delete interfaces ge-0/0/1 description
-show interfaces ge-0/0/1
+set interfaces ge-0/0/0 description "CH03-TEST"
+show interfaces ge-0/0/0 | display set
+delete interfaces ge-0/0/0 description
 show | compare
 ~~~
 
-W przykładzie pokazuję bezpieczny rodzaj zmiany — opis — i sposób jej odwrócenia przed commit. **Nie usuwaj całego portu**, by przećwiczyć `delete`.
+W tym eksperymencie nic nie musisz aktywować. Chodzi o to, żeby zobaczyć, że `set` i `delete` działają na wybranym fragmencie hierarchii. Uważaj na różnicę między **`delete interfaces ge-0/0/0 description`** a **`delete interfaces ge-0/0/0`**. To drugie usuwa całą gałąź portu i może pozbawić go adresacji lub innych ustawień. Nie wpisuj tej szerszej formy do urządzenia, na którym zależy Ci na działaniu łącza.
 
-### 3.7.2. `deactivate` nie usuwa konfiguracji: zostawia ją „w szufladzie”
+### `deactivate` nie oznacza „usuń”
 
-Załóżmy, że masz skonfigurowaną trasę statyczną i chcesz ją tymczasowo wyłączyć, ale nie chcesz zapomnieć next-hopu oraz prefiksu. W Cisco często zrobiłbyś `no ip route`, a potem musiał odtwarzać wpis. Junos może oznaczyć dany statement jako **inactive**, aby pozostał w konfiguracji, lecz nie był stosowany po commit.
+Doświadczony administrator może chcieć tymczasowo wyłączyć element konfiguracji, ale zachować go do późniejszego użycia. Wyobraź sobie trasę statyczną przygotowaną jako awaryjna. Zamiast usuwać całą jej składnię, można ją oznaczyć jako inactive.
 
-Na naszym ćwiczeniu wybierzemy bezpieczniejszą gałąź — **description nie jest idealnym przykładem stanu inactive**, więc posłużymy się dedykowaną **testową trasą do dokumentacyjnego prefiksu**, a nie realnym uplinkiem.
+Na razie wykonamy eksperyment na izolowanym prefiksie dokumentacyjnym **203.0.113.0/24**, nie na prawdziwej sieci klienta.
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB; nigdy nie używaj realnego prefiksu produkcyjnego**
+**R1-vSRX — Configuration Mode [edit], wyłącznie w labie**
 
 ~~~junos
 set routing-options static route 203.0.113.0/24 discard
@@ -639,1235 +489,240 @@ show routing-options | display set
 show | compare
 ~~~
 
-W hierarchicznym widoku przed `static route` powinieneś zobaczyć oznaczenie `inactive:` (forma outputu zależy od kontekstu). W takim stanie wpis jest zachowany, ale nie powinien ustanawiać używanej trasy w active. Jeśli dopiero przygotowujesz candidate, nie musi jeszcze istnieć żaden aktywny wpis dla tej trasy.
+Polecenie `discard` w tej demonstracji oznaczałoby odrzucanie pakietów do wskazanej sieci, gdyby trasa była aktywna. Dzięki `deactivate` element pozostaje zapisany w candidate, ale nie powinien działać jako aktywna trasa po commit. Nie używaj tego mechanizmu na produkcyjnym prefiksie bez analizy wpływu.
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit], w tym samym izolowanym LAB**
+**R1-vSRX — Configuration Mode [edit], usunięcie własnej próby**
 
 ~~~junos
 activate routing-options static route 203.0.113.0/24
-show | compare
 delete routing-options static route 203.0.113.0/24
 show | compare
 ~~~
 
-Widzisz różnicę:
-- `deactivate`: zaznacz statement jako nieaktywny.
-- `activate`: przywróć aktywność w candidate.
-- `delete`: usuń statement z candidate.
+Nie zapamiętuj tego jako „pięć linii do wklejenia”. Zapamiętaj różnicę: **deactivate zachowuje ustawienie, delete je usuwa**.
 
-**Gotcha:** dezaktywowanie statementu po commit **może mieć realny wpływ na routing, sesje i user traffic**. To nie to samo co ukrycie linijki przed operatorem.
+### Zmiana nazwy, kopiowanie i kolejność
 
-### 3.7.3. `rename`, `copy`, `insert`, `annotate` — edytor zamiast przepisywania
+Gdy będziesz pracować z większą liczbą portów czy polityk, spotkasz `rename`, `copy`, `insert` i `annotate`. Przydają się do przenoszenia konfiguracji albo zmiany kolejności obiektów, dla których kolejność ma znaczenie — np. termów routing policy lub firewall filter.
 
-Projektujesz 20 identycznych portów access. Zamiast przepisywać wszystkie parametry możesz skopiować odpowiedni fragment i zmienić jego identyfikator. Ale kopiowanie całości portu oznacza również kopiowanie **adresów, filtrów, VLAN-ów i opisów**, dlatego najpierw obejrzyj różnicę.
+Na początku nie używaj tych poleceń globalnie. Kopiowanie portu może również skopiować jego adres IP i inne ustawienia. `insert` nie służy do przesuwania dowolnej linijki jak w zwykłym pliku tekstowym; działa w odpowiednich uporządkowanych listach konfiguracji.
 
-Poniższy przykład używa **gałęzi `policy-options prefix-list`**, żeby nie ryzykować zniszczenia istniejącego interfejsu:
+Zobacz bezpieczny przykład kopiowania **tymczasowej prefix-list**, która nie jest nigdzie używana.
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
+**R1-vSRX — Configuration Mode [edit], kopia nieprzypiętej listy**
 
 ~~~junos
-set policy-options prefix-list LAB-SOURCES 192.0.2.0/24
-copy policy-options prefix-list LAB-SOURCES to LAB-SOURCES-COPY
+set policy-options prefix-list CH03-LIST 203.0.113.0/24
+copy policy-options prefix-list CH03-LIST to CH03-LIST-COPY
 show policy-options | display set
-delete policy-options prefix-list LAB-SOURCES-COPY
-delete policy-options prefix-list LAB-SOURCES
+delete policy-options prefix-list CH03-LIST-COPY
+delete policy-options prefix-list CH03-LIST
 show | compare
 ~~~
 
-W podobnym stylu możesz `rename` wybrane obiekty. **Nie zmieniaj nazwy policy albo security zone bez zbadania wszystkich referencji**, ponieważ Junos może odrzucić commit lub zmienić powiązania, a skutki dla przepływu ruchu zależą od obiektu.
+Ta lista nie filtruje żadnych tras ani pakietów, dopóki nie zostanie powiązana z odpowiednią polityką. Dlatego nadaje się do nauki edycji, ale nie jest jeszcze ćwiczeniem z realnego filtrowania. To zagadnienie rozdziału VIII.
 
-`insert` jest ważny przy **uporządkowanych elementach**, np. termach policy lub firewall filters. Kolejność termów bywa merytoryczną częścią decyzji! W Cisco znasz sequence numbers w route-map/ACL; Junos pozwala zmieniać kolejność za pomocą edytora.
+### Czy `save` to samo co `commit`?
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB, przykład pozycji termów**
+Nie — to bardzo ważna różnica.
+
+`save` w Configuration Mode zapisuje tekst konfiguracji do wskazanego pliku, np. lokalnego pliku w `/var/tmp`. **Nie aktywuje** wersji roboczej. `commit` natomiast aktywuje zaakceptowaną konfigurację na urządzeniu.
+
+**R1-vSRX — Configuration Mode [edit], tylko w odizolowanym labie, po sprawdzeniu zawartości**
 
 ~~~junos
-set policy-options policy-statement CH03-ORDER term FIRST then accept
-set policy-options policy-statement CH03-ORDER term SECOND then reject
-insert policy-options policy-statement CH03-ORDER term SECOND before term FIRST
-show policy-options policy-statement CH03-ORDER
-delete policy-options policy-statement CH03-ORDER
+save /var/tmp/ch03-candidate.conf
+~~~
+
+To może być przydatne przed eksperymentem, ale nie traktuj lokalnego pliku jako niezależnego backupu: jest na tym samym urządzeniu lub VM. Jeśli stracisz maszynę, plik również może zniknąć. Nie zapisuj w repozytorium pełnych konfiguracji, które zawierają hasła, certyfikaty albo adresy management.
+
+### Czy można przypadkowo zmienić wiele elementów jedną komendą?
+
+Tak. `replace pattern` pozwala zastępować pasujące fragmenty konfiguracji. Na dużym urządzeniu może to być bardzo wygodne, ale zbyt szeroki wzorzec może dotknąć więcej pól, niż zamierzałeś. Dlatego uczymy się go na jednej kontrolowanej wartości.
+
+**R1-vSRX — Configuration Mode [edit], demonstracja w izolowanym labie**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-OLD-TEXT"
+replace pattern CH03-OLD-TEXT with CH03-NEW-TEXT
 show | compare
 ~~~
 
-**Cel:** zobaczyć zmianę **kolejności ewaluacji**. Sama konfiguracja testowej policy nie wpływa na routing, dopóki nie zastosujesz jej w odpowiednim miejscu. Nie wyciągaj z tego wniosku, że każda policy bez `from` w produkcji jest nieszkodliwa.
-
-### 3.7.4. `replace pattern` — potężne, ale zdradliwe
-
-Wyobraź sobie migrację nazewnictwa 200 portów. Na Cisco często używasz skryptu i sprawdzasz `show archive config differences`. Junos pozwala przeszukać i zamienić identyfikatory lub wartości w **candidate configuration** za pomocą `replace pattern`, w tym wyrażeń regularnych.
-
-Problem polega na tym, że **jedno zbyt szerokie wyrażenie może zmienić wiele obiektów**. Gdy wrzucisz tam adresację, nazwy interfejsów i ACL, nie możesz ufać samemu „commit complete”.
-
-Bezpieczny test wykonajmy na jednym specjalnie utworzonym opisie:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
-
-~~~junos
-set interfaces ge-0/0/1 description "CH03-OLD-DESCRIPTION"
-replace pattern CH03-OLD-DESCRIPTION with CH03-NEW-DESCRIPTION
-show | compare
-~~~
-
-**Nie wykonuj globalnego `replace pattern 10. with 172.`** w produkcji. Mechanizm regex, escapowanie kropek oraz pełny zakres gałęzi mogą objąć więcej, niż chciałeś. Dokumentacja Juniper wyjaśnia także `upto n` — liczba dotyczy **obiektów**, a nie koniecznie pojedynczych wystąpień tekstu w jednym obiekcie.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit], cofnięcie niezacommitowanej próby — tylko po sprawdzeniu, że nie ma innych zmian do zachowania**
-
-~~~junos
-rollback 0
-show | compare
-~~~
-
-Źródło: [Juniper replace command](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/replace.html).
-
-### 3.7.5. `save` — czy zapis pliku oznacza commit? Nie!
-
-To następna pułapka dla inżyniera przyzwyczajonego do `copy running-config startup-config`.
-
-W Junos `save /var/tmp/...` uruchomione w configuration mode zapisuje wybraną konfigurację **jako tekstowy plik**. Nie oznacza, że zmiany weszły do active. Wykonanie `commit` jest inną operacją. Natomiast samo **`commit` zapisuje i aktywuje** konfigurację — typowo nie potrzebujesz osobnego odpowiednika `write memory`.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit], izolowany LAB**
-
-~~~junos
-top
-save /var/tmp/ch03-candidate-backup.conf
-show | compare
-~~~
-
-**Urządzenie: R1-vSRX — Operational Mode po wyjściu z konfiguracji**
-
-~~~junos
-file list /var/tmp/ detail
-show configuration system host-name
-~~~
-
-Plik w `/var/tmp` jest przydatną lokalną kopią roboczą, ale **nie jest trwałym systemem backupu off-device**. Nie trzymaj jedynego ratunku na tym samym dysku routera. Przy upgrade, czyszczeniu storage albo awarii nośnika możesz go stracić.
-
-### 3.7.6. `annotate` — dlaczego opis w konfiguracji jest przydatny, a kiedy bywa problemem
-
-Junos pozwala dodawać komentarze do sekcji konfiguracji, m.in. poleceniem `annotate`. To pomaga wyjaśnić nietypową politykę i cel zmiany, ale **komentarz nie zastępuje CMDB, dokumentacji HLD ani worknotes w ServiceNow**.
-
-Nie zaczynaj od masowego komentowania konfiguracji produkcyjnej. Ćwiczenie wykonywane na wyizolowanym obiekcie pokażemy w laboratorium 3.LAB; szczegółową składnię sprawdź przez `annotate ?` oraz aktualną [CLI Configuration Mode Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-configuration.html).
-
-
+Nie używaj podobnego polecenia do masowej podmiany adresów, nazw VRF czy policy bez dokładnego diffu i planu rollback. **Składniowo poprawna zmiana może być projektowo błędna.**
 
 ---
 
-## 3.8. Przeglądanie, porównywanie i wczytywanie plików konfiguracji [A]
+## 3.8. Odczyt, porównywanie i wczytywanie konfiguracji — jak uniknąć przypadkowej podmiany całego urządzenia? [A]
 
-### 3.8.1. Zadanie z rzeczywistej pracy: architekt przysłał 120 linii zmian
+Dotychczas modyfikowaliśmy pojedyncze linie. Co, jeśli architekt przesłał Ci plik z większą zmianą? W pracy często otrzymasz kilkanaście poleceń `set`, fragment konfiguracji hierarchicznej albo pełną konfigurację przygotowaną na innym routerze. Junos potrafi je wczytywać, ale **tryb wczytywania decyduje o tym, co stanie się z istniejącą candidate**.
 
-Jest środa, 17:30. Architekt przysyła plik z dwudziestoma nowymi VLAN-ami, filtrami i opisami portów dla lokalizacji we Francji. W Cisco zwykle analizujesz skrypt konfiguracyjny, planujesz kolejność, być może korzystasz z `configure replace` i archiwizacji. W Junos masz możliwość **wczytania pliku do candidate**, obejrzenia dokładnej różnicy i dopiero potem zatwierdzenia.
+Zanim wkleisz plik, zadaj sobie dwa pytania: czy dostałem **fragment**, który chcę dołożyć do obecnej konfiguracji, czy **całą konfigurację**, która ma zastąpić dotychczasową? I czy plik dotyczy naprawdę tego urządzenia, a nie innego modelu, adresacji lub lokalizacji?
 
-Ale tutaj pojawia się większe zagrożenie niż literówka: **zły tryb importu**. Ten sam plik może być nieszkodliwym dopisaniem fragmentu albo zastąpieniem kompletnej konfiguracji urządzenia — zależnie od tego, jakiego `load` użyjesz.
+### Jak porównać active i candidate?
 
-Wyobraź sobie edycję dokumentu:
-- **merge**: dopisz lub uzupełnij określone akapity;
-- **set**: wykonaj sekwencję instrukcji edycyjnych zapisanych jako komendy;
-- **replace**: wymień wskazane akapity oznaczone do zastąpienia;
-- **override**: **wyrzuć cały dotychczasowy dokument i wczytaj kompletny nowy**;
-- **update**: również wczytaj pełny dokument, ale porównuj zmienione części bardziej selektywnie;
-- **patch**: zastosuj różnicę/łatkę zamiast pełnego tekstu.
+Najprostsze polecenie poznaliśmy już wcześniej. Teraz nauczymy się czytać jego wynik świadomie.
 
-To nie jest sprawa gustu. `load override` użyty omyłkowo do pliku z trzema interfejsami może spowodować, że **candidate będzie zawierać tylko te trzy interfejsy i zabraknie reszty konfiguracji**. Po commit tracisz użytkowników, management, BGP i wiele więcej.
-
-### 3.8.2. Zanim coś załadujesz: cztery bezpieczne pytania
-
-Zanim użyjesz `load`, sprawdź:
-1. Czy plik jest w formacie **hierarchicznym Junos**, zestawie `set`, czy patch?
-2. Czy chcesz **dodać fragment**, **wymienić oznaczony blok**, czy **zastąpić pełną konfigurację**?
-3. Czy znajdujesz się w `configure private`, a jeśli tak, czy inni administratorzy już zmienili active?
-4. Czy masz konsolę/OOB, kopię ostatniej dobrej konfiguracji i plan odtworzenia dostępu?
-
-Nawet jeśli wszystkie odpowiedzi są dobre, **`commit check` nie sprawdzi, czy nowy BGP peer jest osiągalny**. Po zmianie musisz testować usługę.
-
-### 3.8.3. Przeglądanie active i candidate bez zmieniania czegokolwiek
-
-**Urządzenie: R1-vSRX — Operational Mode, odczyt aktywnej konfiguracji**
+**R1-vSRX — Configuration Mode [edit], po przygotowaniu wyłącznie własnej zmiany**
 
 ~~~junos
-show configuration
-show configuration system host-name
-show configuration interfaces ge-0/0/1 | display set
+show | compare
+~~~
+
+W wyniku możesz zobaczyć linie z **`+`** i **`-`**. Plus oznacza dodany element względem porównywanej wersji, minus — usunięty. Jeśli zmienisz opis portu z `OLD` na `NEW`, porównanie może pokazać jedną linię usuniętą i jedną dodaną.
+
+Nie traktuj poprawnego diffu jako gwarancji działania. Diff mówi, **co się zmieni**, ale nie odpowiada automatycznie, czy klient nadal będzie mógł korzystać z aplikacji.
+
+**R1-vSRX — Operational Mode: zatwierdzona konfiguracja przed zmianą**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
 show system commit
-show system rollback 1
 ~~~
 
-**Urządzenie: R1-vSRX — Configuration Mode, odczyt candidate**
+Zapisz najważniejsze elementy stanu odniesienia przed change. Nie zawsze trzeba zachowywać pełny dump. Przy zmianie opisu portu wystarczy aktualny opis i identyfikacja interfejsu. Przy zmianie BGP trzeba natomiast zgromadzić odpowiednie informacje o sąsiedztwie, trasach i politykach.
 
-~~~junos
-top
-show
-show | display set
-show | compare
-~~~
+### `load set`: gdy plik zawiera linie `set`
 
-Warto od razu nauczyć się jednej różnicy:
-- **Operational `show configuration`** to odczyt aktualnej, zatwierdzonej konfiguracji.
-- **Configuration `show`** pokazuje edytowaną candidate.
-- **`show | compare`** w configuration mode mówi, co candidate zmieniłaby względem active.
+Wyobraź sobie, że masz dwie przygotowane linie do R1: opis połączenia do R2 i komunikat dla operatora przy logowaniu. Możesz wpisać je ręcznie albo wczytać je z formatu `set`.
 
-Nie kopiuj bezmyślnie konfiguracji z sekcji `show` jako „tej, co już działa” — chyba że wiesz, w jakim trybie był operator.
-
-### 3.8.4. `show | compare` — czytanie diffu jak inspektor przed zatwierdzeniem
-
-Załóżmy, że dodałeś nowy opis portu i zmieniłeś parametr. Junos pokaże różnicę, na której możesz wychwycić literówkę przed zmianą produkcyjną.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit], przykład ilustracyjnego diffu**
-
-~~~diff
-[edit interfaces ge-0/0/1]
-- description "WAN OLD";
-+ description "WAN NEW";
-~~~
-
-Minus oznacza element usuwany ze starej wersji, plus — dodawany do candidate. Ale to **format porównania**, nie polecenia CLI do uruchomienia.
-
-Haczyk: **dwa plusy w diffie nie gwarantują, że zmiana jest właściwa**. Możesz poprawnie wprowadzić błędną nazwę route-map, złą sieć źródłową w ACL albo wyłączyć port uplink. Poprawność wyniku zależy od HLD/change plan i testów.
-
-**Urządzenie: R1-vSRX — Configuration Mode**
-
-~~~junos
-show | compare
-~~~
-
-**Urządzenie: R1-vSRX — Operational Mode, porównanie dwóch zapisanych wersji bez ładowania ich do candidate**
-
-~~~junos
-show system rollback 0 compare 1
-show system rollback 1
-show configuration | compare rollback 1
-~~~
-
-To druga bardzo ważna różnica. **Nie musisz wykonywać `rollback 1`, żeby zobaczyć dawną konfigurację!** Możesz ją odczytać i porównać bez naruszania candidate.
-
-### 3.8.5. `load set` — gdy plik wygląda jak gotowe komendy Junos
-
-Załóżmy, że architekt przygotował niewielką, bezpieczną zmianę: opis portu i tekst login banner. Plik zawiera pełne linie `set`. To dobry przypadek dla **`load set`**, nie dla `load override`.
-
-**Plik dla urządzenia R1-vSRX — `/var/tmp/ch03-change.set` (przykładowa zawartość)**
-
-~~~junos
-set system login message "CH03 LAB - maintenance test"
-set interfaces ge-0/0/1 description "CH03-LINK"
-~~~
-
-Załóżmy, że plik został wcześniej **bezpiecznie przesłany** do R1 i potwierdzono jego treść. Nie podaję hasła ani rzeczywistego URL serwera produkcyjnego.
-
-**Urządzenie: R1-vSRX — Operational Mode, odczyt pliku przed importem**
-
-~~~junos
-file show /var/tmp/ch03-change.set
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB**
-
-~~~junos
-load set /var/tmp/ch03-change.set
-show | compare
-commit check
-~~~
-
-**Przewidź wynik:** `load set` dopisze/zmieni wskazane statementy w candidate. Nie powinien usuwać całej konfiguracji BGP, AAA czy pozostałych interfejsów. Jednak jeśli plik zawierałby polecenia `delete`, to **mogłyby zostać wykonane podczas ładowania** — sprawdź zawartość, nie tylko rozszerzenie `.set`.
-
-Jeśli wolisz nie tworzyć pliku na dysku, możesz użyć `load set terminal`. Po wpisaniu lub wklejeniu zawartości terminala kończysz strumień przez **Ctrl+D na nowej linii**.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB — rozpoczęcie importu z terminala**
+**R1-vSRX — Configuration Mode [edit], początek interaktywnego importu**
 
 ~~~junos
 load set terminal
 ~~~
 
-**Dane wklejane dla R1-vSRX po wyświetleniu prośby o wejście — nie osobne polecenia uruchamiane z shell**
+Po tej komendzie CLI przejdzie w tryb przyjmowania tekstu. Wklej tylko następujące dwie linie, dokładnie w tym formacie:
 
-~~~junos
-set system login message "CH03-LAB FROM TERMINAL"
-set interfaces ge-0/0/1 description "CH03-UPLINK"
+**R1-vSRX — Configuration Mode, tekst wczytywany po `load set terminal` (to dane wejściowe, nie nowy prompt)**
+
+~~~text
+set interfaces ge-0/0/0 description "CH03-IMPORTED-R2"
+set system login message "CH03: Lab access only"
 ~~~
 
-Po **Ctrl+D** wykonaj `show | compare`. Nie myl końca wejścia terminalowego z `commit`: to dwa oddzielne etapy.
+Zakończ wprowadzanie danych klawiszem **Ctrl+D**, zgodnie z komunikatem CLI. Następnie wróć do analizy candidate.
 
-### 3.8.6. `load merge` — złącz fragment hierarchii
-
-Architekt przesyła plik w postaci drzewa Junos, a nie `set`. Do dodania sekcji lub aktualizacji wartości służy `load merge`. W praktyce zachowanie przy konflikcie istniejących i przychodzących statementów wymaga uważnego odczytu diffu. Nie przyjmuj, że merge zawsze jest w 100% addytywne.
-
-**Plik dla R1-vSRX — `/var/tmp/ch03-merge.conf` (fragment konfiguracji hierarchicznej)**
+**R1-vSRX — Configuration Mode [edit], kontrola importu przed commit**
 
 ~~~junos
+show | compare
+show interfaces ge-0/0/0 | display set
+~~~
+
+Obie linie zostały **załadowane do candidate**, a nie od razu aktywowane. To właśnie zaleta tego modelu: możesz obejrzeć ich rzeczywisty wpływ przed zmianą działającego routera.
+
+Jeśli wolisz wczytać istniejący plik lokalny, odpowiednikiem jest `load set /var/tmp/plik.set`, o ile plik naprawdę znajduje się na urządzeniu. W tym rozdziale nie tworzymy pliku przez shell — wystarczy import z terminala. Rozdział o automatyzacji może później wykorzystać pliki w repozytorium, ale bez sekretów i danych produkcyjnych.
+
+### `load merge`: gdy wczytujesz konfigurację w formie drzewa
+
+Junos obsługuje również zapis hierarchiczny, z gałęziami i nawiasami klamrowymi. Przykładowo komunikat logowania w takim zapisie mógłby wyglądać następująco:
+
+~~~text
 system {
     login {
-        message "CH03-MERGE-LAB";
-    }
-}
-interfaces {
-    ge-0/0/1 {
-        description "CH03-MERGED";
+        message "CH03: Lab access only";
     }
 }
 ~~~
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB**
+`load merge` łączy wczytane fragmenty z candidate. Nie jest to to samo co `load set`: oczekiwany format danych jest inny. Gdy nowy fragment zawiera wartość konfliktującą z dotychczasową, może ją zastąpić w odpowiednim miejscu drzewa, dlatego także tu sprawdzamy diff.
 
-~~~junos
-load merge /var/tmp/ch03-merge.conf
-show | compare
-commit check
-~~~
-
-Weryfikujesz, że zmienił się tylko banner i opis portu — **zamiast zgadywać na podstawie słowa „merge”**. Jeśli architekt wysłał niepoprawny fragment, loader może zgłosić błąd zanim dojdzie do commit.
-
-### 3.8.7. `load replace` — specjalny znacznik zastąpienia gałęzi
-
-To polecenie jest częstą pułapką egzaminacyjną. `load replace` **nie oznacza po prostu „zastąp całą konfigurację”**. Szuka specjalnych znaczników **`replace:`** we wczytywanej konfiguracji i zastępuje odpowiednie statementy.
-
-Załóżmy, że masz laboratoryjną policy `CH03-ORDER` z trzema termami. Chcesz wymienić całą zawartość tej policy, ale nie ruszać innych `policy-options`.
-
-**Plik dla R1-vSRX — `/var/tmp/ch03-replace.conf` (zastąpienie wyłącznie laboratoryjnej policy)**
-
-~~~junos
-policy-options {
-    replace: policy-statement CH03-ORDER {
-        term ALLOW-LAB {
-            then accept;
-        }
-        term OTHER {
-            then reject;
-        }
-    }
-}
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB**
-
-~~~junos
-load replace /var/tmp/ch03-replace.conf
-show policy-options policy-statement CH03-ORDER
-show | compare
-commit check
-~~~
-
-**Pułapka:** jeśli `replace:` umieścisz o jeden poziom wyżej, możesz niechcący zastąpić dużo większą część konfiguracji. W naszym przykładzie nie zastępujemy `policy-options` jako całości, tylko jeden nazwany obiekt.
-
-### 3.8.8. `load override` — wielki czerwony przycisk
-
-Przygotowanie do greenfield to jedna sytuacja: nowy EX ma otrzymać **pełną, poprawną konfigurację bazową**. Zastąpienie całej candidate może być zamierzone. Ale przy zmianie kilku portów na produkcji `override` jest zwykle **niewłaściwym** narzędziem.
-
-**Polecenie poniżej jest NIEBEZPIECZNE na istniejącym urządzeniu; zapis wyłącznie jako przykład do rozpoznania, NIE URUCHAMIAJ bez odseparowanego labu, pełnego backupu i konsoli.**
-
-**Urządzenie: R1-vSRX — Configuration Mode, tylko koncept do analizy skutku**
-
-~~~junos
-load override /var/tmp/FULL-DEVICE-CONFIG.conf
-~~~
-
-Po takim load candidate pochodzi z całego pliku, nie jest dopisanym fragmentem. Jeżeli plik zawierał tylko jeden port, **pozostałe elementy kandydackiej konfiguracji mogą zniknąć**, a po commit możesz stracić dostęp do urządzenia.
-
-**Pamiętaj:** sam `load override` zmienia candidate; krytyczny moment wejścia zmiany w życie to **commit**. To właśnie daje możliwość zobaczenia diffu i przerwania niebezpiecznej operacji zanim stanie się aktywna.
-
-### 3.8.9. `load update` i `load patch` — gdy zwykły merge nie wystarcza
-
-Dwa mniej popularne tryby mają praktyczne znaczenie w automatyzacji:
-- `load update` wczytuje pełną konfigurację, podobnie jak `override`, ale oznacza jako zmodyfikowane tylko faktyczne różnice.
-- `load patch` stosuje różnicę, zamiast zwykłego fragmentu konfiguracji; używa się go m.in. do odtwarzania zmian z diffów.
-
-**Nie jest to równoznaczne z bezpiecznym importem dowolnego pliku.** Na egzaminie Associate trzeba kojarzyć różnicę, a do automatyzacji poziomu Professional — rozumieć semantykę, szczególnie gdy commit scripts i dynamiczne funkcje odnoszą się do zmienionych obiektów.
-
-**Gotcha:** `load update` nie jest „update mojej private candidate” — to **inny mechanizm** niż polecenie `update` w `configure private`. Te same słowa, inne zadanie!
-
-### 3.8.10. Gdzie znajduje się plik i co można z nim zrobić?
-
-Plik dostarczony przez architekta nie pojawia się magicznie w `/var/tmp`. Musisz go bezpiecznie przenieść (np. SCP/SFTP lub zatwierdzony system zarządzania konfiguracją), sprawdzić integralność i ścieżkę. Junos udostępnia także polecenia operacyjne do pracy z plikami.
-
-**Urządzenie: R1-vSRX — Operational Mode, odczyt zawartości plików w izolowanym LAB**
-
-~~~junos
-file list /var/tmp/
-file show /var/tmp/ch03-change.set
-~~~
-
-Nie usuwaj przypadkowych plików systemowych „dla miejsca”. Również nie przechowuj w GitHubie realnych kluczy prywatnych, kont, community ani pełnej konfiguracji produkcyjnej.
-
-### 3.8.11. Bezpieczny import według change plan
-
-Wyobraź sobie, że klient zgłasza konkretną zmianę VLAN/port i chcesz mieć audytowalny wynik. Najpierw wykonaj read-only precheck. Później importuj **wyłącznie właściwym trybem**. Następnie porównaj candidate z active, sprawdź poprawność, aktywuj tymczasowo z mechanizmem powrotu, wykonaj test i potwierdź.
-
-~~~mermaid
-flowchart TD
-  INPUT["Otrzymałeś plik konfiguracyjny"] --> Q{"Jaki format i zakres?"}
-  Q -->|"linie set / mały fragment"| SET["load set"]
-  Q -->|"fragment hierarchy"| MERGE["load merge"]
-  Q -->|"znaczniki replace: w hierarchy"| REPL["load replace"]
-  Q -->|"pełny kompletny config"| OVR["load override lub load update — wymaga ostrożności"]
-  SET --> COMP["show | compare"]
-  MERGE --> COMP
-  REPL --> COMP
-  OVR --> COMP
-  COMP --> OK{"Czy diff jest zgodny z planem?"}
-  OK -->|"Nie"| STOP["Przerwij — NIE commituj"]
-  OK -->|"Tak"| CHK["commit check"]
-  CHK --> CONF["commit confirmed"]
-  CONF --> TEST["Sprawdź dostęp, routing, usługi, logi"]
-  TEST -->|"PASS"| FIN["commit"]
-  TEST -->|"FAIL"| ROL["Rollback / nie potwierdzaj"]
-~~~
-
-**Nie daj się oszukać eleganckiemu diagramowi:** `commit confirmed` nie jest niezawodnym mechanizmem naprawy każdej usterki, a `commit check` w szczególnych okolicznościach może **potwierdzić wcześniejszy pending confirmed commit** — szczegóły w 3.11.
-
-Źródła sekcji: [load CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/load.html), [Loading Configuration Files](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-config-files-loading.html), [save CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/save-cli-config.html).
-
-
-
----
-
-## 3.9. Rollback — powrót do poprzedniej konfiguracji bez zgadywania [A]
-
-### 3.9.1. O 03:18 aplikacja działa gorzej. Co teraz?
-
-Wyobraź sobie, że wdrożyłeś politykę BGP, a użytkownicy zaczynają zgłaszać utratę części tras. Ktoś podpowiada: „Cofnij konfigurację do poprzedniej wersji”. Na Cisco IOS XE sprawdziłbyś archiwum, configuration replace, historię zmian albo przygotowany rollback plan. W Junos **historia kolejnych zatwierdzonych konfiguracji jest częścią codziennego workflow**.
-
-Ale uważaj: **`rollback` nie oznacza automatycznego aktywowania starej konfiguracji**. Zazwyczaj ładuje starszą wersję do candidate, którą nadal musisz obejrzeć, zweryfikować i zatwierdzić. To kolejny element świadomego zarządzania ryzykiem.
-
-### 3.9.2. `rollback 0` kontra `rollback 1`: największa pułapka dla osób po Cisco
-
-Załóżmy, że o 03:00 router działał na konfiguracji A. O 03:05 dodałeś zmiany w candidate B, ale jeszcze nie zrobiłeś commit.
-
-**`rollback 0`** przywróci w candidate aktualną **active A** i odrzuci niezacommitowane zmiany B.
-
-Teraz załóżmy, że commit już się odbył i active to B. Chcesz wrócić do **poprzedniej zatwierdzonej wersji A**. Wtedy zwykle użyjesz **`rollback 1`**, porównasz candidate z active, a następnie wykonasz commit.
-
-~~~mermaid
-flowchart LR
-   A["Aktywna wersja A"] -->|"edytujesz candidate"| B["Candidate B"]
-   B -->|"rollback 0"| A
-   B -->|"commit"| C["Aktywna wersja B"]
-   C -->|"rollback 1"| D["Candidate z poprzednią wersją A"]
-   D -->|"commit"| E["Nowa aktywna wersja A"]
-~~~
-
-**Na pamięć:** `rollback 0` to zwykle odrzucenie aktualnych zmian candidate; `rollback 1` ładuje poprzedni commit do candidate. **Do zrozumienia:** po wcześniejszym rollbacku 1 i wykonaniu commit powstaje kolejna pozycja historii — numeracja jest względem **aktualnej** historii, nie stałym identyfikatorem „tej dobrej wersji z poniedziałku”.
-
-### 3.9.3. Najpierw obejrzyj, nie cofaj na ślepo
-
-**Urządzenie: R1-vSRX — Operational Mode**
-
-~~~junos
-show system commit
-show system rollback 0
-show system rollback 1
-show system rollback 0 compare 1
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], dopiero po identyfikacji właściwej wersji**
-
-~~~junos
-rollback 1
-show | compare
-commit check
-commit confirmed 5
-~~~
-
-**Następny krok nie jest automatycznym `commit`!** Najpierw sprawdź stan SSH i kontrolę nad urządzeniem, routing, sesje i usługę, której dotyczył incydent. Dopiero przy satysfakcjonującym wyniku potwierdź zmianę. Pamiętaj, że `commit check` również potrafi potwierdzić oczekujący `commit confirmed` — weryfikacja powinna być zaplanowana świadomie.
-
-### 3.9.4. Historia konfiguracji nie jest nieograniczona
-
-Juniper typowo przechowuje **do 50 wersji**, licząc bieżącą i 49 wcześniejszych (numery `0`–`49`). Nie opisuj tego jako „50 starych backupów plus current”. Ponadto przechowywane kopie nie są tym samym co **zewnętrzny system backupów** — awaria nośnika, wymiana urządzenia lub problemy z dostępem mogą sprawić, że historia lokalna nie wystarczy.
-
-Źródło: [rollback CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/rollback.html).
-
-### 3.9.5. Rescue configuration — ostatnia pewna przystań
-
-Wyobraź sobie, że wykonałeś wiele commitów, wymieniasz urządzenie lub masz problem z dostępnością historii. Możesz utrzymywać **rescue configuration** — ręcznie zapisaną, sprawdzoną dobrą konfigurację.
-
-**Haczyk:** rescue **nie musi istnieć**, jeśli operator nigdy jej nie zapisał. Nie jest też automatycznym gwarantem odzyskania wszystkich usług: jeśli zapisałeś złą konfigurację jako rescue, ona nie stanie się dobra tylko dlatego, że ma tę nazwę.
-
-**Urządzenie: R1-vSRX — Operational Mode, zapis znanej dobrej konfiguracji po pozytywnej walidacji i zgodzie zmiany**
-
-~~~junos
-request system configuration rescue save
-show system commit
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit], przywrócenie istniejącej rescue, wyłącznie LAB lub zatwierdzona procedura recovery**
-
-~~~junos
-rollback rescue
-show | compare
-commit check
-commit confirmed 5
-~~~
-
-Do potwierdzenia i testów stosuj ten sam rygor co przy każdej zmianie. Szczegółowa administracja rescue jest w rozdziale **4.13**, ale tutaj poznajesz jej znaczenie jako części workflow rollback.
-
-Źródło: [Juniper Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html).
-
-### 3.9.6. Rollback nie przywraca całego świata
-
-Nieoczywisty, ale zawodowo krytyczny fakt: rollback **konfiguracji** nie oznacza cofnięcia stanu całego systemu operacyjnego, tabel sesji i wszystkich zewnętrznych systemów.
-
-Jeżeli zmiana policy zdążyła zerwać sesje BGP albo VPN, powrót konfiguracji **nie zawsze przywróci je natychmiast**; protokoły potrzebują konwergencji. Jeżeli zmieniłeś politykę routingu, sąsiad może potrzebować odświeżenia lub przeliczenia. Jeśli błąd dotyczy fizycznej warstwy, żaden rollback nie naprawi włókna.
-
-**Porównanie Cisco:** `configure replace` także nie cofa czasu dla TCP sessions ani nie wskrzesza ruchu na uszkodzonym kablu. Zawsze testuj **service restoration**, a nie tylko „commit complete”.
-
----
-
-## 3.10. J-Web — dlaczego istnieje GUI i czemu nie zastępuje rozumienia CLI [A]
-
-### 3.10.1. Inżynier CLI patrzy z podejrzliwością na przeglądarkę
-
-Znane uczucie: pracowałeś latami na Cisco IOS XE, więc kiedy ktoś pokazuje GUI do zarządzania urządzeniem, pierwsza myśl brzmi: „Po co mi to, skoro mam konsolę?”. Często CLI będzie szybsze i precyzyjniejsze, ale nie oznacza to, że GUI jest zabawką.
-
-**J-Web** jest przeglądarkowym interfejsem zarządzania dostępnym na określonych rodzinach i wydaniach Junos, przede wszystkim EX i SRX, z funkcjami zależnymi od platformy. Pozwala wykonywać czynności konfiguracji, przeglądania stanu, monitoringu i troubleshootingu.
-
-**Porównanie Cisco:** Cisco Device Manager/GUI dla określonych platform albo Cisco Catalyst Center dają interfejsy wizualne, ale **J-Web jest GUI powiązanym z konkretnym urządzeniem**, a nie automatycznie odpowiednikiem centralnego Catalyst Center. Mist Cloud to jeszcze inna warstwa zarządzania. Nie utożsamiaj tych produktów.
-
-### 3.10.2. Dlaczego pierwsze pytanie brzmi „na jakim urządzeniu i release?”
-
-Jeśli instrukcja mówi „uruchom J-Web na MX, EX, QFX, SRX tak samo”, to za chwilę trafisz na problem dostępności. Juniper publikuje osobne dokumentacje **J-Web for Security Firewalls and Switches** i informacje o wsparciu w Feature Explorer. Nawet w jednej rodzinie funkcje i nawigacja GUI zmieniają się w kolejnych wersjach.
-
-Przed konfiguracją:
-1. Sprawdź `show version` i model.
-2. Zweryfikuj wsparcie J-Web dla modelu i release.
-3. Sprawdź, czy usługa web management jest włączona i na którym interfejsie.
-4. Oceń, czy powinien to być interfejs zarządzający odseparowany od użytkowników.
-5. Zweryfikuj **HTTPS, certyfikat, ograniczenia administracyjne i ewentualne security zone/host-inbound** na SRX.
-
-### 3.10.3. Włączenie J-Web — nie twórzmy niezabezpieczonego panelu w sieci firmowej
-
-W dokumentacji producenta występują zarówno HTTP, jak i HTTPS. **Nie włączaj HTTP na dowolnym interfejsie produkcyjnym tylko po to, by łatwiej zobaczyć GUI.** W praktyce preferujesz HTTPS z właściwym certyfikatem i ograniczonym źródłem dostępu.
-
-Poniżej fragment **ilustracyjny dla EX4400**: zakłada, że odpowiedni certyfikat `CH03-WEB-CERT` **już istnieje** i został poprawnie zainstalowany. Nie jest to kompletny gotowy projekt PKI. Na EX4400 dedykowany port OOB to zwykle **`me0` (interfejs logiczny `me0.0`)**, natomiast na wielu routerach/firewallach Junos używany jest **`fxp0`**. Przed wpisaniem interfejsu w konfiguracji HTTPS sprawdź model i `show interfaces terse`.
-
-**Urządzenie: EX-ACCESS-01 — Configuration Mode [edit], ilustracja dla wspieranego modelu i wydania**
-
-~~~junos
-set system services web-management https local-certificate CH03-WEB-CERT
-set system services web-management https interface me0.0
-show | compare
-commit check
-~~~
-
-**Nie wykonuj `commit` zanim nie zweryfikujesz certyfikatu, interfejsu i ACL/firewall ochrony management.** Na niektórych modelach SRX wymagane są odrębne warunki dostępności usługi i stref. Na części wirtualnych platform i hypervisorów funkcje J-Web mogą być nieobsługiwane.
-
-Źródło: [Secure Web Access for Remote Management](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/secure-web-access-remote-management.html), [web-management CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/web-management-edit-system.html).
-
-### 3.10.4. Jak wygląda praktyczny przegląd J-Web
-
-W systemie EX z odpowiednim pakietem J-Web producent dokumentuje ścieżkę:
-
-**J-Web (EX, odpowiedni pakiet) → Configure → System Properties → Management Access** — do ustawień bezpiecznego dostępu przez HTTPS.
-
-To przykład **konkretnej ścieżki menu dla określonej gałęzi GUI**, nie uniwersalna obietnica dla J-Web na SRX 25.4. J-Web na SRX może mieć osobny Setup Wizard i nawigację zależną od release.
-
-Na wspieranym SRX w nowoczesnym J-Web możesz zobaczyć kreator standalone/HA, konfigurację interfejsów/stref, przegląd policies i monitoring. Jeśli ekran nie zgadza się z przewodnikiem sprzed pięciu lat, sprawdź **wersję J-Web i dokumentację wydania**, zamiast zgadywać nazwy przycisków.
-
-### 3.10.5. Cztery pułapki J-Web
-
-**Pierwsza:** urządzenie ma Junos, ale nie musi mieć J-Web w Twojej konkretnej kombinacji platform/release.
-
-**Druga:** dostęp do GUI wymaga **odpowiedniego management reachability**, a na SRX także zasad security. Sam ping do urządzenia nie dowodzi, że TCP/443 jest dozwolony.
-
-**Trzecia:** GUI korzysta z tego samego świata konfiguracji Junos; nie zakładaj, że równoczesne zmiany w CLI i GUI są zawsze od siebie bezpiecznie odseparowane.
-
-**Czwarta:** „widzę zielony interfejs” nie jest dowodem, że aplikacja klienta działa. Po konfiguracji GUI nadal wykonujesz verification w CLI i na urządzeniu końcowym.
-
-Oficjalne źródła: [J-Web for Firewalls and Switches](https://www.juniper.net/documentation/product/us/en/j-web/), [J-Web Feature Explorer](https://apps.juniper.net/feature-explorer/feature/7987?fn=J-Web+graphical+user+interface), [J-Web EX Management Access](https://www.juniper.net/documentation/us/en/software/jweb-ex/jweb-ex-application-package/topics/task/ex-series-management-access-j-web.html), [SRX J-Web Setup Wizard](https://www.juniper.net/documentation/us/en/software/jweb-srx25.4/jweb-srx/topics/topic-map/j-web-setup-wizard.html).
-
-### 3.10.6. Czy potrzebujemy obrazka GUI?
-
-Tak, **gdy dokładny layout pomaga wykonać zadanie**, ale screenshot z konkretnej wersji J-Web może zdezaktualizować się szybciej niż sam mechanizm. Dlatego dla podręcznika:
-- połącz własny **diagram koncepcyjny CLI ↔ J-Web ↔ candidate/commit** z tekstem;
-- wskaż [oficjalną stronę dostępu do J-Web](https://www.juniper.net/documentation/us/en/software/jweb-srx24.2/jweb-srx/topics/topic-map/j-web-security-starting.html), gdzie dostępne są zrzuty Setup Wizard;
-- nie kopiuj zdjęć i screenshotów producenta do publicznego repo bez zweryfikowanych praw do ponownej publikacji.
-
-~~~mermaid
-flowchart LR
-   USER["Administrator"] --> CLI["Junos CLI (SSH/Console)"]
-   USER --> GUI["J-Web (HTTPS)"]
-   CLI --> MGMT["Junos configuration subsystem"]
-   GUI --> MGMT
-   MGMT --> CAN["Candidate / validation"]
-   CAN --> COM["Commit"]
-   COM --> ACT["Active configuration i procesy"]
-~~~
-
-To nie oznacza, że J-Web i CLI są identycznymi frontendami w każdej funkcji. Oznacza, że **obydwa zarządzają tym samym systemem konfiguracji**, który musisz rozumieć niezależnie od ekranu.
-
-
-
----
-
-## 3.11. [EXT] Praktyczna organizacja pracy: display set, commit check, commit confirmed i porównanie zmian
-
-### 3.11.1. „Zielony commit complete” to dopiero początek
-
-Pamiętasz incydent z nocnej zmiany? Na Cisco ASR dopisałeś filtr, a potem pół sieci straciło reachability. Na Junos masz szansę przetestować konfigurację, zanim stanie się aktywna. Ale oto podchwytliwy fakt: **Junos nie wie, czy Twoja aplikacja ERP będzie działać** tylko dlatego, że przeanalizował konfigurację bez błędu.
-
-Podczas `commit check` system sprawdza składnię i wiele zależności oraz wymagań konfiguracji. Może wykryć błędną referencję albo niepoprawną strukturę. Nie musi natomiast wiedzieć, że nowy `firewall filter` odcina IP bastion hosta albo że next-hop wciąż odpowiada na ARP, ale nie prowadzi do serwera.
-
-Dla inżyniera Cisco to łatwa analogia: poprawne przyjęcie `ip access-group` nie dowodzi, że aplikacja będzie działać. **Configuration valid ≠ service healthy.**
-
-### 3.11.2. Zmiana to proces, nie pięć komend
-
-W profesjonalnym change management rozróżnij **precheck**, **candidate review**, **validation**, **activation**, **service verification** i **confirmation**. Nie przechodź od `set` prosto do `commit`, bo to skraca najważniejszy etap — świadomą ocenę diffu.
-
-**Urządzenie: R1-vSRX — Operational Mode, read-only precheck przed zmianą**
-
-~~~junos
-show version
-show system uptime
-show system alarms
-show chassis alarms
-show system users
-show system commit
-show configuration | display set
-~~~
-
-**Urządzenie: R1-vSRX — Operational Mode, wejście do prywatnej sesji zmiany**
-
-~~~junos
-configure private
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], zmiana wyłącznie w izolowanym LAB**
-
-~~~junos
-set system login message "CH03 - test change control"
-show | compare
-commit check
-~~~
-
-Dopiero kiedy `show | compare` pokazało **dokładnie to, co planowałeś**, i `commit check` zakończył się poprawnie, włączasz aktywację warunkową:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], izolowany LAB**
-
-~~~junos
-commit confirmed 5
-~~~
-
-Teraz system pracuje z nową **active configuration**, ale uruchomił się mechanizm **oczekiwania na potwierdzenie**. Na koniec sprawdzasz, czy urządzenie nadal jest osiągalne, czy usługi działają, a change nie spowodował nieplanowanego skutku. Jeżeli jest dobrze, świadomie potwierdzasz.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], potwierdzenie dopiero PO service verification**
-
-~~~junos
-commit
-~~~
-
-### 3.11.3. Najważniejszy haczyk egzaminacyjny tego rozdziału: `commit check` też potwierdza `commit confirmed`
-
-Wyobraź sobie, że przed chwilą wydałeś `commit confirmed 5`, a następnie powiedziałeś do siebie: „Jeszcze raz zrobię `commit check`, bo to przecież tylko sprawdzenie”. I tu Junos może Cię zaskoczyć: **oficjalna dokumentacja potwierdza, że zarówno `commit`, jak i `commit check` mogą potwierdzić oczekujący `commit confirmed`**.
-
-Oznacza to, że wykonanie `commit check` już **po** warunkowym wdrożeniu nie musi być neutralnym testem — może zakończyć mechanizm automatycznego powrotu. To jedna z tych rzeczy, które koniecznie warto zapamiętać, bo są podchwytliwe i mają bezpośredni wpływ na produkcję.
-
-**Przed `commit confirmed`:** `commit check` służy do sprawdzania candidate.  
-**Po `commit confirmed`, gdy timer oczekuje:** `commit check` może potwierdzić zmianę i wyłączyć oczekujący rollback.
-
-Nie „poprawiaj” nawykowo konfiguracji albo nie wykonuj kolejnego commit przed rzeczywistą kontrolą osiągalności urządzenia. Po aktywacji sprawdzaj **stan operacyjny**; jeśli zostajesz w configuration mode, użyj `run`.
-
-**Urządzenie: R1-vSRX — Configuration Mode, po `commit confirmed`, odczyt stanu bez potwierdzania pending commit**
-
-~~~junos
-run show system commit
-run show version
-run show interfaces terse
-~~~
-
-**Urządzenie: R1-vSRX — Operational Mode, odczyt stanu bez modyfikacji**
-
-~~~junos
-show system commit
-show system alarms
-show interfaces terse
-~~~
-
-Sprawdź historię — może zawierać informację o **pending rollback in N minutes**. To dowodzi, że mechanizm ochronny jest jeszcze aktywny. Następnie wykonaj **właściwe testy usługi**, nie tylko kontrolę promptu.
-
-Źródło: [Juniper commit CLI reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html).
-
-### 3.11.4. `commit confirmed 5` nie jest obietnicą, że po pięciu minutach SSH wróci
-
-Automatyczny rollback przywraca poprzednią konfigurację. Jeśli Twoja awaria wynikała wyłącznie ze złej konfiguracji, może to odzyskać reachability. Ale jeśli link fizyczny padł, upstream odciął Twój prefix albo urządzenie przestało działać, rollback **nie jest narzędziem naprawy hardware**.
-
-Druga pułapka: router mógł przeprowadzić zmianę routingową, której skutki **trwają po rollbacku**, bo sąsiedzi potrzebują konwergencji, a sesje stateful muszą zostać zestawione na nowo.
-
-Trzeci detal: dokumentacja Junipera wskazuje, że timeout `commit confirmed` opiera się na **czasie systemowym**. Gdy w trakcie zmieni się zegar, okres oczekiwania może się odpowiednio przesunąć. **Nie planuj eksperymentu NTP w środku pending confirmed commit.**
-
-### 3.11.5. Czy `commit confirmed` można uruchomić w `configure private`?
-
-Tak — na odpowiednio współczesnych wersjach Junos jest wspierany w private config. Tym bardziej ważne jest rozróżnienie **Twojej prywatnej candidate** od **globalnej aktywnej konfiguracji**. Przed aktywacją i potwierdzeniem sprawdź, czy w międzyczasie ktoś inny wykonał commit i czy Twoja candidate jest aktualna.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private]**
-
-~~~junos
-show | compare
-commit check
-commit confirmed 5
-~~~
-
-Jeśli dostaniesz konflikt z innym administratorem, **nie zmuszaj systemu do przypadkowego nadpisania zmian**. Oceń `update`, porównaj rezultat i uzgodnij zakres zmiany.
-
-### 3.11.6. `commit comment` i historia audytu
-
-W dużym środowisku samo „kto i kiedy” może nie wystarczyć. Warto opisać zmianę numerem ticketu, bez danych poufnych. Junos potrafi przechowywać komentarze związane z commit.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit], przykład dopiero po precheck i zgodzie na change**
-
-~~~junos
-commit comment "CH03-LAB controlled configuration example"
-~~~
-
-To nie jest alternatywa dla ServiceNow Change Record i nie powinno się wykonywać dodatkowego commit wyłącznie po to, żeby zostawić notatkę. Zastosuj komentarz do **rzeczywistego** planowanego zatwierdzenia.
-
-**Urządzenie: R1-vSRX — Operational Mode**
-
-~~~junos
-show system commit
-~~~
-
-Wynik pozwala ustalić kolejność commitów, operatorów oraz część informacji o zmianach. **Nie utożsamiaj jednak historii commit z pełnym systemem version control:** Git ma review, PR, odpowiedzialność autorów i audyt zmian między repo, a router przechowuje ograniczoną lokalną historię.
-
-### 3.11.7. Commit na przyszłość — kuszący, lecz ryzykowny
-
-Junos oferuje m.in. **`commit at`** do zaplanowanej aktywacji. Brzmi idealnie do nocnego maintenance window: przygotowujesz zmianę o 15:00, a ona sama włącza się o 23:00. Ale jeśli od rana do wieczora zmieni się stan infrastruktury, kandydat może być nieaktualny. Ponadto przy oczekującym zaplanowanym commit część innych zmian może zostać zablokowana.
-
-To już temat na zaawansowany change management. Na poziomie tego rozdziału **wiedza o istnieniu tej funkcji** jest przydatna, ale nie używaj jej do produkcji bez osobnego runbooka, sprawdzonego zegara/timezone, planu anulowania i uzgodnienia okna.
-
-### 3.11.8. Cisco ma mechanizmy bezpiecznego cofania — nie buduj fałszywej opowieści
-
-Mogłoby wyglądać, że Junos wynalazł transakcyjne zarządzanie, a IOS XE nigdy nie posiadał rollbacku. To byłoby nieprawdziwe. IOS XE na odpowiednich platformach ma mechanizmy **configuration replace**, archiwizację i confirmed rollback. Różnica, którą ćwiczysz, jest przede wszystkim w **codziennym, domyślnym modelu pracy CLI Junos**: edytujesz candidate i ją commitujesz.
-
-Dla doświadczonego inżyniera Cisco przejście jest więc prostsze niż wygląda: znasz problemy, które mechanizmy rollback mają rozwiązać. Nowe są **nawyki, nazwy, sekwencja i ich subtelne wyjątki**.
-
-### 3.11.9. Najbardziej praktyczny runbook do zapamiętania
-
-**FAZA 1 — przed zmianą:** sprawdź stan urządzenia, ścieżkę zarządzania, osoby zalogowane, backup, czas systemowy, OOB/console, istniejący pending commit, HLD i plan rollback.
-
-**FAZA 2 — candidate:** najlepiej kontrolowany `configure private`; przygotuj tylko potrzebny zakres, `show | compare`; zweryfikuj, że w diffie nie ma obcych zmian ani znikającego management.
-
-**FAZA 3 — validation:** `commit check` **przed** pierwszym `commit confirmed`; kontrola oczekiwanego efektu i dostępności platformy.
-
-**FAZA 4 — warunkowa aktywacja:** `commit confirmed N` dobrane do realistycznego czasu potrzebnego do testów, nie przypadkowe „1 minuta”.
-
-**FAZA 5 — service verification:** sprawdź realną usługę w obu kierunkach, BGP/OSPF, management, security, liczniki, monitoring i logi. Kontroluj timer przez `show system commit`, nie przez ponowne `commit check`.
-
-**FAZA 6 — decyzja:** potwierdź `commit` lub pozwól na rollback/wykonaj właściwą procedurę odtworzenia. Uzupełnij worknotes i backup po zmianie.
-
-~~~mermaid
-sequenceDiagram
-    participant N as Network Engineer
-    participant C as Candidate
-    participant J as Junos commit logic
-    participant A as Active
-    N->>C: set / load
-    N->>C: show | compare
-    N->>J: commit check
-    J-->>N: validation PASS (bez aktywacji)
-    N->>J: commit confirmed 5
-    J->>A: activate candidate
-    J-->>N: timer aktywny
-    N->>A: service tests (read-only)
-    alt Testy przeszły
-      N->>J: commit
-      J-->>N: confirmed, timer znika
-    else Testy nie przeszły / brak potwierdzenia
-      J->>A: automatic rollback po timeout
-      A-->>N: poprzedni config (konwergencja może zająć czas)
-    end
-~~~
-
-**Najważniejsze zdanie całego rozdziału:** Junos daje Ci kontrolę nad momentem aktywowania konfiguracji, ale **odpowiedzialność za jakość projektu, kolejność operacji i weryfikację aplikacji pozostaje po stronie inżyniera**.
-
-
-
----
-
-## 3.LAB. [LAB] Pracujemy na prawdziwej candidate: od błędu operatora do bezpiecznego przywrócenia
-
-### 3.LAB.1. Dlaczego ten lab potrzebuje dwóch administratorów, a nie czterech routerów?
-
-W rozdziale 2 ćwiczyliśmy **naszą stałą topologię DIAMOND 4×vSRX + 2×VPCS**. Tu nie zmieniamy żadnego kabla ani CIDR: pracujemy na **konfigurowanym R1-vSRX** (najlepiej w kopii tego samego labu), bo chodzi o ruch i alternatywne ścieżki. Tutaj chodzi o **zarządzanie stanem jednego urządzenia i konflikty operatorów**. Zatem do większości eksperymentów wystarczy jeden vSRX, dwie osobne sesje SSH i niezależna konsola EVE-NG. To nie jest uproszczenie kosztem jakości. To świadome ograniczenie liczby zmiennych.
-
-~~~mermaid
-flowchart TB
-    A["Admin-A\nSSH session 1"] -->|shared lub private| R["R1-vSRX\nJunos config database"]
-    B["Admin-B\nSSH session 2"] -->|shared lub private| R
-    C["EVE-NG Console\nout-of-band recovery"] --> R
-    R --> M["Adres zarządzania\nsprawdzony przed testem"]
-    R --> D["Interfejs danych — opcjonalny,\nnie jest ścieżką SSH"]
-~~~
-
-**Stan laboratorium: PLANNED.** Nie uruchamiano go w EVE-NG; nie podajemy fikcyjnych wyników ani adresów serwera.
-
-#### Warunki wejścia
-
-- EVE-NG ma działający, legalny obraz vSRX i odpowiednie zasoby.
-- Masz dostęp do konsoli R1 niezależny od interfejsu, którym działa SSH.
-- Potwierdziłeś rzeczywisty adres management, port i drogę SSH. vSRX może wykorzystywać `fxp0`, ale nie zakładaj tego bez `show interfaces terse`.
-- Test przeprowadzasz w **izolowanej sieci laboratoryjnej**, bez połączenia do produkcji/biura.
-- Znasz uprawnienia obu kont; jeśli nie masz drugiego konta, utworzenie go należy do rozdziału 4 albo do zatwierdzonego lab startup.
-- Wspólna candidate nie ma niezatwierdzonych zmian innych osób; jeśli ma, nie zaczynaj ćwiczenia z shared candidate.
-- Zapisujesz precheck, aktualny hostname, opis testowego portu, konfigurację login message i historię commitów.
-
-#### Niezależność od wcześniejszych ćwiczeń
-
-Ten rozdział **nie kasuje adresacji z laboratorium CH02**. Eksperymenty opierają się na `system login message` oraz opisach testowego interfejsu **GE-DATA-TEST**. Przed wykonaniem wybierz faktyczny port, który **nie przenosi management**. W przykładach nazwa `ge-0/0/2` jest tylko założeniem do adaptacji; jeżeli na R1 jest to port PC-A, wybierz inną bezpieczną gałąź lub wykonaj wyłącznie testy login message.
-
-### 3.LAB.2. Test zerowy: zobacz stan przed zmianą
-
-**Urządzenie: R1-vSRX — Operational Mode (Admin-A lub konsola)**
-
-~~~junos
-show version
-show system uptime
-show system users
-show system commit
-show interfaces terse
-show configuration system login | display set
-show configuration interfaces ge-0/0/2 | display set
-~~~
-
-**Zadanie ucznia:** zapisz w notatniku, z którego portu zarządzania jesteś połączony. Sprawdź, czy `ge-0/0/2` nie jest elementem management. Zapisz istniejącą konfigurację (bez sekretów i danych produkcyjnych). Ustal, czy inne sesje już edytują shared candidate.
-
-**Urządzenie: R1-vSRX — Configuration Mode, tylko po potwierdzeniu, że jesteś jedynym autorem w shared candidate**
-
-~~~junos
-configure
-status
-show | compare
-exit
-~~~
-
-Jeżeli `show | compare` nie jest puste, **nie wykonuj `rollback 0`** na cudzej pracy, tylko ustal z zespołem, co znajduje się w candidate. Jeżeli prowadzisz własny lab bez innych operatorów, możesz dopiero wtedy bezpiecznie przywrócić baseline.
-
-### 3.LAB.3. Ćwiczenie A — candidate nie zmienia active
-
-Prowadzący mówi: „Dodaj banner i pokaż mi, że użytkownicy nadal widzą stary banner, bo niczego jeszcze nie commitowałeś”.
-
-**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
-
-~~~junos
-configure private
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A)**
-
-~~~junos
-set system login message "CH03 - CANDIDATE ONLY"
-show | compare
-run show configuration system login message
-~~~
-
-**Oczekiwany rezultat:** `show | compare` pokazuje przygotowaną zmianę; operacyjny odczyt active przez `run show configuration ...` nie pokazuje nowego banneru, dopóki nie ma commit. Jeżeli różnica jest inna, zatrzymaj ćwiczenie — możliwe, że system miał już taki sam tekst albo w międzyczasie zmienił się active.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A), cleanup testu A**
-
-~~~junos
-rollback 0
-show | compare
-exit
-~~~
-
-**Nauczony mechanizm:** `rollback 0` czyści prywatne niezacommitowane zmiany. W tym ćwiczeniu nie powinno powstać nowe entry historii commit.
-
-### 3.LAB.4. Ćwiczenie B — dwie sesje, jedna shared candidate
-
-To najważniejszy eksperyment związany z `configure`. Nie potrzebujesz setek poleceń — wystarczy jeden banner i jedna opisowa linia na bezpiecznym porcie, **jeżeli port jest zweryfikowany jako niezarządzający**.
-
-**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
-
-~~~junos
-configure
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-A)**
-
-~~~junos
-set system login message "CH03 - ADMIN A"
-show | compare
-~~~
-
-W drugiej sesji:
-
-**Urządzenie: R1-vSRX — Operational Mode (Admin-B)**
-
-~~~junos
-configure
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-B), wyłącznie potwierdzony port danych**
-
-~~~junos
-set interfaces ge-0/0/2 description "CH03-ADMIN-B"
-show | compare
-status
-~~~
-
-Teraz wróć do Admin-A i porównaj candidate:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-A), nie zatwierdzaj jeszcze**
-
-~~~junos
-show | compare
-status
-~~~
-
-**Przewidywanie:** w shared candidate Admin-A może zobaczyć **oba** niezacommitowane fragmenty. Jeśli teraz wykonałby commit, mógłby zatwierdzić również zmianę Admin-B. To jest sedno problemu. **Nie musisz wykonywać rzeczywistego commit, aby udowodnić mechanikę shared candidate.**
-
-Na końcu, po uzgodnieniu obu sesji:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-A), czyszczenie wspólnego LAB po zgodzie Admin-B**
-
-~~~junos
-rollback 0
-show | compare
-exit
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit] (Admin-B), zakończenie sesji**
-
-~~~junos
-exit
-~~~
-
-Upewnij się, że `show | compare` nie zawiera cudzych zmian. Jeśli lab był współdzielony z kimś spoza ćwiczenia, nie używaj tu automatycznie `rollback 0`.
-
-### 3.LAB.5. Ćwiczenie C — private candidate, a międzyczasie inny administrator commitował
-
-Tym razem Admin-A przygotowuje nowy banner w private, a Admin-B wprowadza zmianę **inną i niezależną** (np. opis portu). Konieczna jest niezależna konsola, choć same operacje mogą być bezpieczne.
-
-**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
-
-~~~junos
-configure private
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A)**
-
-~~~junos
-set system login message "CH03 - PRIVATE-A"
-show | compare
-~~~
-
-**Urządzenie: R1-vSRX — Operational Mode (Admin-B)**
-
-~~~junos
-configure private
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-B), port danych zweryfikowany**
-
-~~~junos
-set interfaces ge-0/0/2 description "CH03-PRIVATE-B"
-show | compare
-commit check
-commit confirmed 5
-~~~
-
-Admin-B wykonuje test i świadomie potwierdza:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-B), dopiero po weryfikacji**
-
-~~~junos
-commit
-exit
-~~~
-
-Teraz Admin-A ma private candidate utworzoną przed commit Admin-B. Jaką otrzyma odpowiedź przy próbie własnego commit? Zależy od wydania, konfliktów i aktualnego stanu. **Nie próbuj siłowo commitować**. Sprawdź zmianę globalną i wykonaj `update` w private.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A)**
-
-~~~junos
-show | compare
-update
-show | compare
-commit check
-~~~
-
-Oczekiwany koncept: prywatna candidate Admin-A powinna zostać uzgodniona z nowym active w takim zakresie, w jakim nie ma konfliktu. Gdy zobaczysz conflict, rozwiązujesz go, nie zakładasz, że `update` wszystko naprawia.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A), aktywacja po poprawnym update, tylko LAB**
-
-~~~junos
-commit confirmed 5
-~~~
-
-Po service verification:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private] (Admin-A)**
-
-~~~junos
-commit
-exit
-~~~
-
-Na zakończenie przywróć dokładnie wyjściowy banner i opis na podstawie zapisanego **precheck**, nie przez zgadywanie, że przed testem nie było opisu. Najbezpieczniej przygotować oddzielny, zweryfikowany plan cofnięcia lub rozważyć kontrolowany rollback do zapisanego punktu.
-
-### 3.LAB.6. Ćwiczenie D — wczytaj konfigurację, ale nie zastępuj całego urządzenia
-
-W tym eksperymencie nie potrzebujemy nawet zewnętrznego SCP. Wykorzystaj `load set terminal` i `load merge terminal`, aby zobaczyć różnicę formatów.
-
-**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
-
-~~~junos
-configure private
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], rozpoczęcie importu set**
-
-~~~junos
-load set terminal
-~~~
-
-**Dane wprowadzane do R1-vSRX jako zawartość terminalowego `load set` (potem Ctrl+D)**
-
-~~~junos
-set system login message "CH03 - LOADED-SET"
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], po Ctrl+D**
-
-~~~junos
-show | compare
-rollback 0
-~~~
-
-Teraz drugi wariant:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], rozpoczęcie importu hierarchy**
+**R1-vSRX — Configuration Mode [edit], alternatywny import hierarchiczny**
 
 ~~~junos
 load merge terminal
 ~~~
 
-**Dane wprowadzane do R1-vSRX jako hierarchy, potem Ctrl+D**
+Następnie wklej pokazany fragment hierarchiczny i zakończ **Ctrl+D**. Nie wykonuj tego natychmiast po poprzednim przykładzie, jeśli chcesz zachować dwa niezależne eksperymenty — najpierw wycofaj własną candidate albo pracuj na świeżym snapshotcie labu.
+
+**R1-vSRX — Configuration Mode [edit], kontrola efektu**
 
 ~~~junos
-system {
+show | compare
+~~~
+
+### `load replace`: zastępujemy konkretną gałąź — ale tylko gdy oznaczymy ją właściwie
+
+Załóżmy, że w jednym fragmencie masz kilka ustawień, ale nie chcesz dołożyć kolejnych do starego zestawu. Chcesz zastąpić wskazaną gałąź nową definicją.
+
+`load replace` może to zrobić, lecz dokumentacja Juniper przewiduje specjalny znacznik **`replace:`** w wczytywanej konfiguracji. Bez niego operacja może zachowywać się jak merge, a nie jak oczekiwane pełne zastąpienie gałęzi. To bardzo łatwa pułapka.
+
+Przykładowy fragment pokazujący samą ideę:
+
+~~~text
+replace: system {
     login {
-        message "CH03 - LOADED-MERGE";
+        message "CH03: Replacement example";
     }
 }
 ~~~
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], po Ctrl+D**
+**Uwaga:** powyższy fragment jest demonstracją działania `replace:`, nie poleceniem do bezrefleksyjnego uruchomienia. Zastąpienie całego `system` byłoby niebezpieczne, bo mogłoby usunąć inne ustawienia. W prawdziwym labie znacznik umieszcza się przy **najwęższej właściwej gałęzi**, po sprawdzeniu dokumentacji i pełnego diffu. Na początku wystarczy rozumieć różnicę między *merge* i *replace*, bez aktywowania ryzykownego przykładu.
 
-~~~junos
-show | compare
-rollback 0
-exit
-~~~
+### `load override`: dlaczego to inna kategoria ryzyka?
 
-**Co się wydarzyło?** Dwa różne formaty importu prowadzą do podobnej zmiany w candidate, ale mechanika parsera i zakres zastąpienia są inne. **Nie uruchamialiśmy `load override`**, ponieważ nie jest to potrzebne do osiągnięcia celu szkoleniowego.
+`load override` zastępuje **całą candidate configuration** wczytywanym plikiem. Jeśli otrzymałeś tylko dwa polecenia opisujące port i użyjesz override, nowa candidate może nie mieć kont, adresów zarządzania, interfejsów, security policies ani wielu innych ustawień. Po commit skutki byłyby poważne.
 
-### 3.LAB.7. Ćwiczenie E — kontrolowany `commit confirmed` z automatycznym rollbackiem
+**Nie wykonujemy `load override` w tym szkoleniu.** Czytelnik powinien znać jego znaczenie, ale nie musi ryzykować utraty dostępu, by się o nim przekonać.
 
-To eksperyment, który naprawdę warto wykonać po drugiej stronie Cisco.
+Pozostałe tryby, takie jak `load update` i `load patch`, są przydatne w bardziej zaawansowanych scenariuszach migracji i automatyzacji. Ważne, żeby nie pomylić `load update` z samym `update` w `configure private`: pierwsze jest sposobem wczytywania konfiguracji z pliku, drugie pomaga synchronizować prywatną candidate z aktualnym stanem.
 
-**Cel:** aktywować nieszkodliwy login banner na krótki czas i sprawdzić, że Junos sam wróci do wcześniejszego active, jeśli operator nie potwierdzi zmiany.
+| Cel | Właściwy mechanizm | Główne ryzyko |
+|---|---|---|
+| Wkleić kilka linii `set` | `load set terminal` | Nieoczekiwane nadpisanie pojedynczych wartości |
+| Dołożyć fragment hierarchiczny | `load merge` | Konflikty z istniejącymi wartościami |
+| Zastąpić oznaczony fragment drzewa | `load replace` i `replace:` | Zbyt szeroki zakres zastępowanej gałęzi |
+| Zastąpić całą candidate | `load override` | Utrata ustawień nieobecnych w pliku |
+| Zmienić tylko różnice według pełnej konfiguracji | `load update` | Mylenie znaczenia z aktualizacją private candidate |
+| Wczytać patch w odpowiednim formacie | `load patch` | Nieprawidłowy format lub kontekst patcha |
 
-**Nie wycinamy SSH i nie usuwamy adresu IP management.** Dla zrozumienia mechanizmu wystarczy bezpieczna zmiana, po której obserwujemy timer.
-
-**Urządzenie: R1-vSRX — Operational Mode (Admin-A)**
-
-~~~junos
-show system commit
-configure private
-~~~
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], odseparowany LAB**
-
-~~~junos
-set system login message "CH03 - TEMPORARY CONFIRMED CHANGE"
-show | compare
-commit check
-commit confirmed 2
-~~~
-
-Teraz bardzo uważnie: **nie wydawaj `commit check` ponownie**, bo może potwierdzić oczekujący commit.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], odczyt po aktywacji**
-
-~~~junos
-run show system commit
-run show configuration system login message
-~~~
-
-**Urządzenie: R1-vSRX — Operational Mode (Admin-B albo EVE console), obserwacja niezależna**
-
-~~~junos
-show system commit
-show configuration system login message
-~~~
-
-Przewidywanie: przez chwilę aktywna konfiguracja zawiera nowy login message, a `show system commit` informuje o oczekiwanym rollback. Po upływie okresu oczekiwania bez potwierdzenia Junos powinien załadować wcześniejszy active, a historia commitów odnotować zdarzenie. Zapisz wyniki przed i po.
-
-**Jeśli inne procesy lub administratorzy nadal wykonują commity na tym urządzeniu, przerwij ćwiczenie**. Użyj dedykowanego laba. Nie uznawaj, że odzyskanie starego banneru jest dowodem, że w produkcji wszystkie sesje BGP wróciłyby natychmiast.
-
-### 3.LAB.8. Ćwiczenie F — rollback 1, rescue i porównanie dwóch historii
-
-Jeżeli w eksperymencie D nie wykonałeś realnego commit, nie powinien on tworzyć wpisu historii. W eksperymencie E `commit confirmed` i auto-rollback już wpływają na historię. To dobra okazja do zrozumienia, **dlaczego numeracja rollback jest względna**.
-
-**Urządzenie: R1-vSRX — Operational Mode (read-only)**
-
-~~~junos
-show system commit
-show system rollback 0
-show system rollback 1
-show system rollback 0 compare 1
-~~~
-
-Przewidź, która z poprzednich wersji zawiera eksperymentalny banner. **Nie zakładaj, że rollback 1 to zawsze baseline sprzed całego rozdziału.** Jeśli zrobiłeś kilka commitów, indeks może wskazywać inną wersję.
-
-Jeśli jako właściciel laba masz już prawidłową, zweryfikowaną konfigurację bazową i uzgodniłeś zapis rescue:
-
-**Urządzenie: R1-vSRX — Operational Mode, po walidacji baseline, uwaga: nadpisuje istniejący rescue**
-
-~~~junos
-request system configuration rescue save
-~~~
-
-Na koniec laboratorium **nie zostawiaj w urządzeniu przypadkowych banerów, opisów portów, blokad exclusive ani niepotwierdzonych commitów**. Wykonaj końcowe pre/post porównanie z zapisanym baseline.
-
-### 3.LAB.9. Ćwiczenie G (opcjonalne) — rzeczywista utrata SSH i recovery
-
-To ćwiczenie jest **opcjonalne i bardziej ryzykowne**. Można je przeprowadzić tylko jeśli:
-- masz **niezależną konsolę** i fizycznie/logiczną mapę połączenia;
-- wiesz, którym interfejsem przechodzi SSH;
-- nie korzystasz z management firmy ani chmury klienta;
-- masz pełną kopię konfiguracji, rollback plan oraz możliwość odzyskania urządzenia po automatycznym rollback.
-
-Nie podaję gotowej komendy usuwającej adres management, ponieważ bez znajomości mapowania Twojego EVE-NG mogłaby dotyczyć **niewłaściwego interfejsu**. Codex, mając rzeczywisty precheck i odpowiednie uprawnienia, może przygotować wersję tego testu z odłączaną **sztuczną** ścieżką SSH w izolowanej sieci. Minimalny test E powyżej w zupełności wystarcza do zrozumienia `commit confirmed` na JNCIA.
-
-### 3.LAB.10. Kiedy lab jest naprawdę ukończony?
-
-Nie dlatego, że wpisałeś wszystkie komendy, tylko gdy potrafisz pokazać **dowody**:
-- Kiedy candidate różni się od active, a kiedy obie są takie same?
-- Czy w shared candidate Admin-A widzi zmianę Admin-B?
-- Czy w private candidate trzeba było użyć `update` i dlaczego?
-- Czy `load set` i `load merge` przyniosły oczekiwany diff bez przypadkowego usunięcia reszty konfiguracji?
-- Czy `commit confirmed` faktycznie zadziałał, gdy **nie** potwierdzono?
-- Jak wygląda `show system commit` przed i po rollbacku?
-- Czy odtworzyłeś początkowy stan interfejsów, login message i routingu?
-
-Prawdziwy wynik weryfikacji zapisz w `VERIFY.md` wraz z datą, wersją obrazu Junos, nazwą topologii oraz konkretnymi wynikami. **Nie wpisuj PASS, jeśli nie zrobiłeś testu na działającym urządzeniu.**
-
-
+**Reguła przed każdym importem:** sprawdź format wejścia, zakres zmiany, właściwe urządzenie, różnicę candidate/active oraz plan rollback. `commit check` nie zastępuje oceny, czy fragment pochodzi z właściwej lokalizacji.
 
 ---
 
-## 3.TS. Troubleshooting — gdy zmiana Junos nie zachowuje się tak, jak oczekujesz [EXT]
+## 3.9. Rollback — powrót do poprzedniej konfiguracji [A]
 
-### 3.TS.1. „Commit failed”. Czy router wrócił do poprzedniego stanu?
+Nie każda poprawnie zatwierdzona zmiana daje dobry rezultat. Czasami nowa konfiguracja przechodzi kontrolę składni, ale użytkownicy tracą dostęp do usługi. Wtedy potrzebujesz sposobu, by wrócić do wcześniejszego, znanego stanu.
 
-Pamiętasz scenę z nocnego dyżuru: w IOS XE wklejone polecenia mogą już działać, choć jedna linijka była błędna. W standardowym workflow Junos **nieudany `commit check` lub nieudany commit oznacza, że proponowane zmiany nie zostały skutecznie aktywowane jako oczekiwana nowa konfiguracja**. Jednak nie buduj nieprawdziwej pewności, że nic innego w systemie w tym czasie się nie wydarzyło — inni operatorzy, działania operacyjne, stan protokołów i wcześniejsze commity wciąż istnieją.
+Junos przechowuje historię zatwierdzonych konfiguracji. Możesz **obejrzeć** starsze wersje, **załadować** wybraną wersję do candidate i dopiero potem ją aktywować. Ten ostatni szczegół jest najważniejszy: **`rollback 1` nie oznacza natychmiastowego cofnięcia działającego routera.**
 
-**Urządzenie: R1-vSRX — Configuration Mode, analiza nieudanej próby**
+### Co oznaczają numery rollback?
 
-~~~junos
-top
-show | compare
-commit check
-~~~
+`rollback 0` odnosi się do aktualnej aktywnej konfiguracji jako punktu odniesienia. Gdy jesteś w Configuration Mode i masz niezacommitowane zmiany, `rollback 0` może odrzucić je, przywracając candidate do active.
 
-Najpierw czytaj **pełny komunikat błędu**. Jeśli system mówi o brakującej referencji, poprawiasz referencję. Jeśli o konflikcie zmiany innego administratora, patrzysz na `configure private` i `update`. Jeśli o błędnym statement, użyj `?` dokładnie tam, gdzie parser go odrzucił.
+`rollback 1` ładuje do candidate poprzednią zatwierdzoną konfigurację. Po czymś takim możesz wykonać `show | compare` i zobaczyć, co zmieniłoby się względem obecnego stanu, gdybyś ten rollback zatwierdził.
 
-**Nie naprawiaj błędu losowym `load override`**. Wtedy zmienisz kategorię problemu z jednej brakującej referencji w potencjalną utratę całej konfiguracji.
+Późniejsze numery oznaczają starsze wersje — ale **nie zapamiętuj numeru „1” jako magicznego backupu sprzed całej serii zmian**. Po każdym kolejnym commit historia przesuwa się. Zawsze sprawdź datę i treść konkretnej wersji.
 
-### 3.TS.2. „Nie widzę zmiany, którą właśnie wpisałem”
-
-Pomyśl, co tak naprawdę zostało zrobione. Jeśli wykonałeś tylko `set`, zmiana może być w candidate. Jeśli jesteś w `[edit interfaces ...]`, a patrzysz na inny interfejs, możesz wyciągnąć fałszywy wniosek. Jeśli wchodzi w grę `apply-groups`, lokalny widok może nie pokazywać wartości odziedziczonych.
-
-**Urządzenie: R1-vSRX — Configuration Mode**
+**R1-vSRX — Operational Mode: odczyt historii bez ingerencji w candidate**
 
 ~~~junos
-top
-show | compare
-show | display set
-run show configuration system login message
-~~~
-
-**Urządzenie: R1-vSRX — Operational Mode**
-
-~~~junos
-show configuration system login message
 show system commit
+show system rollback 1
+show system rollback compare 0 1
 ~~~
 
-**Diagnoza:** odróżnij candidate, active i aktywny stan usługi. Przeczytanie wyłącznie jednego `show` bez znajomości trybu CLI jest częstą przyczyną fałszywego zgłoszenia „config nie zapisuje zmian”.
+Pierwsze polecenie pokazuje historię commit. Drugie wyświetla starszą konfigurację. Trzecie pozwala porównać dwie wersje. Na wybranych wydaniach forma widoku może się różnić — sprawdź dostępność w `?`.
 
-### 3.TS.3. „Mój `commit` wgrał zmianę kolegi”
+### Najprostszy rollback: niezatwierdzona pomyłka
 
-To klasyczny błąd pracy ze shared candidate. Jeśli Admin-A wykonał `configure`, Admin-B także, ich zmiany mogą znaleźć się w **tej samej bazie candidate**. Jeden commit potrafi aktywować obie.
+Jesteś w Configuration Mode, dopisałeś błędny opis, ale **nie zrobiłeś commit**. Wtedy nie musisz odtwarzać historii całego urządzenia.
 
-**Urządzenie: R1-vSRX — Configuration Mode [edit]**
-
-~~~junos
-status
-show | compare
-~~~
-
-**Urządzenie: R1-vSRX — Operational Mode**
-
-~~~junos
-show system users
-show system commit
-~~~
-
-Jeżeli błąd już się wydarzył, wróć do historii i change record. Nie cofaj całej konfiguracji w ciemno — możesz cofnąć również zmianę kolegi, która była potrzebna. Na produkcji najpierw uzgodnij zakres przywracania i ewentualnie przygotuj **korektę punktową**, zamiast zbiorczego rollbacku.
-
-### 3.TS.4. „Private config nie chce wejść po tym, jak inny administrator zrobił commit”
-
-Ten problem jest normalną konsekwencją równoczesnych zmian, nie magicznym błędem mgd. Private candidate powstał ze starszego active. Weryfikacja podczas commit może wykryć, że ktoś zmienił konfigurację od tego czasu.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private]**
+**R1-vSRX — Configuration Mode [edit], tylko gdy jesteś jedynym autorem zmian w candidate**
 
 ~~~junos
 show | compare
-update
-show | compare
-~~~
-
-Jeśli jest konflikt, zatrzymaj się. **Nie zakładaj, że `update` nadpisuje wszystko poprawnie.** Odpowiedz: jaki obiekt zmienili obaj administratorzy, jaki był zamierzony efekt, czy możemy rozdzielić zmianę na osobne commity?
-
-### 3.TS.5. „Trasa działa, ale diff po `load set` wygląda podejrzanie”
-
-Architekt przesłał plik z konfiguracją „z innej lokalizacji”. Po `load set` zobaczyłeś przypadkową zmianę management IP i nazw interfejsów.
-
-Nie ignoruj tego tylko dlatego, że `commit check` przeszedł. Wczytanie poprawnej składni nie dowodzi zgodności z Twoim HLD.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], bezpieczna diagnostyka przed commit**
-
-~~~junos
-show | compare
-show | display set
-~~~
-
-Jeżeli nie jesteś pewien, co się zmieniło, **nie commituj**. Jeśli wyłącznie Ty pracujesz w private candidate i nie masz innych potrzebnych niezacommitowanych zmian, możesz ją odrzucić:
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], tylko własne niezacommitowane zmiany**
-
-~~~junos
 rollback 0
 show | compare
 ~~~
 
-**Następny krok:** popraw plik w systemie wersjonowania lub z architektem. Nie edytuj produkcyjnego routera metodą prób i błędów.
+Po `rollback 0` diff powinien być pusty, jeśli kandydat wrócił do active. **Uważaj na zwykły współdzielony `configure`:** jeśli w candidate znajdują się niezacommitowane zmiany innego administratora, `rollback 0` może je również odrzucić. Nie używaj go bez uprzedniego ustalenia, do kogo należą zmiany.
 
-### 3.TS.6. „Po `commit confirmed` wszystko działało, a potem się cofnęło”
+### Gdy błędna konfiguracja już została zatwierdzona
 
-To nie jest awaria Junos. Jeśli wykonałeś `commit confirmed 5`, ale przez pięć minut nie potwierdziłeś zmiany, system powinien automatycznie przywrócić poprzedni config.
+Załóżmy, że zmiana opisu portu została zatwierdzona, a chcesz wrócić do poprzedniej wersji. Najpierw odczytujesz historię. Następnie wczytujesz starszą konfigurację do candidate, sprawdzasz różnicę i dopiero potem decydujesz o jej aktywacji.
 
-**Urządzenie: R1-vSRX — Operational Mode**
-
-~~~junos
-show system commit
-show configuration system login message
-~~~
-
-**Pytanie egzaminacyjne:** czy koniecznie musisz wykonać `commit`, by potwierdzić? **Nie — `commit check` również może to zrobić.** Nie uruchamiaj więc go po confirmed commit jako „neutralnej próby”, jeśli chcesz zachować rollback timer.
-
-### 3.TS.7. „Po `rollback 1` zobaczyłem tylko starą konfigurację w candidate”
-
-To poprawne zachowanie. Załadowanie starej konfiguracji nie jest równoznaczne z jej aktywacją. Przed commit możesz jeszcze obejrzeć różnicę.
-
-**Urządzenie: R1-vSRX — Configuration Mode [edit private], przykład tylko po świadomym wyborze wersji**
+**R1-vSRX — Configuration Mode [edit private], wyłącznie po wybraniu właściwego snapshotu**
 
 ~~~junos
 rollback 1
@@ -1875,222 +730,777 @@ show | compare
 commit check
 ~~~
 
-Zanim aktywujesz ją na produkcji, policz zakres strat: czy poprzednia wersja zawiera wszystkie potrzebne zmiany z ostatniego incydentu, w tym pracę innych administratorów? Mechaniczny rollback może być bardziej destrukcyjny od precyzyjnego usunięcia wadliwej linijki.
+Nie dodajemy tu od razu `commit` — najpierw trzeba upewnić się, że historyczna konfiguracja nie usuwa innych, potrzebnych zmian dokonanych od tamtego czasu. W produkcji taki rollback mógłby przypadkowo usunąć cudze poprawki, jeśli nie zrozumiesz, z jakiego momentu pochodzi snapshot.
 
-### 3.TS.8. „J-Web nie działa; SSH i ping działają”
+### Rescue configuration — po co osobna wersja ratunkowa?
 
-To bardzo dobra okazja, żeby połączyć rozdział 2 z rozdziałem 3. Ping do lokalnego adresu SRX to inny rodzaj ruchu i inna usługa niż HTTPS do J-Web. Jeśli SSH działa, potwierdziłeś jedną usługę, nie cały management.
+Oprócz historii rollback Junos udostępnia specjalną **rescue configuration**. To konfiguracja ratunkowa, którą administrator może zapisać jako znany, użyteczny punkt odtworzenia. Nie jest zapisywana automatycznie po każdym commit.
 
-Sprawdź kolejno: czy platforma obsługuje J-Web; czy serwer HTTPS jest poprawnie skonfigurowany; na jakim interfejsie; czy certyfikat istnieje; czy SRX host-inbound oraz filtr dopuszcza TCP/443; czy routing zwrotny działa; czy to właściwa wersja GUI.
+Ważne, żeby rozróżnić dwie operacje. Najpierw administrator świadomie zapisuje dobrą konfigurację jako rescue. Później, gdy jest potrzeba, może ją wczytać do candidate i zatwierdzić, po weryfikacji.
 
-**Urządzenie: R1-vSRX — Operational Mode**
+**R1-vSRX — Operational Mode, zapis rescue wyłącznie po zatwierdzeniu baseline i zgodzie właściciela labu**
+
+~~~junos
+request system configuration rescue save
+~~~
+
+**R1-vSRX — Configuration Mode [edit], przywracanie rescue jako candidate — nie wykonywać bez potrzeby**
+
+~~~junos
+rollback rescue
+show | compare
+~~~
+
+Rescue jest bardzo pomocna, ale nie oznacza pełnego backupu sprzętu, plików użytkowników, licencji czy zewnętrznych systemów. Nie zastępuje też niezależnego dostępu konsolowego, bo błędna konfiguracja może odciąć SSH zanim zdążysz jej użyć.
+
+### Rollback nie jest cofnięciem czasu dla wszystkich elementów urządzenia
+
+Załóżmy, że zmieniono konfigurację i wykonano upgrade oprogramowania. Wczytanie starszej konfiguracji nie przywraca automatycznie starszego obrazu Junos. Podobnie rollback nie zawsze odtwarza stan dynamicznych sesji bezpieczeństwa, liczników czy procesów.
+
+Dlatego w procedurach operacyjnych odróżniamy **rollback konfiguracji** od pełnego planu przywrócenia usługi. Ten ostatni może wymagać także testów protokołów, ścieżek, stanu systemu i pracy aplikacji.
+
+---
+
+## 3.10. J-Web — administracja przez przeglądarkę [A]
+
+Nie każda osoba zarządzająca Junos pracuje wyłącznie przez terminal. Juniper udostępnia również **J-Web** — graficzny interfejs dostępny przez przeglądarkę na wspieranych urządzeniach i wydaniach. Możesz w nim przeglądać informacje o systemie, monitorować wybrane elementy i przygotowywać konfigurację.
+
+J-Web jest szczególnie przydatny, kiedy uczysz się układu urządzenia lub chcesz pokazać mniej doświadczonemu administratorowi stan interfejsów. W niektórych sytuacjach prostszy będzie jednak CLI, zwłaszcza podczas analizy wielu urządzeń, diffów i logów.
+
+Nie zakładaj, że każdy model Juniper ma identyczny wygląd J-Web. **SRX i EX mogą mieć inne widoki, a dostępność funkcji zależy od Junos release oraz zainstalowanego pakietu J-Web.** Ekran opisany w instrukcji dla innej rodziny urządzeń nie musi odpowiadać Twojemu vSRX.
+
+### Jak bezpiecznie korzystać z GUI?
+
+Połączenie z J-Web powinno być szyfrowane przez **HTTPS** i dopuszczone tylko ze znanego segmentu zarządzania. Do działania może być potrzebna poprawna konfiguracja usługi `web-management`, certyfikatu oraz reguł dopuszczających dostęp do urządzenia. Na SRX dochodzą kwestie `host-inbound-traffic`.
+
+Nie otwieraj J-Web przez zwykłe HTTP tylko dlatego, że HTTPS wymaga dodatkowej konfiguracji. Nie wystawiaj też panelu na wszystkie interfejsy w sieci ćwiczeniowej lub, co gorsza, do Internetu.
+
+**R1-vSRX — Operational Mode: sprawdź najpierw, czy J-Web w ogóle jest skonfigurowany**
 
 ~~~junos
 show version
 show configuration system services web-management | display set
 show configuration security zones | display set
 show interfaces terse
-show system alarms
 ~~~
 
-Na różnych wydaniach J-Web są inne modele pakietów i wsparcia. Nie otwieraj portu management na każdym interfejsie ani nie włączaj nieszyfrowanego HTTP jako „szybkiego obejścia”.
+Jeżeli pierwsze polecenie potwierdza wspierany release, a drugie pokazuje konfigurację HTTPS, masz część potrzebnych informacji. Nadal nie jest to dowód, że panel działa: sprawdź certyfikat, właściwą strefę, adres management i dostępność TCP na wybranym porcie.
 
-### 3.TS.9. „Przez `show configuration` widzę coś innego niż po `show | display inheritance`”
+### Dlaczego nie podajemy jednej uniwersalnej ścieżki menu J-Web?
 
-Znasz potencjalną przyczynę: **configuration groups** i inne mechanizmy dziedziczenia. Lokalny tekst może być krótszy niż wynikowe ustawienia przekazane do procesu. W kontekście CLI to nie błąd — to inny **widok tej samej logicznej konfiguracji**.
+Interfejs J-Web zmieniał się między wersjami i rodzinami sprzętu. Nie byłoby uczciwe podać jako uniwersalnej ścieżki `Configure → Interfaces`, jeśli na Twoim obrazie funkcja znajduje się w innym miejscu albo nie jest zainstalowana.
 
-**Urządzenie: EX-ACCESS-01 — Operational Mode (jeżeli urządzenie korzysta z groups)**
+W odizolowanym labie zastosuj następującą procedurę: otwórz stronę HTTPS pod **zweryfikowanym adresem zarządzania**, zaloguj się uprawnionym kontem, znajdź sekcję monitorowania interfejsów i porównaj stan portu `ge-0/0/0` z `show interfaces terse` w CLI. Jeśli w danym release dostępne jest porównanie zmian konfiguracji, sprawdź, czy GUI prezentuje ten sam zakres zmiany, który widzisz w CLI przez `show | compare`.
+
+**Nie włączamy J-Web jako obowiązkowej części bazowej konfiguracji DIAMOND-6R.** Ten rozdział dotyczy przede wszystkim zasad CLI; GUI pozostaje wariantem opcjonalnym na wspieranej platformie. Dla konkretnych kliknięć korzystaj z dokumentacji producenta właściwej dla zidentyfikowanego release: [J-Web for SRX and EX](https://www.juniper.net/documentation/product/us/en/j-web/), [Secure Web Access](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/secure-web-access-remote-management.html).
+
+---
+
+## 3.11. Bezpieczny sposób wprowadzania zmian: diff, check, confirmed, test i dopiero zatwierdzenie [EXT]
+
+Do tego momentu znasz już elementy potrzebne do wykonania zmiany. Teraz połączymy je w jeden proces, który może stać się Twoim codziennym nawykiem.
+
+Przedstawmy zmianę trochę ważniejszą niż opis portu. Administrator chce zmodyfikować adresowanie lub filtry w drodze do serwera. Jeśli się pomyli, może stracić połączenie SSH do routera. **Nie wystarczy sprawdzić, że konfiguracja jest poprawna składniowo.** Trzeba zaplanować sposób przywrócenia dostępu, jeśli test po aktywacji zakończy się niepowodzeniem.
+
+### Co oznacza `commit confirmed`?
+
+Zwykły `commit` aktywuje zmianę i pozostawia ją w konfiguracji, chyba że później wykonasz kolejne działania. **`commit confirmed`** aktywuje ją warunkowo: daje określony czas na potwierdzenie, że wszystko działa. Jeśli nie otrzyma potwierdzenia, Junos powinien automatycznie przywrócić poprzednią konfigurację.
+
+Wyobraź sobie, że wykonujesz `commit confirmed 5`. System ma pięć minut na otrzymanie potwierdzenia. To czas na sprawdzenie, czy router pozostał osiągalny i czy usługa działa. Jeśli popełniłeś błąd i straciłeś SSH, mechanizm rollback może pomóc odzyskać poprzednią konfigurację.
+
+Nie należy jednak traktować tego jak gwarancji, że w każdym przypadku wszystko „naprawi się samo”. Dostępność konsoli, stan systemu, sposób zapisu i specyfika platformy nadal mają znaczenie. Nie przeprowadzaj pierwszego takiego testu na routerze produkcyjnym.
+
+### Jedna szczególnie ważna pułapka: `commit check` po `commit confirmed`
+
+Zanim aktywujesz zmianę, `commit check` jest rozsądnym krokiem. Ale **po wykonaniu `commit confirmed` jego rola może być inna**. Zgodnie z dokumentacją Juniper, również `commit check` wykonany podczas oczekiwania może **potwierdzić warunkowy commit**, zatrzymując automatyczny rollback.
+
+Właśnie dlatego kolejność działań ma znaczenie:
+
+1. Przejrzyj `show | compare`.
+2. Uruchom `commit check` **przed** aktywacją.
+3. Wykonaj `commit confirmed 5`.
+4. Sprawdź **działanie**, korzystając z poleceń operacyjnych, konsoli lub niezależnego testu klienta — bez kolejnego `commit check`.
+5. Dopiero po sukcesie zatwierdź nową konfigurację poleceniem `commit`.
+
+Pierwsze dwa kroki sprawdzają poprawność projektu zmian przed aktywacją. Czwarty odpowiada na pytanie, czy system działa poprawnie po aktywacji. Tych dwóch rodzajów weryfikacji nie wolno zastępować jednym testem.
+
+~~~mermaid
+flowchart TD
+  START["Przygotuj zmianę w candidate"] --> DIFF["show | compare"]
+  DIFF --> CHECK["commit check — PRZED aktywacją"]
+  CHECK --> CC["commit confirmed 5"]
+  CC --> TEST{"Czy działa dostęp i usługa?"}
+  TEST -->|Tak| COMMIT["commit — potwierdzenie"]
+  TEST -->|Nie| WAIT["Nie potwierdzaj; rollback po timerze<br/>lub kontrolowany powrót przez konsolę"]
+  COMMIT --> END["Zapisz wynik i dowody"]
+  WAIT --> END
+~~~
+
+*Rysunek 3.3. Bezpieczny model zmiany zdalnej. Podczas oczekiwania po `commit confirmed` nie uruchamiaj kolejnego `commit check`, jeśli chcesz zachować możliwość automatycznego cofnięcia.*
+
+### Jak wygląda to na prostym przykładzie?
+
+Użyjmy bezpiecznego ustawienia — komunikatu wyświetlanego użytkownikowi przy logowaniu. To nie jest zmiana routingu ani polityki bezpieczeństwa, ale pozwoli przećwiczyć mechanizm.
+
+**R1-vSRX — Operational Mode: wejdź do prywatnej konfiguracji**
 
 ~~~junos
-show configuration interfaces | display inheritance
-show configuration interfaces | display set
+configure private
 ~~~
 
-Dokładną politykę dziedziczenia i konfigurację groups omówimy w rozdziale 4.
+**R1-vSRX — Configuration Mode [edit private]: przygotowanie i kontrola przed aktywacją**
 
-### 3.TS.10. „Nie mogę nic zrobić, bo inny administrator trzyma exclusive”
+~~~junos
+set system login message "CH03: Test warunkowego commit"
+show | compare
+commit check
+commit confirmed 5
+~~~
 
-Nie rozwiązuj tej sytuacji od razu przez zabicie sesji operatora. `configure exclusive` jest mechanizmem blokady. Jeśli blokada jest uzasadniona change window, poczekaj na jej zwolnienie zgodnie z procedurą. W rzeczywistym incydencie P1 skontaktuj się z właścicielem lock i zastosuj formalny tryb awaryjny.
+Teraz **nie wpisuj niczego, co mogłoby potwierdzić zmianę**. Przejdź do odczytu operacyjnego z osobnej sesji, której nie używasz do edycji.
 
-Dokumentacja Junipera opisuje administracyjne wylogowanie operatora, ale to może **przerwać cudzą pracę i spowodować utratę niezacommitowanych zmian**. Nie przedstawiamy tego jako rutynowego sposobu rozwiązania konfliktu.
+**R1-vSRX — Operational Mode, osobna sesja: post-check podczas timera**
 
----
+~~~junos
+show system commit
+show configuration system login message
+show system uptime
+~~~
 
-## 3.TEST. Sprawdzian rozumowania — 16 sytuacji, nie 16 definicji [EXT]
+Jeśli potwierdzisz, że zmiana jest zgodna z planem i nie ma wpływu na działanie labu, możesz ją zachować.
 
-*Pytania są autorskie, oparte na jawnych mechanizmach producenta. Nie są kopiami pytań z oficjalnego assessmentu JNCIA ani z exam dumpów.*
+**R1-vSRX — Configuration Mode [edit private]: potwierdzenie dopiero po PASS**
 
-Spróbuj odpowiedzieć **przed** przeczytaniem wyjaśnienia. Nie chcę, żebyś wybierał literę A/B/C/D na pamięć. Chcę, żebyś przewidział skutek.
+~~~junos
+commit
+~~~
 
-**1.** Zalogowałeś się do Junos i widzisz `user@R1>`. Czy jesteś pełnym administratorem? Czy możesz wykonać komendę wpływającą na działanie routera?
+Nie wykonuj tej ostatniej komendy, jeśli celem konkretnego eksperymentu jest obserwacja automatycznego rollback. W takim przypadku pozwól timerowi upłynąć i potwierdź powrót poprzedniej wersji.
 
-**2.** Jesteś w `[edit interfaces ge-0/0/1]`. Co zrobi `up`, co zrobi `top`, a co może zrobić `exit`?
+### Co, jeśli w mojej wersji Junos wymagany jest komentarz do commitu?
 
-**3.** Będąc w `[edit]`, wykonujesz `set system host-name R1`, lecz nie robisz commit. Co zobaczysz w `show | compare`, a co w operational `show configuration system host-name`?
+W niektórych nowszych wydaniach Junos zasady commit mogą wymagać komentarza do zmiany. W takim przypadku składnia musi być dostosowana do konkretnego release. Przykładowy opis jest przydatny również ze względów operacyjnych: następny administrator widzi, dlaczego wprowadzono dany stan.
 
-**4.** Kolega w shared `configure` zmienia BGP; Ty w tym samym shared candidate zmieniasz opis portu. Ktoś wykonuje commit. Co może zostać aktywowane?
+**R1-vSRX — Configuration Mode [edit]: przykład jawnego komentarza przy finalnym zatwierdzeniu**
 
-**5.** Dlaczego `configure private` nie gwarantuje, że commit nigdy nie zakończy się konfliktem?
+~~~junos
+commit comment "CH03: validated login message"
+~~~
 
-**6.** Co robi `update` w private candidate i czym różni się od `load update`?
+Nie przedstawiamy jednak jednolitego obowiązku komentarza jako reguły każdego starego vSRX. Przed wykonaniem ćwiczenia sprawdź `show version` i właściwą dokumentację polecenia `commit`.
 
-**7.** Dlaczego `show route | count` nie daje poprawnej liczby tras w RIB?
+### Co wpisujemy do worknotes po zmianie?
 
-**8.** Zamiast `load set` dla trzech linijek ktoś wybiera `load override`. Co jest największym ryzykiem po commit?
+W profesjonalnym change nie wystarczy informacja „commit complete”. Zapisz, **który router i element konfiguracji zostały zmienione**, co pokazał diff, czy walidacja przeszła, czy management pozostał osiągalny, jakie testy zostały wykonane i czy warunkowy commit został potwierdzony.
 
-**9.** Jakiego znacznika w hierarchicznym pliku szuka `load replace`?
+Możesz opisać również plan cofnięcia: wykorzystanie `commit confirmed`, wskazanie snapshotu z historii lub punktowy powrót do stanu pierwotnego. Ale nie twierdź, że wykonano rollback, jeśli był tylko przygotowany jako zabezpieczenie.
 
-**10.** Co oznacza `rollback 0` przy niezacommitowanych zmianach? A co zrobi `rollback 1` po wcześniejszym commit?
+### `commit` to nie to samo co test aplikacji
 
-**11.** Czy `save /var/tmp/backup.conf` jest tym samym co `commit`?
+Nawet najlepszy workflow konfiguracji nie zastąpi testu działania. Jeśli po zmianie filtra użytkownik nie może otworzyć strony, udany commit niczego nie naprawia. Wtedy należy szukać przyczyny i wracać do stanu bezpiecznego zgodnie z planem. To samo dotyczy zmiany interfejsu w górnym korytarzu DIAMOND-6R — warto sprawdzić nie tylko R1, lecz także R2, R4 i R6, jeżeli zmiana miała wpływ na ich ruch.
 
-**12.** Wykonałeś `commit confirmed 5`, po czym `commit check`. Czy pięciominutowy automatyczny rollback nadal na pewno czeka?
-
-**13.** `commit check` zakończył się poprawnie. Czy na pewno Twoja nowa ACL pozwoli utrzymać SSH do urządzenia?
-
-**14.** Dlaczego ping do IP SRX i SSH do tego SRX nie dowodzą, że J-Web działa?
-
-**15.** Gdy `rollback 1` zostanie załadowany do candidate, czy połączenie klienta natychmiast zacznie używać poprzednich tras?
-
-**16.** Dlaczego ekran `show configuration interfaces` może nie pokazywać wszystkich ustawień działających na interfejsie?
-
-### Rozwiązania — z wyjaśnieniem mechanizmu
-
-**1.** Prompt oznacza operational mode, nie superuser. Uprawnienia wynikają z login class/AAA. W tym trybie można wykonywać również potencjalnie destrukcyjne działania operacyjne, zależnie od uprawnień.
-
-**2.** `up` przechodzi poziom wyżej; `top` wraca do `[edit]`; `exit` w zagnieżdżonej hierarchii zwykle przechodzi wyżej, a przy `[edit]` wychodzi z configuration mode.
-
-**3.** Candidate będzie inny, więc diff pokaże dodanie/zmianę; operational `show configuration` nadal pokazuje active sprzed commit.
-
-**4.** Obie zmiany, ponieważ shared candidate jest wspólny. To ryzyko audytowe i operatorskie.
-
-**5.** Inny administrator może w międzyczasie zmienić active; prywatna candidate bazuje na starszej konfiguracji i może wymagać `update` albo ręcznej korekty konfliktu.
-
-**6.** `update` w private synchronizuje prywatny stan z aktualnym active. `load update` to tryb wczytania **pełnej konfiguracji z pliku** przy selektywnym oznaczaniu zmian.
-
-**7.** `| count` liczy linie tekstu wyjścia, a nie rekordy route. Wielowierszowe wpisy i nagłówki zniekształcają wynik.
-
-**8.** `override` zastępuje całą candidate. Brak w pliku kompletnych kont, interfejsów i routing mógłby po commit usunąć je z active.
-
-**9.** Znacznika **`replace:`** przy konkretnej gałęzi konfiguracji.
-
-**10.** `rollback 0` przywraca current active do candidate (odrzuca niezacommitowane zmiany). `rollback 1` ładuje poprzednią zatwierdzoną konfigurację do candidate i wymaga dalszego commit, by stała się aktywna.
-
-**11.** Nie. `save` zapisuje tekst konfiguracyjny do pliku; `commit` zapisuje i aktywuje nowy stan konfiguracji.
-
-**12.** Nie. `commit check` potrafi potwierdzić oczekujący `commit confirmed`. To bardzo ważny, nieintuicyjny haczyk.
-
-**13.** Nie. Poprawność składni i zależności konfiguracyjnych nie jest testem funkcjonalnym z punktu widzenia zdalnego klienta.
-
-**14.** To różne usługi i porty. HTTPS może nie być włączony, certyfikat może być nieprawidłowy, J-Web niewspierany albo TCP/443 zablokowany.
-
-**15.** Nie. Zmieniła się na razie candidate, nie active. Trzeba porównać i zatwierdzić odpowiednią konfigurację.
-
-**16.** Ponieważ konfiguracja może być dziedziczona z `apply-groups`. `display inheritance` pomaga zobaczyć wynikowy obraz.
-
-### Kryterium gotowości do kolejnego rozdziału
-
-Uznaj rozdział za opanowany, jeśli potrafisz **bez notatek**:
-- pokazać candidate i active oraz ich różnicę;
-- odczytać historię rollback i świadomie zdecydować, który snapshot przywrócić;
-- wybrać poprawny tryb `load` dla fragmentu `set` i pełnego config;
-- wyjaśnić, co zobaczą Admin-A i Admin-B w shared/private;
-- wykonać `commit confirmed`, sprawdzić pending timer bez nieświadomego potwierdzania i bezpiecznie wrócić do baseline.
-
-Jeśli nie potrafisz, nie ucz się na pamięć kolejnej tabeli. Wróć do eksperymentów A, B, D i E, zadaj sobie pytanie „**co zostało zatwierdzone, a co jeszcze nie?**”, i sprawdź hipotezę.
-
-
+**Źródła Juniper:** [Commit the Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html), [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html), [Configure Command Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configure-command.html).
 
 ---
 
-## 3.REF. Ściąga operatorska — dopiero po zrozumieniu mechanizmów [EXT]
+## 3.LAB. Laboratorium w trzech poziomach — nie ucz się change management na produkcyjnym routerze [EXT]
 
-Gdy czytasz tabelę poniżej, nie traktuj jej jak listy do wykucia. To mapa pytań, które pojawiają się przy nocnym change'u: **co obserwuję, co edytuję, co porównuję, co zatwierdzam i jak wracam?** Odpowiedzią na każde pytanie jest konkretne polecenie.
+Wiedzę o CLI najłatwiej przyswoić przez małe, bezpieczne eksperymenty, w których widać skutek każdej zmiany. Laboratorium podzielimy na trzy poziomy. W pierwszym potrzebujesz tylko jednego vSRX. W drugim sprawdzisz współpracę administratorów i drugie urządzenie. W trzecim wykorzystasz cały DIAMOND-6R, ale bez dokładania nowej adresacji i skomplikowanych protokołów.
 
-| Pytanie inżyniera | Polecenie/rodzina | Najważniejszy haczyk |
+**Warunek bezpieczeństwa:** pracujemy na nowym, odizolowanym labie. Nie modyfikujemy istniejących plików `.unl`, połączeń management, globalnych bridge EVE-NG ani produkcyjnych urządzeń. Nie zakładamy, że każdy obraz vSRX obsługuje te same opcje. **RUNTIME VALIDATED** można wpisać dopiero po rzeczywistym wykonaniu testów na znanym release, ze zrzutami wyników.
+
+### Preflight — co sprawdzić jeszcze przed edycją?
+
+Zacznij od R1. Powinieneś mieć niezależny dostęp konsolowy i, jeśli to możliwe, drugą sesję administracyjną. Nie używaj `commit confirmed` w scenariuszu utraty dostępu, dopóki nie sprawdzisz konsoli w praktyce.
+
+**R1-vSRX — Operational Mode: odczyt przed laboratorium**
+
+~~~junos
+show version
+show system users
+show system commit
+show configuration system login message
+show configuration interfaces ge-0/0/0 | display set
+show interfaces terse
+~~~
+
+Zapisz zanonimizowane wyniki: wersję Junos, stan interfejsów i obecny tekst login message. Jeśli wcześniej skonfigurowano inne elementy, które kolidują z naszym ćwiczeniem, nie kasuj ich globalnie. Pracuj na nowej kopii R1 lub dostosuj eksperyment po rozpoznaniu realnego stanu.
+
+### Poziom 1. Jeden vSRX: zobacz różnicę między candidate i active
+
+W pierwszej fazie przygotujemy opis portu i nie zatwierdzimy go. Jeśli wszystko zrobisz poprawnie, `show | compare` pokaże nowy opis, a `show configuration` w Operational Mode nadal pokaże starą konfigurację.
+
+**R1-vSRX — Operational Mode: wejdź do edytora**
+
+~~~junos
+configure
+~~~
+
+**R1-vSRX — Configuration Mode [edit]: tylko wersja robocza**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-LEVEL1"
+show interfaces ge-0/0/0
+show | compare
+~~~
+
+**R1-vSRX — Operational Mode, druga sesja: aktywna konfiguracja**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+~~~
+
+Jeśli to, co widzisz, zgadza się z przewidywaniem, możesz zatwierdzić wyłącznie tę zmianę — pod warunkiem, że candidate nie zawiera cudzego diffu.
+
+**R1-vSRX — Configuration Mode [edit], tylko po przejrzeniu diffu**
+
+~~~junos
+commit check
+commit
+~~~
+
+Teraz porównaj aktywny opis z poprzednim odczytem. Następnie przygotuj jego usunięcie, ale **nie wykonuj commit**. Zamiast tego sprawdź działanie `rollback 0`.
+
+**R1-vSRX — Configuration Mode [edit]: cofnięcie tylko własnej niezacommitowanej próby**
+
+~~~junos
+delete interfaces ge-0/0/0 description
+show | compare
+rollback 0
+show | compare
+~~~
+
+Jeżeli nie ma cudzych zmian, diff powinien zniknąć. Router nadal zachowuje zatwierdzony wcześniej opis `CH03-LEVEL1`. Uczysz się w ten sposób, że `rollback 0` **nie cofa aktywnej zmiany z wcześniejszego commit**; odrzuca aktualną różnicę candidate.
+
+### Poziom 1, dodatkowe ćwiczenie: automatyczny rollback bez ryzyka utraty sieci
+
+W tym samym R1 zmienimy komunikat logowania i **celowo nie potwierdzimy** warunkowego commit.
+
+**R1-vSRX — Configuration Mode [edit], przygotowanie na czystej candidate**
+
+~~~junos
+set system login message "CH03: AUTO-ROLLBACK-TEST"
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+Teraz nie wykonuj `commit` ani `commit check`. Odczytaj bieżącą konfigurację z osobnej sesji i sprawdź historię. Odczekaj, aż warunkowa zmiana powinna zostać automatycznie cofnięta, a potem ponownie sprawdź stan.
+
+**R1-vSRX — Operational Mode, druga sesja: obserwacja przed i po timerze**
+
+~~~junos
+show system commit
+show configuration system login message
+~~~
+
+Dopiero gdy widzisz, że poprzedni komunikat powrócił, możesz odnotować rezultat testu. Jeśli oczekiwane cofnięcie nie nastąpiło, nie nazywaj go PASS — sprawdź, czy przypadkiem ktoś nie potwierdził commitu, czy timer jeszcze trwa albo czy w tej wersji systemu wystąpił problem.
+
+To ćwiczenie jest ważniejsze niż zapamiętanie samej składni `commit confirmed 2`. Uczysz się **różnicy między aktywacją warunkową a trwałym zatwierdzeniem**.
+
+
+### Poziom 2. Dwie sesje administratorów i dwa routery — dlaczego wspólny candidate bywa ryzykowny?
+
+Na tym poziomie nie potrzebujemy skomplikowanej topologii. Wystarczą R1 i R5, a na R1 — **dwie niezależne sesje administracyjne**, nazwane tutaj Admin-A i Admin-B. Jedna może być otwarta przez SSH, druga przez konsolę EVE-NG. Właśnie dostęp konsolowy będzie naszym zabezpieczeniem.
+
+Najpierw przećwiczymy współdzieloną konfigurację, bez zatwierdzania cudzych zmian. Ustal z drugim administratorem (albo przełączając się między dwiema własnymi sesjami), że **obie sesje należą do tego samego eksperymentu**.
+
+**R1-vSRX — Operational Mode, sesja Admin-A**
+
+~~~junos
+configure
+~~~
+
+**R1-vSRX — Operational Mode, sesja Admin-B**
+
+~~~junos
+configure
+~~~
+
+W pierwszej sesji wpisz opis portu do R2. W drugiej wpisz opis portu do R3. Oba polecenia są bezpieczne z punktu widzenia routingu, ale pozwalają zaobserwować wspólną candidate.
+
+**R1-vSRX — Configuration Mode [edit], sesja Admin-A**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-ADMIN-A-R2"
+show | compare
+~~~
+
+**R1-vSRX — Configuration Mode [edit], sesja Admin-B**
+
+~~~junos
+set interfaces ge-0/0/1 description "CH03-ADMIN-B-R3"
+show | compare
+~~~
+
+Co powinieneś zauważyć? Mimo że każdy operator wpisał inną linię, wspólny `show | compare` może pokazywać **obydwie**. Candidate jest współdzielona, a wykonanie commit w jednej sesji mogłoby zatwierdzić zarówno opis A, jak i opis B.
+
+W tej fazie **nie wykonujemy commit**. Dopiero po sprawdzeniu, że te dwie linie są wyłącznie naszą pracą laboratoryjną i że nikt inny nie ma zmian, wracamy do aktywnej konfiguracji.
+
+**R1-vSRX — Configuration Mode [edit], sesja Admin-A, za uzgodnioną zgodą obu operatorów**
+
+~~~junos
+show | compare
+rollback 0
+show | compare
+~~~
+
+**Nie wolno stosować `rollback 0` jako ogólnego sposobu czyszczenia shared candidate w sieci produkcyjnej**. To ćwiczenie działa tylko dlatego, że obaj administratorzy wiedzą, jakie zmiany są w niej zapisane.
+
+### Drugi eksperyment: konfiguracje prywatne
+
+Zakończ poprzednie sesje edycji, a następnie ponownie otwórz dwa połączenia. Tym razem użyj `configure private`. Każdy administrator powinien zobaczyć własną kopię roboczą.
+
+**R1-vSRX — Operational Mode, sesja Admin-A**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Operational Mode, sesja Admin-B**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-A**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-PRIVATE-A"
+show | compare
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-B**
+
+~~~junos
+set interfaces ge-0/0/1 description "CH03-PRIVATE-B"
+show | compare
+~~~
+
+Jeżeli obie sesje są rzeczywiście prywatne, nie powinny bezpośrednio pokazywać zmian drugiego administratora jako własnych niezacommitowanych edycji. Ale to jeszcze nie oznacza, że mogą być zatwierdzane dowolnie, bez kontroli.
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-A, tylko po potwierdzeniu niezależności zmian**
+
+~~~junos
+show | compare
+commit check
+commit
+~~~
+
+Teraz Admin-B ma prywatną kopię przygotowaną przed commitem A. Jeśli spróbuje ją zatwierdzić, Junos może wymagać synchronizacji stanu z nowym active albo zgłosić konflikt. Nie przewiduj bezwarunkowo sukcesu czy porażki: zachowanie zależy od zmian, ich zakresu i właściwego wydania.
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-B, po zidentyfikowaniu nowszego active**
+
+~~~junos
+status
+show | compare
+update
+show | compare
+~~~
+
+`update` próbuje połączyć nowy aktywny stan z prywatną kandydacką konfiguracją B. Sprawdź, czy opis A nadal występuje w aktualnej konfiguracji, a opis B znajduje się w prywatnym diffie. Dopiero wtedy można rozważyć commit B.
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-B, wyłącznie po sprawdzeniu wyniku update**
+
+~~~junos
+commit check
+commit
+~~~
+
+Zwróć uwagę na różnicę z poprzednim scenariuszem. W shared candidate obydwie osoby edytowały jeden wspólny tekst. W private były to dwie osobne propozycje, które musiały zostać pogodzone ze zmianami zatwierdzonymi w międzyczasie.
+
+### Po co w tym labie R5?
+
+R5 to drugi router z tej samej topologii DIAMOND-6R. Nie zmieniamy w nim adresacji ani routingu. Wykorzystujemy go do **kontroli niezależności urządzeń**. Opis portu R1→R2 nie powinien magicznie pojawić się na R5; candidate i historia commit są lokalne dla każdego vSRX.
+
+**R5-vSRX — Operational Mode: odczyt niezależnego stanu**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+show system commit
+~~~
+
+Jeśli chcesz powtórzyć ćwiczenie na R5, użyj osobnego nieszkodliwego opisu jego portu `ge-0/0/0` do R1, zapamiętując poprzedni stan. Zmiany na R5 i R1 będą miały osobne commity, historię i procedurę powrotu. W sieci z większą liczbą urządzeń to bardzo ważny fakt: **Junos nie wykonuje automatycznej transakcji obejmującej wszystkie routery DIAMOND-6R tylko dlatego, że należą do jednego laboratorium.**
+
+### Trzeci eksperyment: załaduj plik bez ruszania interfejsów danych
+
+W R1 przygotuj dwa krótkie, niekrytyczne ustawienia: testowy komunikat logowania i opis portu. Wykorzystaj `load set terminal` z sekcji 3.8, a po zakończeniu importu sprawdź `show | compare`.
+
+Przed commit porównaj zawartość candidate z zamierzonym wynikiem. Jeżeli import obejmie cokolwiek innego — adres IP, strefę, policy, default route — **nie zatwierdzaj**. Odrzuć tylko własną prywatną próbę lub przywróć zweryfikowany snapshot. To dobry moment, żeby nauczyć się, że plik nie jest wiarygodny tylko dlatego, że ktoś nazwał go „final config”.
+
+### Co oznacza zaliczenie poziomu 2?
+
+Powinieneś potrafić przewidzieć, czy po danym poleceniu zmieniła się **shared candidate**, **private candidate**, czy już **active configuration**. Powinieneś również wiedzieć, dlaczego `update` może być potrzebne po commicie kolegi, a `load update` nie służy do tego samego.
+
+---
+
+### Poziom 3. DIAMOND-6R — jedna zmiana administracyjna, sześć niezależnych urządzeń
+
+Pełna topologia jest już znana: R5–R1–R2/R3–R4–R6. Na tym etapie czytelnik ma rozumieć, co się dzieje, gdy zmiana dotyczy więcej niż jednego routera. **Nie uruchamiamy nowego protokołu routingu**, ponieważ przedmiotem rozdziału jest bezpieczna praca z konfiguracją.
+
+Wybierzmy proste zadanie: na **R1** i **R4** trzeba dopisać czytelne opisy odpowiednich połączeń do rdzenia. Zmiany mają być zatwierdzone osobno, a stan R2 i R3 nie powinien się zmienić.
+
+**R1-vSRX — Operational Mode: pre-check pierwszego urządzenia**
+
+~~~junos
+show version
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+show configuration interfaces ge-0/0/0 | display set
+show configuration interfaces ge-0/0/1 | display set
+show system commit
+~~~
+
+**R4-vSRX — Operational Mode: pre-check drugiego urządzenia**
+
+~~~junos
+show version
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+show configuration interfaces ge-0/0/0 | display set
+show configuration interfaces ge-0/0/1 | display set
+show system commit
+~~~
+
+Na obu routerach zapisz poprzednie opisy i potwierdź niezależną konsolę. Upewnij się też, że fizyczne porty w EVE-NG są rzeczywiście zmapowane zgodnie z referencją. W przeciwnym razie „opis do R2” może trafić na niewłaściwą kartę.
+
+**R1-vSRX — Operational Mode: prywatny edytor dla pierwszego urządzenia**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode [edit private]: opis obu korytarzy od strony R1**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-UPPER-TO-R2"
+set interfaces ge-0/0/1 description "CH03-LOWER-TO-R3"
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Teraz z **drugiej sesji na R1** sprawdź, czy oba opisy są aktywne i czy porty zachowały swój poprzedni stan. Nie wykonuj kolejnego `commit check` podczas oczekującego timera.
+
+**R1-vSRX — Operational Mode, osobna sesja: odczyt po warunkowej aktywacji**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+show configuration interfaces ge-0/0/1 | display set
+show interfaces terse
+show system commit
+~~~
+
+Jeśli wszystko jest poprawne, zatwierdź zmianę w tej samej edycji. **Nie zaczynaj konfiguracji R4, dopóki nie zakończysz post-check i potwierdzenia R1.** Zostawianie kilku timerów `commit confirmed` na różnych urządzeniach jednocześnie utrudnia pracę początkującego i zwiększa ryzyko pomyłki.
+
+**R1-vSRX — Configuration Mode [edit private]: zakończenie po pozytywnym wyniku**
+
+~~~junos
+commit
+~~~
+
+Dopiero teraz przejdź na R4.
+
+**R4-vSRX — Operational Mode: wejście do prywatnego edytora drugiego urządzenia**
+
+~~~junos
+configure private
+~~~
+
+**R4-vSRX — Configuration Mode [edit private]: opisy połączeń do R2 i R3**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-UPPER-TO-R2"
+set interfaces ge-0/0/1 description "CH03-LOWER-TO-R3"
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R4-vSRX — Operational Mode, osobna sesja: post-check**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+show configuration interfaces ge-0/0/1 | display set
+show interfaces terse
+show system commit
+~~~
+
+**R4-vSRX — Configuration Mode [edit private]: ostateczne zatwierdzenie po PASS**
+
+~~~junos
+commit
+~~~
+
+Teraz warto porównać stan wszystkich sześciu urządzeń. Nie ma sensu przepisywać tych samych sześciu bloków identycznych komend, lecz **musisz wiedzieć, które urządzenie sprawdzasz**. Poniższe odczyty wykonaj osobno na routerach, których nazwy podano nad blokami.
+
+**R2-vSRX — Operational Mode: upewnij się, że R2 nie otrzymał przypadkowej zmiany**
+
+~~~junos
+show interfaces terse
+show system commit
+~~~
+
+**R3-vSRX — Operational Mode: niezależny stan drugiego korytarza**
+
+~~~junos
+show interfaces terse
+show system commit
+~~~
+
+**R5-vSRX — Operational Mode: stan routera CE-A**
+
+~~~junos
+show interfaces terse
+show system commit
+~~~
+
+**R6-vSRX — Operational Mode: stan routera CE-B**
+
+~~~junos
+show interfaces terse
+show system commit
+~~~
+
+**Oczekiwany rezultat:** opisy są zmienione tylko na R1 i R4, a stan interfejsów i konfiguracje pozostałych routerów nie zostały przez ten scenariusz zmienione. Opis portu **nie powoduje sam w sobie automatycznego przełączenia ruchu**, więc nie myl tego z testem failover.
+
+### A co, gdyby zmiana dotyczyła rzeczywiście routingu?
+
+Na razie nie wykonujmy takiej operacji. Wyobraźmy sobie jednak, że zmieniasz preferencję drogi przez R2, a potem musisz zmienić coś na R4, żeby zachować spójny powrót ruchu. Wtedy kolejność działań i niezależne potwierdzanie commitów nie są jedynie kwestią wygody — mają znaczenie dla ciągłości komunikacji.
+
+Pełny DIAMOND-6R pomaga zrozumieć, dlaczego rozbudowany change plan zawiera **pre-checki na wszystkich istotnych urządzeniach, punkty wdrożenia na konkretnych routerach, testy obu kierunków i plan rollback**. Sama komenda `commit confirmed` nie zastępuje takiego projektu.
+
+---
+
+## 3.TS. Gdy Junos nie zachowuje się tak, jak oczekiwałeś [EXT]
+
+W dalszej pracy spotkasz objawy, które na pierwszy rzut oka wyglądają podobnie. Kluczowe jest rozróżnienie, **na jakim etapie zmiana przestała odpowiadać planowi**.
+
+### „Wpisuję `set`, ale nic się nie zmienia”
+
+Najpierw spójrz na prompt. Jeśli jesteś w Configuration Mode i nie wykonałeś commit, zmieniłeś candidate, ale niekoniecznie active. Porównaj `show | compare` i odczyt aktywnej konfiguracji z innej sesji. To nie musi być awaria, tylko poprawny mechanizm transakcyjny.
+
+**R1-vSRX — Configuration Mode [edit]: odczyt wersji roboczej**
+
+~~~junos
+show | compare
+~~~
+
+**R1-vSRX — Operational Mode, osobna sesja: sprawdzenie działającego stanu**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+~~~
+
+### „Commit failed” — czy wszystko wróciło do poprzedniego stanu?
+
+Jeśli commit został odrzucony podczas sprawdzania konfiguracji, nie oznacza to automatycznie, że każde polecenie wpisane do candidate zostało usunięte. Kandydacka konfiguracja nadal może zawierać poprawki wymagające naprawy.
+
+**R1-vSRX — Configuration Mode [edit]: poznaj błąd bez losowych poprawek**
+
+~~~junos
+show | compare
+commit check
+~~~
+
+Jeśli `commit check` wskazuje konkretną niezgodność, popraw właściwą gałąź. Nie usuwaj wszystkich ustawień routingu ani stref bezpieczeństwa tylko po to, by zniknął komunikat o błędzie.
+
+### „Mój commit zatwierdził zmianę kolegi”
+
+Najpierw sprawdź, czy używaliście `configure`, czyli shared candidate. Jeżeli tak, zatwierdzenie wspólnych zmian jest spodziewanym zachowaniem. W incydencie nie cofaj ich mechanicznie bez uzgodnienia, bo mogły zostać wprowadzone z ważnego powodu. Przy kolejnych zmianach rozważ `configure private` i jawny proces akceptacji diffu.
+
+### „Private candidate nie może zostać zatwierdzona”
+
+Sprawdź, czy ktoś inny nie zmienił active od chwili otwarcia Twojej prywatnej kopii. Wtedy potrzebny może być `update` lub ręczne rozwiązanie konfliktu. `update` nie jest obietnicą zachowania wszystkiego, jeśli dwaj operatorzy edytowali tę samą gałąź.
+
+**R1-vSRX — Configuration Mode [edit private], świadoma synchronizacja**
+
+~~~junos
+status
+show | compare
+update
+show | compare
+~~~
+
+### „Po `load set` diff wygląda znacznie szerzej niż planowaliśmy”
+
+Nie uruchamiaj commit. Wczytany plik może mieć nieodpowiednie interfejsy, adresy albo odnosić się do innego vSRX. Sprawdź dokument źródłowy i dokładnie przeanalizuj każdą usuniętą oraz dodaną pozycję. Jeśli pracujesz tylko nad własnymi zmianami w prywatnej candidate, możesz je wycofać i poprawić plik.
+
+### „Po `commit confirmed` zmiana działała, ale za chwilę zniknęła”
+
+To zachowanie zgodne z założeniem, jeśli nie nastąpiło potwierdzenie przed upływem czasu. Sprawdź historię commit i aktywną konfigurację. Jeśli mechanizm wycofał zmianę, dowiesz się, że warunkowy commit zadziałał. Przy następnym wdrożeniu dokładnie zaplanuj testy i moment potwierdzenia, zamiast bezmyślnie zwiększać timer.
+
+### „Po `rollback 1` nadal widzę nową aktywną konfigurację”
+
+To również może być poprawne. `rollback 1` **ładuje starszą wersję do candidate**; dopiero osobny commit aktywuje ten stan. Jeśli chciałeś jedynie obejrzeć dawną konfigurację, używaj `show system rollback 1`, a nie polecenia modyfikującego candidate.
+
+### „J-Web nie odpowiada, ale ping i SSH działają”
+
+To trzy różne usługi. Sprawdź, czy Twój model i release wspierają J-Web, czy skonfigurowano HTTPS i certyfikat, czy dostęp ze strefy management jest dozwolony oraz czy aplikacja nasłuchuje na właściwym porcie. Nie otwieraj wszystkich usług management na całym urządzeniu tylko po to, żeby „coś zaczęło odpowiadać”.
+
+**R1-vSRX — Operational Mode: pierwszy odczyt przy problemie z J-Web**
+
+~~~junos
+show version
+show configuration system services web-management | display set
+show configuration security zones | display set
+show interfaces terse
+~~~
+
+### Jak dokumentować przyczynę?
+
+Po zdiagnozowaniu problemu zapisz przynajmniej, **co zgłosił użytkownik, na którym routerze wykonano zmianę, czym różniła się candidate od active, jaki był wynik walidacji, co nastąpiło po aktywacji i czy rollback się wykonał**. Nie pisz „Junos się zawiesił”, jeśli dowody wskazują jedynie na brak potwierdzenia `commit confirmed`.
+
+
+---
+
+## 3.TEST. Samodzielne sprawdzenie rozumienia — najpierw przewiduj, potem czytaj odpowiedź [EXT]
+
+W tych pytaniach nie chodzi o zgadywanie nazw poleceń. W realnej pracy istotne jest, czy potrafisz przewidzieć **konsekwencje swojej decyzji**. Spróbuj odpowiedzieć przed przeczytaniem wyjaśnień.
+
+**Pytanie 1.** Zalogowałeś się do R1 i widzisz `operator@R1-vSRX>`. Czy ten znak dowodzi, że masz prawa superuser? Czy polecenia dostępne w tym trybie na pewno nie mogą niczego zmienić?
+
+**Pytanie 2.** W Configuration Mode przygotowałeś `set interfaces ge-0/0/0 description "UPLINK"`, ale nie wykonałeś commit. Czy opis powinien być już widoczny jako aktywny w `show configuration` uruchomionym z oddzielnej sesji Operational Mode?
+
+**Pytanie 3.** Jesteś w `[edit interfaces ge-0/0/0]`. Co robi `up`, a co `top`? Dlaczego polecenie `set description` wykonane w tej gałęzi nie musi mieć tej samej pełnej składni, co w korzeniu konfiguracji?
+
+**Pytanie 4.** Wpisujesz `show route | count` i dostajesz 12 000. Czy router ma dokładnie 12 000 tras? Co policzyło to polecenie?
+
+**Pytanie 5.** Dlaczego `show configuration interfaces ge-0/0/0` może pokazywać mniej ustawień niż `show configuration interfaces ge-0/0/0 | display inheritance`?
+
+**Pytanie 6.** Dwie osoby edytują ten sam R1 przez zwykłe `configure`. Jedna zmienia opis R1–R2, druga edytuje opis R1–R3. Ktoś wykonuje commit. Które zmiany mogą stać się aktywne?
+
+**Pytanie 7.** Czym różni się `configure private` od `configure exclusive`? Czy prywatna candidate zamraża działającą konfigurację routera?
+
+**Pytanie 8.** Administrator A zatwierdził zmianę, gdy administrator B nadal pracował w `configure private`. Co powinien sprawdzić B przed własnym commit? Kiedy używa się `update`?
+
+**Pytanie 9.** Masz plik z pięcioma wierszami rozpoczynającymi się od `set`. Jakiej rodziny poleceń użyjesz do jego wczytania? Dlaczego `load override` byłoby niebezpiecznym wyborem?
+
+**Pytanie 10.** Wczytujesz konfigurację przez `load replace`, ale w pliku nie ma znacznika `replace:`. Dlaczego wynik może być inny od oczekiwanego?
+
+**Pytanie 11.** Czym różni się `deactivate` od `delete`? Czy dezaktywowanie krytycznej trasy po commit może wpłynąć na ruch?
+
+**Pytanie 12.** Zapisujesz candidate do pliku przez `save /var/tmp/ch03.conf`. Czy w tym momencie nowe ustawienia zaczęły działać?
+
+**Pytanie 13.** Wykonałeś `commit confirmed 5`. Po minucie uruchomiłeś `commit check`, ponieważ chciałeś „tylko zweryfikować” stan. Czy nadal możesz zakładać, że po pięciu minutach nastąpi automatyczny rollback?
+
+**Pytanie 14.** `commit check` zakończył się sukcesem. Czy wiesz już, że użytkownik z R5 będzie mógł nadal zalogować się przez SSH do R1? Jakiego rodzaju test nadal jest potrzebny?
+
+**Pytanie 15.** Po `rollback 1` zobaczyłeś starszą konfigurację, ale działająca sieć jeszcze się nie zmieniła. Co się stało i jaki dodatkowy krok byłby potrzebny, aby przywrócić poprzedni stan?
+
+**Pytanie 16.** Czy rescue configuration powstaje po każdym commit automatycznie? Co powinieneś ustalić, zanim wykonasz `rollback rescue`?
+
+**Pytanie 17.** Na R1 i R4 zmieniasz opisy interfejsów. Czy zatwierdzenie R1 automatycznie zatwierdzi również candidate na R4? Czy warto pozostawić dwa niepotwierdzone commity na raz, gdy dopiero uczysz się tego mechanizmu?
+
+**Pytanie 18.** Ping do management R1 działa, a SSH odpowiada, lecz J-Web się nie otwiera. Czy na tej podstawie należy wyłączyć firewall? Co powinno być sprawdzone?
+
+### Rozwiązania z wyjaśnieniem
+
+**1.** Nie. Znak `>` oznacza Operational Mode, a nie konkretną klasę uprawnień. Niektóre polecenia tego trybu mogą wpływać na stan urządzenia; prawo do ich wykonania zależy od autoryzacji.
+
+**2.** Nie. Do momentu commit opis jest tylko zmianą candidate. Operacyjny `show configuration` z oddzielnej sesji pokazuje zatwierdzoną konfigurację.
+
+**3.** `up` przechodzi jeden poziom w hierarchii wyżej, a `top` wraca do jej korzenia. W zagnieżdżonym kontekście krótsza ścieżka może dotyczyć bieżącej gałęzi `interfaces ge-0/0/0`.
+
+**4.** `| count` liczy wyświetlone wiersze tekstu, niekoniecznie liczbę rekordów routingu. Nagłówki i wielowierszowy format mogą powodować różnicę.
+
+**5.** Konfiguracja może korzystać z dziedziczenia grup. `display inheritance` pozwala zobaczyć także wynikowe ustawienia dostarczone przez `apply-groups`.
+
+**6.** Obydwie. Wspólny candidate może zawierać poprawki kilku administratorów; commit jednego z nich może je wszystkie zatwierdzić.
+
+**7.** `private` daje własną wersję roboczą, a `exclusive` blokuje wspólną edycję dla innych. Żaden z nich nie zatrzymuje całej aktywności sieci; private nie uniemożliwia innym zatwierdzania ich zmian.
+
+**8.** B musi porównać prywatną candidate z aktualnym stanem active, sprawdzić możliwe konflikty i w razie potrzeby wykonać `update`. To synchronizacja stanu private z nowym active, a nie import pliku.
+
+**9.** `load set`, np. `load set terminal`. `load override` zastępuje całą candidate i może usunąć elementy niewystępujące w pięciu liniach.
+
+**10.** Bez `replace:` Junos może potraktować taką operację jak merge. Samo słowo `replace` w poleceniu nie musi oznaczać zastąpienia całej wskazanej zawartości pliku bez prawidłowych znaczników.
+
+**11.** `deactivate` zachowuje obiekt z oznaczeniem nieaktywności, `delete` go usuwa. Obie operacje mogą wpłynąć na działanie, jeśli zatwierdzisz je na elemencie istotnym dla ruchu.
+
+**12.** Nie. `save` tworzy plik tekstowy z konfiguracją, natomiast `commit` aktywuje zweryfikowaną candidate.
+
+**13.** Nie. `commit check` w czasie oczekiwania może potwierdzić poprzedni `commit confirmed`, co usuwa planowany automatyczny rollback. Dlatego pre-check wykonujemy **przed** warunkową aktywacją, a po niej stosujemy read-only testy operacyjne.
+
+**14.** Nie. `commit check` sprawdza spójność konfiguracji, nie pełne działanie usług. Trzeba potwierdzić rzeczywistą ścieżkę SSH oraz usługę z właściwego źródła, najlepiej zachowując konsolę.
+
+**15.** `rollback 1` załadował wcześniejszą konfigurację do candidate. Aby stała się aktywna, potrzebujesz kontroli diffu, walidacji i zatwierdzenia zmiany zgodnie z planem.
+
+**16.** Nie. Rescue trzeba świadomie zapisać. Przed przywróceniem ustal, kiedy została utworzona, co zawiera i czy nie usunie nowszych wymaganych ustawień.
+
+**17.** Nie. Każdy vSRX ma własną historię i candidate. Zmieniaj i potwierdzaj kolejne routery etapami, szczególnie podczas nauki, zamiast prowadzić kilka równoległych timerów.
+
+**18.** Nie wyłączaj firewallu w ciemno. Sprawdź wsparcie J-Web, konfigurację HTTPS, certyfikat, interfejs i port management oraz host-inbound i inne właściwe kontrole ruchu do samego urządzenia.
+
+---
+
+## 3.REF. Mapa poleceń do codziennej pracy — gdy już rozumiesz, co oznaczają [EXT]
+
+Na koniec dobrze mieć krótką mapę. Nie zastępuje ona wyjaśnień, ale pomaga szybko wrócić do właściwego polecenia podczas ćwiczeń.
+
+| Pytanie | Polecenie / widok | O czym pamiętać |
 |---|---|---|
-| Który tryb CLI? | prompt `>` / `#` | Uprawnienia nie wynikają z samego promptu |
-| Czy inni operatorzy pracują? | `show system users`, `status` | Shared candidate może zawierać cudze zmiany |
-| Jak wejść do edytora? | `configure`, `configure private`, `configure exclusive` | Private nie izoluje od zmian active przez innych |
-| Jak poruszać się po konfiguracji? | `edit`, `up`, `top`, `exit` | `exit` zależy od poziomu |
-| Jak sprawdzić operational bez wychodzenia? | `run show ...` | Nie każde operational show jest obsługiwane przez `run` |
-| Jak znaleźć składnię? | `?`, `Tab`, `help apropos` | Zależność od platformy/release |
-| Jak skrócić wyjście? | `match`, `except`, `find`, `last` | `find` pokazuje kontekst po pierwszym trafieniu |
-| Ile mam rekordów? | `pipe count` | **Liczy linie, nie trasy** |
-| Jak zobaczyć konfigurację jako set? | `display set` | Dotyczy konfiguracji, nie wszystkich operational show |
-| Jak sprawdzić dziedziczenie? | `display inheritance` | Widok lokalny może być niekompletny |
-| Jak dopisać/wycofać statement? | `set`, `delete`, `activate`, `deactivate` | `delete` gałęzi może usunąć cały interfejs |
-| Jak załadować plik set? | `load set` | Nie używaj `override` do fragmentów |
-| Jak wczytać fragment drzewa? | `load merge`, `load replace` | `replace:` decyduje o zakresie zastąpienia |
-| Jak zastąpić cały config? | `load override` | Bardzo wysokie ryzyko utraty management |
-| Jak porównać candidate? | `show | compare` | Plus/minus nie gwarantuje poprawności projektu |
-| Jak sprawdzić zapisane wersje? | `show system commit`, `show system rollback` | `rollback n` ładuje candidate |
-| Jak sprawdzić config? | `commit check` | **Po commit confirmed może potwierdzić zmianę** |
-| Jak warunkowo wdrożyć zmianę? | `commit confirmed N` | Test usług przed `commit` |
-| Jak przywrócić stary config? | `rollback 1`, `rollback rescue` | Zwykle wymaga kolejnego commit |
-| Jak zapisać plik roboczy? | `save /var/tmp/...` | Save ≠ commit, local file ≠ off-device backup |
-
-**Dodatkowe pojęcie dla poziomu Professional:** `commit and-quit` to wygodna forma zatwierdzenia i opuszczenia configuration mode po sukcesie. Z uwagi na to, że w jednej chwili aktywuje zmianę, **nie wybieraj jej zamiast `commit confirmed` przy ryzykownym zdalnym change'u**.
-
-**Urządzenie: R1-vSRX — Configuration Mode, przykład polecenia do świadomego użycia po pełnej weryfikacji**
-
-~~~junos
-commit and-quit
-~~~
+| Która wersja Junos? | `show version` | Składnia i wsparcie funkcji mogą zależeć od release |
+| Kto jest zalogowany? | `show system users` | Sprawdź innych administratorów przed shared candidate |
+| Jaki tryb? | Prompt `>` / `#` | Tryb nie jest tożsamy z uprawnieniami |
+| Jak wejść do konfiguracji? | `configure` | Zwykle wspólna candidate |
+| Jak pracować prywatnie? | `configure private` | Uważaj na zmiany aktywne zatwierdzone przez innych |
+| Jak zablokować edycję? | `configure exclusive` | Zastosuj tylko po uzgodnieniu z zespołem |
+| Jak poruszać się po konfiguracji? | `edit`, `up`, `top` | Sprawdź bieżącą hierarchię |
+| Jak znaleźć składnię? | `?`, `Tab`, `help apropos` | Korzystaj z pomocy właściwego wydania |
+| Jak ograniczyć output? | `match`, `except`, `find`, `last` | Nie trać kontekstu problemu |
+| Jak zobaczyć konfigurację jako linie? | `display set` | Nie jest to nowa kopia konfiguracji |
+| Jak zobaczyć dziedziczenie? | `display inheritance` | Może wskazać ustawienia z configuration groups |
+| Jak zmienić kandydacką konfigurację? | `set`, `delete` | Zmiany nie są jeszcze aktywne |
+| Jak tymczasowo wyłączyć obiekt? | `deactivate` / `activate` | Po commit może zmienić routing lub security |
+| Jak porównać konfiguracje? | `show | compare` | Sprawdź cały diff |
+| Jak wczytać linie set? | `load set` | Weryfikuj format i zasięg wczytywanego pliku |
+| Jak wczytać fragment drzewa? | `load merge`, `load replace` | `replace:` określa zastępowaną gałąź |
+| Jak sprawdzić konfigurację? | `commit check` | Po `commit confirmed` może ją **potwierdzić** |
+| Jak aktywować warunkowo? | `commit confirmed 5` | W czasie timera wykonuj post-check read-only |
+| Jak potwierdzić wynik? | `commit` | Dopiero po pozytywnym teście usługi |
+| Jak zobaczyć historię? | `show system commit`, `show system rollback` | Nie zgaduj numerów historycznych wersji |
+| Jak odrzucić własny niezacommitowany diff? | `rollback 0` | Nie kasuj cudzych zmian ze shared candidate |
+| Jak przygotować starszą konfigurację? | `rollback 1` | Ładuje do candidate; aktywacja wymaga commit |
+| Jak zapisać plik konfiguracyjny? | `save` | Plik lokalny nie jest niezależnym backupem |
+| Jak odzyskać zapisany punkt ratunkowy? | `rollback rescue` | Najpierw sprawdź, czy rescue istnieje i jest właściwa |
 
 ---
 
-## 3.SOURCES. Dokumentacja, pytania i ograniczenia materiału
+## Zakończenie. Co właściwie zmieniło się w Twoim sposobie pracy?
 
-**Wszystkie linki poniżej są oficjalnymi źródłami Juniper/HPE, poza nazwanymi analogiami Cisco i autorskimi scenariuszami.** Dokumentacja potwierdza semantykę mechanizmów; nie oznacza, że każdy fragment jest dostępny we wszystkich rodzinach sprzętu. W szczególności **żadna przykładowa komenda z tej lekcji nie została tutaj zweryfikowana na uruchomionym vSRX**.
+Wróćmy do zadania, od którego zaczęliśmy: opis połączenia R1–R2. Gdy czytałeś je na początku, wyglądało na jedną prostą linię konfiguracji. Teraz widzisz w nim cały proces: wejście w odpowiedni tryb, wskazanie gałęzi, zmiana candidate, kontrola różnicy, ewentualna walidacja i zatwierdzenie. Jeżeli coś idzie nie tak, możesz ustalić, **czy błąd powstał przed aktywacją, podczas commit, czy dopiero w działaniu usługi**.
 
-1. [CLI Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-overview.html) — rola CLI i tryby.
-2. [CLI Configuration Mode Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-configuration.html) — hierarchia i polecenia edycyjne.
-3. [Overview of the Configure Command](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configure-command.html) — shared/private/exclusive, update i konflikty.
-4. [CLI Environment Settings](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-environment-settings.html) — screen-length, autocomplete, prompt.
-5. [help CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/help-mode-operation.html) — help apropos, topic i reference.
-6. [pipe CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/pipe.html) — match, except, find, count, compare.
-7. [show | display CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-pipe-display.html) — set/inheritance/XML/JSON.
-8. [Configuration Groups](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html) — widok dziedziczonych statementów.
-9. [Modifying Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/modifying-configuration.html) — copy, rename, replace pattern.
-10. [load CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/load.html) — set, merge, override, replace, update, patch.
-11. [Loading Configuration Files](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-config-files-loading.html) — plik, terminal, relative i replace.
-12. [save Configuration Mode](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/save-cli-config.html) — zapisywanie konfiguracji jako ASCII.
-13. [Filtering Operational Command Output](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/filtering-operational-command.html) — compare, pipe i kontekst.
-14. [rollback CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/rollback.html) — numeracja i zakres.
-15. [show system rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-rollback.html) — bezpieczny odczyt i porównania historii.
-16. [show system commit](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-commit.html) — historia, pending rollback.
-17. [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html) — confirmed, check, at, comment, synchronize.
-18. [Commit the Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html) — model candidate/active.
-19. [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html) — tworzenie i przywracanie.
-20. [J-Web for Firewalls and Switches](https://www.juniper.net/documentation/product/us/en/j-web/) — platformy, pakiety i wydania.
-21. [J-Web secure access](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/secure-web-access-remote-management.html) — HTTPS, certyfikaty.
-22. [J-Web EX Management Access](https://www.juniper.net/documentation/us/en/software/jweb-ex/jweb-ex-application-package/topics/task/ex-series-management-access-j-web.html) — ścieżka GUI.
-23. [J-Web SRX Setup Wizard](https://www.juniper.net/documentation/us/en/software/jweb-srx25.4/jweb-srx/topics/topic-map/j-web-setup-wizard.html) — funkcje GUI dla konkretnego wydania.
-24. [Day One: Exploring the Junos CLI, Second Edition](https://www.juniper.net/documentation/en_US/day-one-books/ExploreJunosCLI_2ndEd.pdf) — przykład uczenia się CLI i commit confirmed; starsze wydanie, nie źródło aktualnej platform-specific składni.
-25. [Day One: Beginner's Guide to Learning Junos](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf) — kontekst szkoleniowy i podstawy rollback.
+To jest najważniejsza umiejętność wyniesiona z rozdziału III. Nie chodzi o to, by zapamiętać 30 poleceń. Chodzi o świadome przejście od pomysłu do bezpiecznej zmiany: **najpierw sprawdzam, potem przygotowuję, porównuję, aktywuję z planem powrotu, testuję i dopiero zamykam change.**
 
-**Źródła pytań:** zawarte w rozdziale pytania typu „co się stanie?” są **autorskimi zadaniami dydaktycznymi** opartymi na funkcjach potwierdzonych w dokumentacji, nie rzekomo wykradzionymi pytaniami egzaminu. W przypadku JNCIA Practice Exam nie deklaruję odczytu zawartości jego interaktywnego banku. Dla rozdziału 3 źródłem wartościowych gotchas są m.in. szczegółowe opisy `configure` i `commit`, które zostały przetworzone w scenariusze.
-
-**Ograniczenie ważne dla inżyniera:** przykłady używają standardowego Junos CLI na vSRX jako modelu. Platformy SRX w HA cluster, Virtual Chassis, Junos OS Evolved, wydania z konfiguracją ephemeral/dynamic, FIPS oraz różne pakiety J-Web mogą mieć **inne zachowania albo ograniczenia**. Każdą komendę konfrontuj z właściwym wydaniem i dokumentacją producenta.
+W następnym rozdziale skonfigurujemy nowe urządzenie — nazwy, interfejsy, konta, SSH, NTP, syslog i inne podstawowe usługi. Potrafisz już korzystać z Junos CLI na tyle świadomie, aby nie traktować każdej komendy `set` jak natychmiastowej zmiany całej sieci.
 
 ---
 
-## 3.END. Końcowa lekcja — czym Junos naprawdę zmienia Twoją pracę?
+## Źródła, pochodzenie materiału i granice walidacji
 
-Wyobraź sobie ponownie godzinę 03:07. Przygotowujesz zmianę w dużej sieci. Masz do wyboru dwa sposoby myślenia.
+Rozdział napisano na podstawie aktualnego [Unified Blueprint](../JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md), wcześniejszej wersji III (zachowanej w [archiwum](../archive/JUNOS_Rozdzial_03_pre_beginner_rewrite_2026-11-20.md)), stylistyki [rozdziału VIII](JUNOS_Rozdzial_08_Routing_Policy_and_Firewall_Filters.md) oraz [rozdziału II](JUNOS_Rozdzial_02_Architektura_Junos_OS.md). Celowo zastąpiono założenie „czytelnik zna Cisco” nauczaniem od podstaw.
 
-Pierwszy mówi: „Mam 50 linii do wklejenia. Mam nadzieję, że wszystko zadziała”.
+Najważniejsze oficjalne dokumenty Juniper:
 
-Drugi mówi: „Wiem, jakie **pięć rezultatów** musi być spełnionych, zanim zakończę change: właściwy diff, poprawna walidacja konfiguracji, aktywna sesja zarządzająca, sprawna usługa i udokumentowany rollback”.
+1. [Junos CLI Overview](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-overview.html) — podstawy interfejsu i trybów.
+2. [CLI Configuration Mode](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-configuration.html) — nawigacja po hierarchii.
+3. [CLI Environment Settings](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/cli-environment-settings.html) — uzupełnianie i ustawienia terminala.
+4. [pipe CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/pipe.html) — filtrowanie wyników.
+5. [Displaying Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-pipe-display.html) — set, XML, inheritance.
+6. [Overview of Configure Command](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configure-command.html) — shared, exclusive, private i konflikty.
+7. [update (Configuration Mode)](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/update.html) — synchronizacja private candidate.
+8. [Modifying Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/modifying-configuration.html) — edycja i replace pattern.
+9. [Loading Configuration Files](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-config-files-loading.html) — merge, replace, override, set, update.
+10. [save (Configuration Mode)](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/save-cli-config.html) — zapis konfiguracji do pliku.
+11. [Commit the Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html) — commit, check, confirmed i potwierdzanie.
+12. [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html) — składnia commit.
+13. [Rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/rollback.html) — numeracja i zachowanie.
+14. [show system rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-rollback.html) — historia do odczytu.
+15. [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html) — konfiguracja ratunkowa.
+16. [J-Web Documentation](https://www.juniper.net/documentation/product/us/en/j-web/) — graficzna administracja dla wspieranych platform.
+17. [Secure Web Management](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/secure-web-access-remote-management.html) — HTTPS i certyfikaty.
 
-Tym drugim sposobem będziemy pracować w Junos.
+**Status:** redakcja i struktura przygotowane; przykłady sprawdzone w dokumentacji producenta na poziomie mechanizmów. **Nie uruchamiano vSRX, nie wykonywano faktycznych commitów i nie zebrano wyników z EVE-NG.** Wszystkie scenariusze laboratoryjne pozostają `PLANNED / NOT RUNTIME VALIDATED`. Konkretna składnia może wymagać dostosowania do rzeczywistej wersji Junos, modelu vSRX oraz obecnej konfiguracji; test na urządzeniu rozstrzyga, czy scenariusz działa.
 
-Nie musisz uczyć się na pamięć kilkuset poleceń. Musisz umieć rozpoznać, **co zmieniasz i czy to już działa**, odróżnić shared candidate od private, sprawdzić wynik przed commit, świadomie użyć `load` oraz przewidzieć konsekwencje `rollback`.
-
-W następnym rozdziale skonfigurujemy system od początku — konta, uwierzytelnianie, interfejsy management, NTP, syslog i rescue. Teraz masz narzędzia, aby robić to bezpieczniej.
-
-**Blueprint — Rozdział 3: Junos User Interfaces — CLI, konfiguracja i J-Web [A], 3.1–3.10 oraz 3.11 [EXT].**  
-**Stan labu:** PLANNED / not runtime validated.  
-**Plik kanoniczny:** `docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md`.
-
+*Najlepsza umiejętność administratora Junos to nie szybkość wpisywania komend, ale pewność, **który stan konfiguracji zmienia i jak udowodni, że osiągnął zamierzony rezultat.***
