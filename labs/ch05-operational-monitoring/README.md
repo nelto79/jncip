@@ -1,3 +1,23 @@
+# LAB CH05 — Monitoring & Troubleshooting: DIAMOND-6R (6× vSRX)
+
+**Aktualny wariant kanoniczny dla rozdziału V v3 — 2026-11-20:** [pełne laboratorium 5.9, wraz z konfiguracją](../../docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md). Główna referencja: [DIAMOND-6R](../reference-diamond-6vsrx/README.md). **PLANNED / NOT RUNTIME VALIDATED:** nie wygenerowano .unl, nie uruchomiono sześciu vSRX ani fault injection.
+
+## Wariant obowiązujący od CH05 v3
+
+- **Poziom 1:** sam R1-vSRX — show/monitor, dwa pomiary liczników w odstępie, nieszkodliwa zmiana opisu i rollback po `commit confirmed`.
+- **Poziom 2:** R5-vSRX (192.0.2.10/24) → R1-vSRX (192.0.2.1/24; 10.12.0.1/30) → R2-vSRX (10.12.0.2/30), statyczne trasy w obu kierunkach i zezwolenie SRX CE→CORE na ICMP. Awarie: admin disable na R1, missing static na R5, security policy inactive na R1.
+- **Poziom 3:** wszystkie R1–R6 vSRX, te same sześć segmentów z [referencji](../reference-diamond-6vsrx/README.md), statyczna górna ścieżka R1–R2–R4 i dolna R1–R3–R4 jako qualified backup; jawna policy CE↔CORE i CORE↔CORE dla nowych testowych ICMP. Awarie: utrata uplinku R1–R2 i asymetria powrotu R4, security deny R4 CORE→CE, brak return route na R6.
+- R5 i R6 to **routery**, nie VPCS. Ping R5→R6 jest locally originated na R5, tranzytowy na R1–R4 i host-bound na R6. To nie zastępuje osobnego testu rzeczywistych hostów za routerami.
+- Zmiany wykonuj tylko na nowym izolowanym labie z realną konsolą i ustalonym obrazem Junos. Nie dodawaj do obecnego labu Cisco ani nie nadpisuj .unl; mapowanie ge-0/0/x musi zostać sprawdzone na konkretnym obrazie EVE/QEMU.
+- **Procedura:** `show | compare` → `commit check` → `commit confirmed N comment "CH05 ..."` → read-only post-check i nowy flow → `commit comment "CH05 ..."` wyłącznie po PASS. `commit check` podczas timera może go potwierdzić; nie używaj go wtedy.
+- W `VERIFY.md` zapisuj per router: Junos release, hostname, mapę portów, stan pre/post, test source/destination, RIB/FIB, security session, status rollback, zanonimizowany output, PASS/FAIL/NOT TESTED. **Nie umieszczaj haseł ani tokenów.**
+
+## Historyczny wariant CH05 (4×vSRX + 2×VPCS) — zachowany, ale NIE jest już kanoniczny dla v3
+
+Poniżej pozostawiono wcześniejszy tekst, żeby nie stracić wiedzy ani adresacji starszych labów. Ta topologia służy innemu wariantowi kursu i nie jest równoważna sześciu vSRX.
+
+---
+
 # LAB CH05 — Monitoring & Troubleshooting na DIAMOND (4×vSRX + 2×VPCS)
 
 **Status: PLANNED / NOT RUNTIME VALIDATED.** Podręcznik i specyfikacja są przygotowane, ale `.unl` ani scenariusze runtime nie zostały uruchomione w EVE-NG. Nie deklaruj PASS bez dowodów.
