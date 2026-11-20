@@ -2,7 +2,17 @@
 
 ## Cel
 
-To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JNCIS-ENT (JN0-352), JNCIP-ENT (JN0-650), włącznie z ćwiczeniami EVE-NG. Użytkownik jest doświadczonym inżynierem Cisco, dlatego ważne są porównania Cisco IOS/IOS XE ↔ Junos, zachowanie protokołów i praktyczny troubleshooting.
+To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JNCIS-ENT (JN0-352), JNCIP-ENT (JN0-650), włącznie z ćwiczeniami EVE-NG. **Odbiorcą podręcznika jest Network Engineer z około rocznym doświadczeniem, znający tylko podstawy sieci.** Nie wolno zakładać ukończenia CCNA/CCNP/JNCIA/JNCIS ani znajomości Cisco. Porównania Cisco ↔ Junos są opcjonalne, muszą być samodzielnie zrozumiałe i nie mogą zastępować wykładu od podstaw.
+
+## Aktualizacja 2026-11-20 — odbiorca początkujący i nowy rozdział II
+
+**To profil czytelnika podręcznika, nie deklaracja kwalifikacji właściciela repozytorium.** Odbiorca ma około rok doświadczenia i zna tylko podstawy IP/VLAN/router/switch. **Nie zakładaj CCNA, CCNP, JNCIA, JNCIS ani znajomości Cisco.** Prowadź każdy temat: fundament → pytanie inżynierskie → mechanizm → przykład z konkretną adresacją → komendy z hostname i trybem → interpretacja wyniku → diagnoza i naprawa. Nowe pojęcie wyjaśnij przy pierwszym użyciu; unikaj przeskakiwania od definicji do listy zaawansowanych skrótów.
+
+**Ćwiczenia obowiązkowo stopniuj**: prosty wariant 1–2 urządzenia, następnie 2–3 urządzenia, dopiero później pełny DIAMOND-6R. Nie każ czytelnikowi zaczynać BGP od sześciu peeringów. Wzorcowa narracja: `docs/chapters/JUNOS_Rozdzial_08_Routing_Policy_and_Firewall_Filters.md` z korektami poprawności, lecz nie zakładaj, że jego wszystkie terminy są już zrozumiałe dla początkującego.
+
+Rozdział II (kanoniczny): `docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md` — pełna przebudowa dla początkującego, z laboratorium 2→3→6 vSRX. Poprzednia wersja: `docs/archive/JUNOS_Rozdzial_02_pre_novice_rewrite_2026-11-20.md`. Zmiana topologii nie oznacza automatycznej migracji wszystkich pozostałych, historycznych labów.
+
+**Weryfikacja**: materiał Markdown i przykłady stanowią SOURCE REVIEWED/PLANNED; RUNTIME VALIDATED wymaga rzeczywistych wyników z konkretnego vSRX/release i EVE-NG.
 
 ## Canonical source of truth
 
@@ -27,7 +37,7 @@ To repozytorium dotyczy nauki JUNOS i przygotowania do JNCIA-Junos (JN0-106), JN
 **Rozdział 8** ma teraz wariant z **6 × vSRX**: R5 jako CE-A na LAN-A (192.0.2.10/24) i R6 jako CE-B na LAN-B (198.51.100.10/24). R1–R4 oraz cztery segmenty 10.12.0.0/30, 10.13.0.0/30, 10.24.0.0/30 i 10.34.0.0/30 pozostają bez zmian. Kanoniczna referencja tego wariantu: **[labs/reference-diamond-6vsrx/README.md](labs/reference-diamond-6vsrx/README.md)** i [DIAMOND_TOPOLOGY.md](labs/reference-diamond-6vsrx/DIAMOND_TOPOLOGY.md).
 
 - Rozdział 8: `docs/chapters/JUNOS_Rozdzial_08_Routing_Policy_and_Firewall_Filters.md` (nowa wersja v3); wcześniejszą v2 zachowano w `..._v2_ARCHIVE.md`.
-- Rozdziały 2–7 mogą dalej korzystać z referencyjnego DIAMOND 4 vSRX + 2 VPCS. Nie utożsamiaj testu ping z routera R5/R6 z ruchem tranzytowym z VPCS bez odpowiedniego komentarza. Nie migruj po cichu starszych labów.
+- Rozdział 2 (wersja v3, 20.11.2026) przechodzi na DIAMOND-6R, stopniowo od 2 do 3 i 6 routerów. Rozdziały 3–7 mogą dalej korzystać z referencyjnego DIAMOND 4 vSRX + 2 VPCS. Nie utożsamiaj testu ping z routera R5/R6 z ruchem tranzytowym z VPCS bez odpowiedniego komentarza. Nie migruj po cichu starszych labów.
 - Dalsze rozdziały korzystające z BGP mogą rozwinąć DIAMOND-6R, ale zawsze sprawdzaj czy ćwiczenie wymaga właśnie tego wariantu.
 - Redakcja: punkt wyjścia to jasna reguła Junos, jej uzasadnienie, przykład na R1–R6, konsekwencja i diagnostyka. Unikaj wymuszonych historyjek, dramatyzowania oraz przypadkowego mieszania topologii. Wzorcem stylu jest dostarczony przez użytkownika rozdział 8 innego agenta, po korektach faktograficznych.
 - Status runtime pozostaje PLANNED, dopóki nie ma rzeczywistych wyników z EVE-NG. Szczegóły: `docs/research/CH08_V3_DIAMOND6R_EDITORIAL_AND_TECHNICAL_REVIEW_2026-11-20.md`.
@@ -81,7 +91,7 @@ W razie rozbieżności sięgaj do oficjalnej dokumentacji Juniper Junos/vSRX, do
 
 ## Obowiązkowy styl dydaktyczny podręcznika (od rozdziału 2 v2)
 
-Użytkownik **nie chce encyklopedycznego materiału ani zestawu tabel do wykucia**. Pisz po polsku, jak doświadczony instruktor prowadzący żywe korepetycje dla inżyniera Cisco:
+Użytkownik **nie chce encyklopedycznego materiału ani zestawu tabel do wykucia**. Pisz po polsku, jak doświadczony instruktor uczący inteligentnego początkującego inżyniera sieci: bez zakładania wcześniejszej znajomości zaawansowanego routingu, Cisco CLI ani Junos:
 
 1. Zacznij od życiowego lub operatorskiego problemu: czego nie dało się zrobić, po co powstał mechanizm, jakie były alternatywy i kompromisy.
 2. Użyj trafnej analogii, ale jasno pokaż, gdzie analogia się kończy; nie infantylizuj ucznia.
@@ -97,7 +107,7 @@ Użytkownik **nie chce encyklopedycznego materiału ani zestawu tabel do wykucia
 
 ## Cisco ↔ Junos: transfer wiedzy oraz ilustracje
 
-- **Każdy rozdział ma regularnie wykorzystywać wiedzę o Cisco IOS/IOS XE**: co użytkownik już zna (RIB/FIB, CEF, C9500 SVI, CoPP, ACL, BGP/OSPF, HA), jaki problem rozwiązuje Junos, jakie są podobieństwa i **gdzie kończy się analogia**. W co najmniej kluczowych sekcjach rozdziału umieszczaj **Most z Cisco** w toku lekcji, nie tylko końcową tabelę.
+- **Porównuj Cisco IOS/IOS XE z Junos tylko tam, gdzie pomaga to zrozumieć mechanizm.** Nie zakładaj u czytelnika znajomości RIB/FIB, CEF, CoPP, ACL, BGP/OSPF ani HA. Najpierw wyjaśnij pojęcie od podstaw, potem ewentualnie pokaż podobieństwo i granice analogii. W co najmniej kluczowych sekcjach rozdziału umieszczaj **Most z Cisco** w toku lekcji, nie tylko końcową tabelę.
 - Dla CLI przedstaw **nazwę urządzenia bezpośrednio nad każdym blokiem komend**, osobno Cisco i Junos. Najpierw explain why, potem komendy i expected interpretation. Nie używaj mechanicznego tłumaczenia pojedynczych słów Cisco na Junos.
 - **Ilustracje są wymaganym elementem dydaktyki, kiedy pomagają zobaczyć proces, topologię lub ruch pakietu.** Dodawaj diagramy Mermaid bezpośrednio do Markdown, a odpowiednie JPG/PNG osadzaj z pewnych źródeł z jasno określoną licencją do ponownego wykorzystania.
 - Każda grafika ma mieć (a) związek z dokładnie omawianym problemem, (b) wyjaśnienie przed i po, (c) tekst alternatywny, (d) właściwą atrybucję i licencję. Zero przypadkowych obrazów dekoracyjnych.
@@ -132,7 +142,7 @@ Dla rozdziału 2 odpowiedni rejestr źródeł: \`docs/research/CH02_GOTCHAS_ZROD
 ## Portfolio producenta i projektowanie greenfield — obowiązkowe na przyszłość
 
 - W rozdziale 1.12 [EXT] oraz przyszłych rozdziałach doboru sprzętu rozróżniaj **access / distribution / core / wireless / security / WAN**, ale nigdy nie upraszczaj do „jedna rodzina = tylko jedna warstwa”. Dobieraj konkretne modele i pełne SKU per role.
-- Zawsze porównuj do Cisco (Catalyst 9200/9300/9500, ASA/FTD, Catalyst 9800, ISR/ASR, Catalyst Center) z wyjaśnieniem ograniczeń analogii. Mist AP ≠ Junos i SSR ≠ Junos.
+- Jeżeli porównanie do Cisco (Catalyst 9200/9300/9500, ASA/FTD, Catalyst 9800, ISR/ASR, Catalyst Center) rzeczywiście pomaga, objaśnij je, ale nie opieraj na nim wykładu. Czytelnik może w ogóle nie znać produktów Cisco. Mist AP ≠ Junos i SSR ≠ Junos.
 - Podczas podawania wersji oprogramowania sprawdzaj **konkretną rodzinę i model, Suggested Releases JTAC KB21476, Hardware/Feature Explorer, Release Notes, EoE/EoS**. Nigdy nie sugeruj jednego release dla wszystkich EX/QFX/SRX ani nie udawaj, że „-Sx” to dokładny obraz do instalacji. Snapshot zawsze datuj.
 - Przy bill of materials: licz niezależnie porty 1G i mGig/PoE, uplink speeds, optykę, zasilacze i redundancję, licencje Mist/security, support/SLA, potrzeby przyszłego rozwoju oraz kompatybilność z NAC/AAA i Wi-Fi. Nie wymyślaj cen, lead times ani pełnych orderable part numbers.
 - Do repo trafiają tylko bezpieczne, publiczne, ogólne szablony, nie produkcyjne IP, numery ofert, dane klientów ani klucze.
