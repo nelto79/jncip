@@ -628,3 +628,290 @@ Teraz możesz zrozumieć dwie pozorne sprzeczności: „ping do bramy działa, a
 
 **Źródła Juniper:** [Router Data Flow Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-router-data-flow-overview.html), [monitor traffic CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-traffic.html), [Day One: Beginner's Guide to Learning Junos](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf), [SRX Packet Processing](https://www.juniper.net/documentation/us/en/software/junos/flow-packet-processing/topics/topic-map/security-srx-devices-processing-overview.html).
 
+
+---
+
+## 2.LAB. Laboratorium prowadzone — trzy etapy, od dwóch routerów do DIAMOND-6R [EXT]
+
+W tym rozdziale **nie egzaminujemy Cię ze znajomości BGP ani OSPF**. Chcemy zobaczyć, co router robi z pakietem. Potrzebujesz do tego trzech coraz większych ćwiczeń. Każde korzysta z tej samej adresacji i tych samych węzłów, dzięki czemu wykonane wcześniej konfiguracje mają sens również później.
+
+**Status wszystkich ćwiczeń: PLANNED / NOT RUNTIME VALIDATED.** Nie uruchomiono ich na konkretnym obrazie Junos. Wartości, warianty security flow i wyniki opisane jako oczekiwane trzeba potwierdzić w EVE-NG. Zapis \`commit check\` świadczy o walidacji składni na urządzeniu, nie o dostarczeniu pakietu.
+
+### Zanim wystartujesz — bezpieczne przygotowanie
+
+Pracujemy na **osobnych, izolowanych wirtualnych maszynach vSRX**, bez łączenia interfejsów danych z firmową siecią, Internetem, istniejącymi labami Cisco czy managementem hypervisora. Każdy router musi mieć dostęp konsolowy, a wirtualne karty trzeba rzeczywiście zmapować do portów Junos. Domyślne interfejsy EVE-NG nie zawsze mają taki numer jak na diagramie.
+
+Ten rozdział zakłada **nowe instancje vSRX przeznaczone wyłącznie do naszego kursu**. Jeśli masz już konfigurację stref, NAT, static routes lub host-name, nie doklejaj kolejnych linii bez review — możesz stworzyć konflikty. Zamiast tego użyj świeżej maszyny albo świadomie dostosuj procedurę do stanu istniejącego labu. Nie wykonuj \`load override\`, \`zeroize\` ani zbiorczego \`delete security\` tylko po to, by dopasować urządzenie do ćwiczenia.
+
+Na każdym uruchamianym routerze najpierw wykonaj odczyty.
+
+**R5-vSRX — Operational Mode, preflight**
+
+~~~junos
+show version
+show interfaces terse
+show configuration interfaces | display set
+show configuration security zones | display set
+show configuration routing-options | display set
+show system commit
+~~~
+
+**R1-vSRX — Operational Mode, preflight**
+
+~~~junos
+show version
+show interfaces terse
+show configuration interfaces | display set
+show configuration security zones | display set
+show configuration routing-options | display set
+show system commit
+~~~
+
+**R2-vSRX — Operational Mode, uruchomienie dopiero w poziomie średnim**
+
+~~~junos
+show version
+show interfaces terse
+show configuration interfaces | display set
+show configuration security zones | display set
+~~~
+
+Przed każdą zmianą potwierdź nazwę portu fizycznego połączonego z właściwym segmentem. Osobno sprawdź interfejs management/OOB, aby \`commit confirmed\` był rzeczywiście bezpieczny. W szkoleniowej maszynie z niezależną konsolą możesz przećwiczyć prywatny tryb konfiguracji.
+
+**R1-vSRX — Operational Mode, wejście do konfiguracji**
+
+~~~junos
+configure private
+~~~
+
+W Configuration Mode wprowadzisz polecenia \`set\` i przejrzysz różnice. Przed aktywowaniem wykonasz \`commit check\`, a następnie \`commit confirmed 5\`. Ten ostatni zatwierdza zmianę na pięć minut z automatycznym powrotem, jeśli nie potwierdzisz jej na stałe. **Podczas oczekującego \`commit confirmed\` nie wykonuj ponownie \`commit check\`**, bo w Junos może on potwierdzić oczekującą zmianę. Zamiast tego przejdź do poleceń operacyjnych i testów, a po sukcesie wróć do Configuration Mode i wykonaj zwykłe \`commit\`.
+
+Zawsze kontroluj, czy użytkownik rzeczywiście znajduje się w odpowiednim trybie. Rozdział III szczegółowo omówi \`configure private\`, \`commit confirmed\`, \`rollback\` i aktywną oraz kandydacką konfigurację.
+
+---
+
+### Poziom 1 — dwa routery R5 i R1: kto jest odbiorcą pakietu? [A]
+
+**Cel:** odróżnić trasę \`Direct\` od \`Local\` i zobaczyć pakiet, którego odbiorcą jest sam router.
+
+Włącz R5 i R1 oraz tylko jeden segment L2 **LAN-A 192.0.2.0/24**. Pozostałych czterech routerów na razie nie potrzebujemy.
+
+**R5:** \`ge-0/0/0.0\` = 192.0.2.10/24.  
+**R1:** \`ge-0/0/2.0\` = 192.0.2.1/24.
+
+W pierwszym ćwiczeniu nie konfigurujemy BGP, OSPF ani zdalnych tras statycznych. Oba adresy należą do tej samej podsieci, więc Junos po aktywowaniu interfejsów automatycznie będzie znał sieć 192.0.2.0/24 jako bezpośrednio połączoną.
+
+**R5-vSRX — Configuration Mode, przygotowanie pierwszego urządzenia**
+
+~~~junos
+set system host-name R5-vSRX
+set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.10/24
+set interfaces lo0 unit 0 family inet address 10.255.255.5/32
+set security zones security-zone CE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R1-vSRX — Configuration Mode, drugi koniec LAN-A**
+
+~~~junos
+set system host-name R1-vSRX
+set interfaces ge-0/0/2 unit 0 family inet address 192.0.2.1/24
+set interfaces lo0 unit 0 family inet address 10.255.255.1/32
+set security zones security-zone CE interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Dlaczego przypisujemy interfejsy do strefy \`CE\` i dopuszczamy \`ping\` jako host-inbound? Ponieważ vSRX to firewall. Chcemy, aby **pakiet skierowany do adresu interfejsu drugiego vSRX** mógł być lokalnie obsłużony. Nie potrzebujemy jeszcze polityki między strefami, ponieważ nie ma urządzenia trzeciego i nie testujemy ruchu tranzytowego.
+
+**R5-vSRX — Operational Mode, pierwszy ping z podanym źródłem**
+
+~~~junos
+ping 192.0.2.1 source 192.0.2.10 count 3
+show arp no-resolve
+show route 192.0.2.0/24 exact
+show route 192.0.2.10/32 exact
+~~~
+
+**R1-vSRX — Operational Mode, rozpoznanie otrzymanego pakietu**
+
+~~~junos
+show route 192.0.2.0/24 exact
+show route 192.0.2.1/32 exact
+show interfaces ge-0/0/2 terse
+show security zones
+~~~
+
+**Oczekujemy:** R5 potrafi pingować 192.0.2.1, jeśli oba porty, L2 i host-inbound są poprawne. Na obu routerach widać trasę \`Direct\` 192.0.2.0/24 oraz lokalny /32 własnego adresu interfejsu. W obu urządzeniach możemy znaleźć sąsiednie adresy MAC w tablicy ARP po prawidłowej komunikacji.
+
+**Teraz ważne pytanie:** czy pakiet R5→192.0.2.1 był tranzytowy przez R1? **Nie.** R1 był końcowym odbiorcą. Wynik pingu nie dowodzi jeszcze, że R1 poprawnie przekazuje ruch do jakiejkolwiek innej sieci.
+
+Po pozytywnym sprawdzeniu potwierdź konfiguracje obu maszyn. Jeśli utraciłeś dostęp lub interfejsy mają złe mapowanie, skorzystaj z niezależnej konsoli i oczekiwanego automatycznego rollback zamiast wpisywać dalsze zmiany w ciemno.
+
+**R5-vSRX — Configuration Mode, tylko po PASS**
+
+~~~junos
+commit
+~~~
+
+**R1-vSRX — Configuration Mode, tylko po PASS**
+
+~~~junos
+commit
+~~~
+
+#### Pierwsza kontrolowana nieprawidłowość: R1 nie odpowiada na ping, choć ma poprawną trasę
+
+Zanim przejdziesz do R2, możesz sprawdzić mechanizm host-inbound. **Tylko w izolowanym labie** czasowo dezaktywuj zezwolenie \`ping\` na wejściu \`CE\` R1. Nie usuwaj adresu interfejsu i nie zmieniaj trasy. Chcemy sprawdzić, czy sama konfiguracja lokalnej usługi może zmienić wynik testu.
+
+**R1-vSRX — Configuration Mode, kontrolowana dezaktywacja host-inbound**
+
+~~~junos
+deactivate security zones security-zone CE interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+show | compare
+commit check
+commit confirmed 3
+~~~
+
+**R5-vSRX — Operational Mode, ponowny test**
+
+~~~junos
+ping 192.0.2.1 source 192.0.2.10 count 3
+~~~
+
+**R1-vSRX — Operational Mode, odczyt bez ingerencji w konfigurację**
+
+~~~junos
+show route 192.0.2.0/24 exact
+show route 192.0.2.1/32 exact
+show configuration security zones security-zone CE | display set
+show system commit
+~~~
+
+**Oczekiwany rezultat:** route \`Direct\` i \`Local\` nadal istnieją, lecz nowy ping host-bound do R1 może przestać otrzymywać odpowiedź, ponieważ jego lokalna obsługa nie jest dozwolona. Pamiętaj, że wpływają na to również inne istniejące konfiguracje i wersja vSRX. Jeżeli wynik nie jest zgodny z założeniem, ustal rzeczywisty punkt kontroli, zamiast deklarować, że funkcja działa.
+
+**Naprawa:** nie potwierdzaj warunkowej zmiany. Poczekaj na automatyczne przywrócenie poprzedniej konfiguracji i ponownie wykonaj ping. W ten sposób uczysz się rollback bez polegania na SSH, które sam mógłbyś odciąć. Nie uruchamiaj \`commit check\` w trakcie oczekującego confirmed commit.
+
+**Czego nauczył pierwszy poziom?** Router może posiadać poprawną trasę oraz działać na poziomie interfejsu, a jednocześnie nie odpowiadać na konkretną usługę skierowaną do jego własnego adresu.
+
+---
+
+### Poziom 2 — trzy routery R5–R1–R2: pierwszy prawdziwy tranzyt [S — przygotowanie]
+
+**Cel:** zobaczyć komunikację, w której R1 jest urządzeniem pośrednim, a R2 końcowym odbiorcą. To wciąż nie jest zaawansowany routing dynamiczny: używamy tras bezpośrednich i jednej jawnej drogi powrotnej.
+
+Do działającej topologii R5–R1 dołącz R2 i segment **10.12.0.0/30**:
+
+- R1 \`ge-0/0/0.0\` = 10.12.0.1/30.
+- R2 \`ge-0/0/0.0\` = 10.12.0.2/30.
+
+R5 nie jest bezpośrednio połączony z 10.12.0.0/30. Musimy powiedzieć mu, że do tej sieci ma użyć następnego routera **192.0.2.1**. R2 z kolei musi wiedzieć, że do **192.0.2.0/24** wraca przez **10.12.0.1**.
+
+**R5-vSRX — Configuration Mode, droga do sieci R2**
+
+~~~junos
+set routing-options static route 10.12.0.0/30 next-hop 192.0.2.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R1-vSRX — Configuration Mode, drugi interfejs i polityka tranzystu ICMP**
+
+~~~junos
+set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.1/30
+set security zones security-zone CORE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security policies from-zone CE to-zone CORE policy ALLOW-TRAINING-PING match source-address any
+set security policies from-zone CE to-zone CORE policy ALLOW-TRAINING-PING match destination-address any
+set security policies from-zone CE to-zone CORE policy ALLOW-TRAINING-PING match application junos-ping
+set security policies from-zone CE to-zone CORE policy ALLOW-TRAINING-PING then permit
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Zwróć uwagę na różnicę względem poziomu pierwszego. Oprócz adresu interfejsu R1 ma teraz **security policy CE → CORE**. To zezwolenie na nowe połączenie ICMP przechodzące **przez R1** pomiędzy dwoma strefami, a nie tylko na ping do własnego adresu R1.
+
+**R2-vSRX — Configuration Mode, drugi koniec tranzytu i droga powrotna**
+
+~~~junos
+set system host-name R2-vSRX
+set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.2/30
+set interfaces lo0 unit 0 family inet address 10.255.255.2/32
+set security zones security-zone CORE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set routing-options static route 192.0.2.0/24 next-hop 10.12.0.1
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Przed wysłaniem ruchu od R5 warto upewnić się, że R1 i R2 widzą się jako bezpośredni sąsiedzi Ethernet.
+
+**R1-vSRX — Operational Mode, pre-check połączenia do R2**
+
+~~~junos
+show interfaces ge-0/0/0 terse
+show route 10.12.0.0/30 exact
+ping 10.12.0.2 source 10.12.0.1 count 3
+~~~
+
+**R2-vSRX — Operational Mode, czy znasz drogę powrotną do R5?**
+
+~~~junos
+show route 192.0.2.0/24 exact
+show route forwarding-table destination 192.0.2.10
+~~~
+
+Dopiero po tych kontrolach uruchamiamy właściwy eksperyment.
+
+**R5-vSRX — Operational Mode, pakiet przechodzący przez R1**
+
+~~~junos
+ping 10.12.0.2 source 192.0.2.10 count 5
+show route 10.12.0.0/30 exact
+~~~
+
+**R1-vSRX — Operational Mode, co zrobił router pośredni?**
+
+~~~junos
+show route 10.12.0.0/30 exact
+show route forwarding-table destination 10.12.0.2
+show security policies from-zone CE to-zone CORE
+show security flow session source-prefix 192.0.2.10
+~~~
+
+**Oczekujemy:** ICMP Echo Request z R5 przechodzi przez R1, dociera do własnego adresu R2 10.12.0.2, a R2 odsyła odpowiedź do 192.0.2.10 przez R1. Na R1 może pojawić się odpowiadająca temu sesja security flow. Jeśli sesji nie widać, weź pod uwagę czas życia ICMP, aktualną security policy i dokładny tryb SRX.
+
+Teraz popatrzmy na ten sam ping z perspektywy trzech urządzeń.
+
+| Router | Rola w teście R5 → 10.12.0.2 |
+|---|---|
+| R5 | Nadawca (locally originated) |
+| R1 | Router pośredni (transit) |
+| R2 | Odbiorca (host-bound) |
+
+To najważniejsza rzecz, którą powinieneś umieć samodzielnie wyjaśnić po poziomie drugim. **Ten sam pakiet ma inną rolę na każdym urządzeniu.**
+
+Po pomyślnych testach potwierdź wszystkie trzy konfiguracje. Jeśli coś nie działa, nie wykonuj natychmiast zmian na trzech routerach naraz. Sprawdź w kolejności: trasę R5 do 10.12.0.0/30, connected na R1, security policy CE→CORE, host-inbound ping na R2, a na końcu trasę R2 do 192.0.2.0/24.
+
+**R5-vSRX — Configuration Mode, tylko po PASS**
+
+~~~junos
+commit
+~~~
+
+**R1-vSRX — Configuration Mode, tylko po PASS**
+
+~~~junos
+commit
+~~~
+
+**R2-vSRX — Configuration Mode, tylko po PASS**
+
+~~~junos
+commit
+~~~
+
