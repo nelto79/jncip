@@ -550,3 +550,212 @@ show | compare
 
 Nie używaj podobnego polecenia do masowej podmiany adresów, nazw VRF czy policy bez dokładnego diffu i planu rollback. **Składniowo poprawna zmiana może być projektowo błędna.**
 
+---
+
+## 3.8. Odczyt, porównywanie i wczytywanie konfiguracji — jak uniknąć przypadkowej podmiany całego urządzenia? [A]
+
+Dotychczas modyfikowaliśmy pojedyncze linie. Co, jeśli architekt przesłał Ci plik z większą zmianą? W pracy często otrzymasz kilkanaście poleceń `set`, fragment konfiguracji hierarchicznej albo pełną konfigurację przygotowaną na innym routerze. Junos potrafi je wczytywać, ale **tryb wczytywania decyduje o tym, co stanie się z istniejącą candidate**.
+
+Zanim wkleisz plik, zadaj sobie dwa pytania: czy dostałem **fragment**, który chcę dołożyć do obecnej konfiguracji, czy **całą konfigurację**, która ma zastąpić dotychczasową? I czy plik dotyczy naprawdę tego urządzenia, a nie innego modelu, adresacji lub lokalizacji?
+
+### Jak porównać active i candidate?
+
+Najprostsze polecenie poznaliśmy już wcześniej. Teraz nauczymy się czytać jego wynik świadomie.
+
+**R1-vSRX — Configuration Mode [edit], po przygotowaniu wyłącznie własnej zmiany**
+
+~~~junos
+show | compare
+~~~
+
+W wyniku możesz zobaczyć linie z **`+`** i **`-`**. Plus oznacza dodany element względem porównywanej wersji, minus — usunięty. Jeśli zmienisz opis portu z `OLD` na `NEW`, porównanie może pokazać jedną linię usuniętą i jedną dodaną.
+
+Nie traktuj poprawnego diffu jako gwarancji działania. Diff mówi, **co się zmieni**, ale nie odpowiada automatycznie, czy klient nadal będzie mógł korzystać z aplikacji.
+
+**R1-vSRX — Operational Mode: zatwierdzona konfiguracja przed zmianą**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+show system commit
+~~~
+
+Zapisz najważniejsze elementy stanu odniesienia przed change. Nie zawsze trzeba zachowywać pełny dump. Przy zmianie opisu portu wystarczy aktualny opis i identyfikacja interfejsu. Przy zmianie BGP trzeba natomiast zgromadzić odpowiednie informacje o sąsiedztwie, trasach i politykach.
+
+### `load set`: gdy plik zawiera linie `set`
+
+Wyobraź sobie, że masz dwie przygotowane linie do R1: opis połączenia do R2 i komunikat dla operatora przy logowaniu. Możesz wpisać je ręcznie albo wczytać je z formatu `set`.
+
+**R1-vSRX — Configuration Mode [edit], początek interaktywnego importu**
+
+~~~junos
+load set terminal
+~~~
+
+Po tej komendzie CLI przejdzie w tryb przyjmowania tekstu. Wklej tylko następujące dwie linie, dokładnie w tym formacie:
+
+**R1-vSRX — Configuration Mode, tekst wczytywany po `load set terminal` (to dane wejściowe, nie nowy prompt)**
+
+~~~text
+set interfaces ge-0/0/0 description "CH03-IMPORTED-R2"
+set system login message "CH03: Lab access only"
+~~~
+
+Zakończ wprowadzanie danych klawiszem **Ctrl+D**, zgodnie z komunikatem CLI. Następnie wróć do analizy candidate.
+
+**R1-vSRX — Configuration Mode [edit], kontrola importu przed commit**
+
+~~~junos
+show | compare
+show interfaces ge-0/0/0 | display set
+~~~
+
+Obie linie zostały **załadowane do candidate**, a nie od razu aktywowane. To właśnie zaleta tego modelu: możesz obejrzeć ich rzeczywisty wpływ przed zmianą działającego routera.
+
+Jeśli wolisz wczytać istniejący plik lokalny, odpowiednikiem jest `load set /var/tmp/plik.set`, o ile plik naprawdę znajduje się na urządzeniu. W tym rozdziale nie tworzymy pliku przez shell — wystarczy import z terminala. Rozdział o automatyzacji może później wykorzystać pliki w repozytorium, ale bez sekretów i danych produkcyjnych.
+
+### `load merge`: gdy wczytujesz konfigurację w formie drzewa
+
+Junos obsługuje również zapis hierarchiczny, z gałęziami i nawiasami klamrowymi. Przykładowo komunikat logowania w takim zapisie mógłby wyglądać następująco:
+
+~~~text
+system {
+    login {
+        message "CH03: Lab access only";
+    }
+}
+~~~
+
+`load merge` łączy wczytane fragmenty z candidate. Nie jest to to samo co `load set`: oczekiwany format danych jest inny. Gdy nowy fragment zawiera wartość konfliktującą z dotychczasową, może ją zastąpić w odpowiednim miejscu drzewa, dlatego także tu sprawdzamy diff.
+
+**R1-vSRX — Configuration Mode [edit], alternatywny import hierarchiczny**
+
+~~~junos
+load merge terminal
+~~~
+
+Następnie wklej pokazany fragment hierarchiczny i zakończ **Ctrl+D**. Nie wykonuj tego natychmiast po poprzednim przykładzie, jeśli chcesz zachować dwa niezależne eksperymenty — najpierw wycofaj własną candidate albo pracuj na świeżym snapshotcie labu.
+
+**R1-vSRX — Configuration Mode [edit], kontrola efektu**
+
+~~~junos
+show | compare
+~~~
+
+### `load replace`: zastępujemy konkretną gałąź — ale tylko gdy oznaczymy ją właściwie
+
+Załóżmy, że w jednym fragmencie masz kilka ustawień, ale nie chcesz dołożyć kolejnych do starego zestawu. Chcesz zastąpić wskazaną gałąź nową definicją.
+
+`load replace` może to zrobić, lecz dokumentacja Juniper przewiduje specjalny znacznik **`replace:`** w wczytywanej konfiguracji. Bez niego operacja może zachowywać się jak merge, a nie jak oczekiwane pełne zastąpienie gałęzi. To bardzo łatwa pułapka.
+
+Przykładowy fragment pokazujący samą ideę:
+
+~~~text
+replace: system {
+    login {
+        message "CH03: Replacement example";
+    }
+}
+~~~
+
+**Uwaga:** powyższy fragment jest demonstracją działania `replace:`, nie poleceniem do bezrefleksyjnego uruchomienia. Zastąpienie całego `system` byłoby niebezpieczne, bo mogłoby usunąć inne ustawienia. W prawdziwym labie znacznik umieszcza się przy **najwęższej właściwej gałęzi**, po sprawdzeniu dokumentacji i pełnego diffu. Na początku wystarczy rozumieć różnicę między *merge* i *replace*, bez aktywowania ryzykownego przykładu.
+
+### `load override`: dlaczego to inna kategoria ryzyka?
+
+`load override` zastępuje **całą candidate configuration** wczytywanym plikiem. Jeśli otrzymałeś tylko dwa polecenia opisujące port i użyjesz override, nowa candidate może nie mieć kont, adresów zarządzania, interfejsów, security policies ani wielu innych ustawień. Po commit skutki byłyby poważne.
+
+**Nie wykonujemy `load override` w tym szkoleniu.** Czytelnik powinien znać jego znaczenie, ale nie musi ryzykować utraty dostępu, by się o nim przekonać.
+
+Pozostałe tryby, takie jak `load update` i `load patch`, są przydatne w bardziej zaawansowanych scenariuszach migracji i automatyzacji. Ważne, żeby nie pomylić `load update` z samym `update` w `configure private`: pierwsze jest sposobem wczytywania konfiguracji z pliku, drugie pomaga synchronizować prywatną candidate z aktualnym stanem.
+
+| Cel | Właściwy mechanizm | Główne ryzyko |
+|---|---|---|
+| Wkleić kilka linii `set` | `load set terminal` | Nieoczekiwane nadpisanie pojedynczych wartości |
+| Dołożyć fragment hierarchiczny | `load merge` | Konflikty z istniejącymi wartościami |
+| Zastąpić oznaczony fragment drzewa | `load replace` i `replace:` | Zbyt szeroki zakres zastępowanej gałęzi |
+| Zastąpić całą candidate | `load override` | Utrata ustawień nieobecnych w pliku |
+| Zmienić tylko różnice według pełnej konfiguracji | `load update` | Mylenie znaczenia z aktualizacją private candidate |
+| Wczytać patch w odpowiednim formacie | `load patch` | Nieprawidłowy format lub kontekst patcha |
+
+**Reguła przed każdym importem:** sprawdź format wejścia, zakres zmiany, właściwe urządzenie, różnicę candidate/active oraz plan rollback. `commit check` nie zastępuje oceny, czy fragment pochodzi z właściwej lokalizacji.
+
+---
+
+## 3.9. Rollback — powrót do poprzedniej konfiguracji [A]
+
+Nie każda poprawnie zatwierdzona zmiana daje dobry rezultat. Czasami nowa konfiguracja przechodzi kontrolę składni, ale użytkownicy tracą dostęp do usługi. Wtedy potrzebujesz sposobu, by wrócić do wcześniejszego, znanego stanu.
+
+Junos przechowuje historię zatwierdzonych konfiguracji. Możesz **obejrzeć** starsze wersje, **załadować** wybraną wersję do candidate i dopiero potem ją aktywować. Ten ostatni szczegół jest najważniejszy: **`rollback 1` nie oznacza natychmiastowego cofnięcia działającego routera.**
+
+### Co oznaczają numery rollback?
+
+`rollback 0` odnosi się do aktualnej aktywnej konfiguracji jako punktu odniesienia. Gdy jesteś w Configuration Mode i masz niezacommitowane zmiany, `rollback 0` może odrzucić je, przywracając candidate do active.
+
+`rollback 1` ładuje do candidate poprzednią zatwierdzoną konfigurację. Po czymś takim możesz wykonać `show | compare` i zobaczyć, co zmieniłoby się względem obecnego stanu, gdybyś ten rollback zatwierdził.
+
+Późniejsze numery oznaczają starsze wersje — ale **nie zapamiętuj numeru „1” jako magicznego backupu sprzed całej serii zmian**. Po każdym kolejnym commit historia przesuwa się. Zawsze sprawdź datę i treść konkretnej wersji.
+
+**R1-vSRX — Operational Mode: odczyt historii bez ingerencji w candidate**
+
+~~~junos
+show system commit
+show system rollback 1
+show system rollback compare 0 1
+~~~
+
+Pierwsze polecenie pokazuje historię commit. Drugie wyświetla starszą konfigurację. Trzecie pozwala porównać dwie wersje. Na wybranych wydaniach forma widoku może się różnić — sprawdź dostępność w `?`.
+
+### Najprostszy rollback: niezatwierdzona pomyłka
+
+Jesteś w Configuration Mode, dopisałeś błędny opis, ale **nie zrobiłeś commit**. Wtedy nie musisz odtwarzać historii całego urządzenia.
+
+**R1-vSRX — Configuration Mode [edit], tylko gdy jesteś jedynym autorem zmian w candidate**
+
+~~~junos
+show | compare
+rollback 0
+show | compare
+~~~
+
+Po `rollback 0` diff powinien być pusty, jeśli kandydat wrócił do active. **Uważaj na zwykły współdzielony `configure`:** jeśli w candidate znajdują się niezacommitowane zmiany innego administratora, `rollback 0` może je również odrzucić. Nie używaj go bez uprzedniego ustalenia, do kogo należą zmiany.
+
+### Gdy błędna konfiguracja już została zatwierdzona
+
+Załóżmy, że zmiana opisu portu została zatwierdzona, a chcesz wrócić do poprzedniej wersji. Najpierw odczytujesz historię. Następnie wczytujesz starszą konfigurację do candidate, sprawdzasz różnicę i dopiero potem decydujesz o jej aktywacji.
+
+**R1-vSRX — Configuration Mode [edit private], wyłącznie po wybraniu właściwego snapshotu**
+
+~~~junos
+rollback 1
+show | compare
+commit check
+~~~
+
+Nie dodajemy tu od razu `commit` — najpierw trzeba upewnić się, że historyczna konfiguracja nie usuwa innych, potrzebnych zmian dokonanych od tamtego czasu. W produkcji taki rollback mógłby przypadkowo usunąć cudze poprawki, jeśli nie zrozumiesz, z jakiego momentu pochodzi snapshot.
+
+### Rescue configuration — po co osobna wersja ratunkowa?
+
+Oprócz historii rollback Junos udostępnia specjalną **rescue configuration**. To konfiguracja ratunkowa, którą administrator może zapisać jako znany, użyteczny punkt odtworzenia. Nie jest zapisywana automatycznie po każdym commit.
+
+Ważne, żeby rozróżnić dwie operacje. Najpierw administrator świadomie zapisuje dobrą konfigurację jako rescue. Później, gdy jest potrzeba, może ją wczytać do candidate i zatwierdzić, po weryfikacji.
+
+**R1-vSRX — Operational Mode, zapis rescue wyłącznie po zatwierdzeniu baseline i zgodzie właściciela labu**
+
+~~~junos
+request system configuration rescue save
+~~~
+
+**R1-vSRX — Configuration Mode [edit], przywracanie rescue jako candidate — nie wykonywać bez potrzeby**
+
+~~~junos
+rollback rescue
+show | compare
+~~~
+
+Rescue jest bardzo pomocna, ale nie oznacza pełnego backupu sprzętu, plików użytkowników, licencji czy zewnętrznych systemów. Nie zastępuje też niezależnego dostępu konsolowego, bo błędna konfiguracja może odciąć SSH zanim zdążysz jej użyć.
+
+### Rollback nie jest cofnięciem czasu dla wszystkich elementów urządzenia
+
+Załóżmy, że zmieniono konfigurację i wykonano upgrade oprogramowania. Wczytanie starszej konfiguracji nie przywraca automatycznie starszego obrazu Junos. Podobnie rollback nie zawsze odtwarza stan dynamicznych sesji bezpieczeństwa, liczników czy procesów.
+
+Dlatego w procedurach operacyjnych odróżniamy **rollback konfiguracji** od pełnego planu przywrócenia usługi. Ten ostatni może wymagać także testów protokołów, ścieżek, stanu systemu i pracy aplikacji.
+
