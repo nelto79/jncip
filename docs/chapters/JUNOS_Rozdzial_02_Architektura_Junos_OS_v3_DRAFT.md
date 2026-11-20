@@ -1259,3 +1259,267 @@ Na R1 powinieneś zobaczyć, że dla 172.16.60.0/24 next-hop jest **10.12.0.2 (R
 
 Jeżeli testy pokazują oczekiwane ścieżki i komunikacja działa, potwierdź odpowiednie commity po pozytywnych kontrolach. W późniejszych rozdziałach nauczymy się zastępować ręczne static routes protokołami dynamicznymi i politykami wyboru drogi.
 
+
+#### Krok D — dwie kontrolowane awarie, dzięki którym naprawdę zrozumiesz architekturę
+
+Kiedy obie drogi działają, możemy świadomie zepsuć pojedynczy element. Bez tego laboratorium byłoby tylko ćwiczeniem przepisywania konfiguracji.
+
+**Awaria 1: R1 jest dostępny, ale nie przepuszcza ruchu z CE do CORE.**
+
+Na R1 tymczasowo wyłączamy laboratoryjną security policy \`ALLOW-TRAINING-PING\`. Nie ruszamy adresacji, tras ani portów. Oczekujemy, że R5 nadal będzie mógł pingować **własny adres R1 192.0.2.1**, ponieważ host-inbound działa osobno. Natomiast **nowe próby komunikacji** R5→R2/R6 przechodzące przez R1 mogą zostać odrzucone przez brak odpowiedniej policy tranzytowej.
+
+**R1-vSRX — Configuration Mode, fault injection wyłącznie na izolowanym labie**
+
+~~~junos
+deactivate security policies from-zone CE to-zone CORE policy ALLOW-TRAINING-PING
+show | compare
+commit check
+commit confirmed 3
+~~~
+
+**R5-vSRX — Operational Mode, dwie różne kategorie testu**
+
+~~~junos
+ping 192.0.2.1 source 192.0.2.10 count 3
+ping 10.12.0.2 source 192.0.2.10 count 3
+ping 172.16.60.1 source 172.16.50.1 count 3
+~~~
+
+**R1-vSRX — Operational Mode, osobne dowody routingu i bezpieczeństwa**
+
+~~~junos
+show route 10.12.0.0/30 exact
+show security policies from-zone CE to-zone CORE
+show security flow session
+show system commit
+~~~
+
+**Oczekiwane zachowanie:** adres i trasy na R1 nadal istnieją, ping host-bound do R1 może działać, ale inicjacja nowej sesji tranzytowej od CE do CORE jest zablokowana. **Istniejące sesje mogą jeszcze działać** — nie myl ich z nową próbą po zmianie policy. Dla jednoznacznego testu wykorzystaj nowy flow, zaczekaj na wygaśnięcie testowych sesji albo zastosuj celowane czyszczenie tylko własnego labowego ruchu zgodnie ze składnią danej wersji Junos. Nie wykonuj globalnego \`clear security flow session all\` na urządzeniu współdzielonym z innymi użytkownikami.
+
+**Naprawa:** nie potwierdzaj zmiany. Pozwól zadziałać automatycznemu rollbackowi z \`commit confirmed\`, następnie sprawdź, że policy znów jest aktywna i **nowa sesja** R5→R2 przechodzi. Nie potrzebujesz resetu \`rpd\` ani zmiany static routes — ich nie dotykaliśmy.
+
+**Awaria 2: górny korytarz nie ma działającego łącza R2–R4.**
+
+Teraz chcemy sprawdzić, czy konfiguracja sieci z dwoma korytarzami oznacza automatyczny failover. Odpowiedź brzmi: **nie**, dopóki nie zaprojektujesz odpowiedniego mechanizmu wyboru alternatywnej drogi.
+
+Gdy dezaktywujesz na R2 interfejs do R4, trasa 172.16.60.0/24 przez 10.24.0.2 może utracić rozwiązywalny next-hop. R1 nadal może znać własną statyczną drogę do 172.16.60.0/24 *via R2*, ale to nie oznacza, że R2 ma dalej drogę do R6. Natomiast sieć 172.16.61.0/24, którą prowadziliśmy przez R3, powinna nadal móc działać, jeśli jej własna ścieżka i security są poprawne.
+
+**R2-vSRX — Configuration Mode, kontrolowane wyłączenie łącza do R4**
+
+~~~junos
+deactivate interfaces ge-0/0/1
+show | compare
+commit check
+commit confirmed 3
+~~~
+
+**R2-vSRX — Operational Mode, sprawdzenie skutku dla forwardingu**
+
+~~~junos
+show interfaces ge-0/0/1 terse
+show route 10.24.0.0/30 exact
+show route 172.16.60.0/24 exact extensive
+show route forwarding-table destination 172.16.60.1
+show system commit
+~~~
+
+**R5-vSRX — Operational Mode, dwie usługi przez różne korytarze**
+
+~~~junos
+ping 172.16.60.1 source 172.16.50.1 count 3
+ping 172.16.61.1 source 172.16.51.1 count 3
+~~~
+
+**Oczekiwane zachowanie:** górna usługa może przestać odpowiadać, podczas gdy dolna nadal działa. Utrata jednego interfejsu na R2 nie usuwa całego routera ani nie oznacza, że wszystkie prefiksy diamentu muszą być niedostępne.
+
+Pomyśl teraz, co byłoby potrzebne do automatycznego przełączenia górnej usługi na R3. R1 musiałby mieć alternatywną użyteczną drogę do **tego samego** prefiksu, a informacja o awarii R2–R4 musiałaby wpłynąć na jej wybór. Potrzebne byłyby też spójne trasy powrotne i bezpieczeństwo. To właśnie zadanie protokołów dynamicznych i zaawansowanych mechanizmów routingu, które opanujesz w rozdziałach 6–11.
+
+**Naprawa:** pozwól automatycznemu rollbackowi przywrócić interfejs R2 do R4. Potwierdź stan \`up/up\`, ponowną obecność 10.24.0.0/30 oraz prawidłowy forwarding do 172.16.60.1. Nie deklaruj automatycznej konwergencji całego DIAMOND-6R, bo w tym ćwiczeniu używaliśmy jawnych tras statycznych.
+
+#### Krok E — co zachowujemy po ćwiczeniu?
+
+Zachowaj działającą, bezpieczną konfigurację jako **baseline** do dalszych rozdziałów, jeśli zamierzasz ponownie wykorzystywać laboratorium. Wpisz do notatek realne \`show version\` dla sześciu routerów, mapowanie portów EVE-NG i wyniki pre/post-check. Zrób snapshot zgodny z mechanizmami platformy wirtualizacyjnej albo wyeksportuj do oddzielnych, bezpiecznych plików **sanityzowane** konfiguracje bez haseł i kluczy.
+
+Nie jest dobrym pomysłem zbiorcze kasowanie \`interfaces\` i \`security\` po każdej lekcji: mogłoby to wyczyścić nie tylko ćwiczenie, ale też dostęp administracyjny i stan bazowy potrzebny do rozdziału III.
+
+Przykładowe dowody sukcesu:
+
+| Sprawdzany mechanizm | Jaki dowód zachować? |
+|---|---|
+| Direct / Local | \`show route\` na R5 i R1 dla LAN-A |
+| Transit R5→R2 | Ping z R5 + route, forwarding i security session na R1 |
+| Górna droga do R6 | \`show route\` na R1/R2/R4 + ping source 172.16.50.1 |
+| Dolna droga do R6 | \`show route\` na R1/R3/R4 + ping source 172.16.51.1 |
+| Brak host-inbound | Trasa istnieje, ale ping do własnego adresu R1 nie jest dopuszczony |
+| Brak policy tranzytowej | R5→R1 może działać, a nowe R5→R2 nie |
+| Zerwana droga R2–R4 | Upper może przestać działać, lower może pozostać sprawny |
+| Cofnięcie zmiany | Historyczny \`show system commit\` oraz wyniki po automatycznym rollback |
+
+Nie podawaj w README wpisu **RUNTIME VALIDATED**, dopóki sam nie uzyskasz realnych dowodów z konsoli. Dokument napisany przez model językowy, nawet bardzo szczegółowy, pozostaje projektem testów.
+
+---
+
+## 2.TS. Troubleshooting — jak znaleźć miejsce usterki zamiast zmieniać wszystko naraz [EXT]
+
+Przed pierwszym samodzielnym dyżurem nie musisz znać na pamięć stu komend. Potrzebujesz umieć zadać poprawne pytania i dobrać do nich narzędzia.
+
+### Sytuacja A: „Router odpowiada na ping, ale użytkownicy nie mają sieci”
+
+Nie zaczynaj od stwierdzenia, że routing na pewno działa. Zapytaj, **kto wysyłał ping i do jakiego adresu**. Jeśli administrator pingował R1 z innego routera, przetestował tylko daną ścieżkę do lokalnego adresu R1. Nie przetestował ruchu użytkownika przez R1.
+
+Jeśli problem dotyczy połączenia R5→R2, przejdź po logicznych etapach: adresacja R5, route R5 do destination, interfejs wejściowy R1, aktywna trasa R1, security policy R1 CE→CORE, interfejs R1→R2, host-inbound R2 i powrót R2→R5.
+
+**R1-vSRX — Operational Mode, pierwsza kontrola bez zmieniania konfiguracji**
+
+~~~junos
+show interfaces terse
+show route 10.12.0.0/30 exact
+show route forwarding-table destination 10.12.0.2
+show security zones
+show security policies
+show security flow session source-prefix 192.0.2.10
+~~~
+
+Każda komenda odpowiada na inne pytanie. Nie szukaj po całym output wszystkiego naraz. Najpierw potwierdź, czy interfejs jest dostępny, potem czy route istnieje, a dopiero następnie czy security pozwala na właściwy flow.
+
+### Sytuacja B: „W show route jest trasa, ale nie ma komunikacji”
+
+To częsty objaw, którego przyczyny bywają bardzo różne. RIB może przechowywać aktywną trasę, lecz next-hop może mieć problem z rozwiązywaniem L2. Security flow może nie pozwalać na nową sesję. Odległy router może nie mieć drogi powrotnej.
+
+Dlatego dla konkretnego celu porównaj **RIB z widokiem forwardingu**, a następnie sprawdź rzeczywistą ścieżkę. Pamiętaj przy tym, że \`show route forwarding-table\` nie jest gwarantowanym bezpośrednim odczytem stanu sprzętowego PFE ani dowodem dostarczenia pakietu.
+
+**R1-vSRX — Operational Mode, trzy perspektywy tej samej sieci**
+
+~~~junos
+show route 172.16.60.0/24 exact extensive
+show route forwarding-table destination 172.16.60.1
+show interfaces extensive
+~~~
+
+Jeśli widzisz poprawny next-hop, ale nadal nie ma odpowiedzi, kolejne pytania dotyczą security, ARP, ruchu na dalszym interfejsie i odpowiedzi w przeciwnym kierunku.
+
+### Sytuacja C: „Traceroute pokazuje gwiazdki na R3, ale aplikacja działa”
+
+Gwiazdka oznacza, że nie otrzymałeś oczekiwanej odpowiedzi traceroute w określonym momencie. Nie musi oznaczać, że R3 nie forwarduje pakietów. Obserwuj rzeczywistą aplikację, route i stany interfejsów. Wysyłanie odpowiedzi ICMP Time Exceeded i przekazywanie innego ruchu nie są identycznym zadaniem.
+
+### Sytuacja D: „Proces rpd używa dużo CPU”
+
+\`rpd\` jest procesem związanym z routingiem. Zwiększone zużycie zasobów może towarzyszyć zmianom topologii, problemom protokołów albo dużej liczbie tras. Nie wiesz jednak jeszcze, czy to błąd, czy chwilowe normalne obciążenie.
+
+Sprawdź stabilność czasu działania, alarmy, procesy i stan tras. Jeżeli problem jest produkcyjny, zbieraj obserwacje oraz odpowiednie logi. Nie restartuj \`rpd\` bez planu, ponieważ może to mieć wpływ na sesje i dostępność sieci.
+
+**R1-vSRX — Operational Mode, read-only analiza obciążenia**
+
+~~~junos
+show system uptime
+show system processes extensive
+show system alarms
+show log messages | last 30
+~~~
+
+### Sytuacja E: „BGP jest Established, ale nie mogę pingować loopbacku R6”
+
+To przykład problemu z przyszłych rozdziałów. \`Established\` świadczy o stanie sąsiedztwa BGP, nie o tym, że konkretny prefix loopbacku R6 jest reklamowany, zaakceptowany, aktywny, poprawnie zainstalowany i dopuszczony przez SRX.
+
+Najpierw odpowiedz na dwa podstawowe pytania: czy router ma użyteczną drogę **do celu** oraz czy odbiorca ma drogę **z powrotem do źródła**. Później przejdziesz do szczegółowego debugowania BGP import/export w rozdziale 8. Nie musisz go znać już teraz, ale umiesz rozpoznać, czego sam status sesji jeszcze nie dowodzi.
+
+### Prosta metoda diagnostyczna, którą warto zachować
+
+~~~mermaid
+flowchart TD
+  A["Usługa nie odpowiada"] --> B{"Czy źródło zna adres i next-hop?"}
+  B -->|nie| C["Adresacja / trasa na źródle"]
+  B -->|tak| D{"Czy router pośredni ma aktywną trasę i interface?"}
+  D -->|nie| E["RIB, interfejs i next-hop"]
+  D -->|tak| F{"Czy ruch przechodzi przez security/forwarding?"}
+  F -->|nie| G["Security zone/policy, ARP, filtry, FIB"]
+  F -->|tak| H{"Czy cel otrzymuje pakiet i zna powrót?"}
+  H -->|nie| I["Odbiorca, lokalna usługa, return path"]
+  H -->|tak| J["Sprawdź aplikację i odpowiedź"]
+~~~
+
+*Rysunek 2.7. Prosty schemat pracy od źródła do celu. Nie jest to bezwzględna kolejność wewnętrznych etapów przetwarzania wszystkich urządzeń.*
+
+---
+
+## 2.TEST. Sprawdź, czy rozumiesz — zanim przejdziesz do CLI i konfiguracji [EXT]
+
+Spróbuj odpowiedzieć bez zaglądania do definicji. Nie chodzi o zapamiętywanie słów, lecz o ustalenie, jak zachowa się urządzenie.
+
+**Pytanie 1.** R1 ma adres 192.0.2.1/24. R5 wysyła ping do 192.0.2.1. Czy pakiet jest tranzytowy przez R1?
+
+**Pytanie 2.** R5 wysyła ping do 10.12.0.2 przez R1. Jaką rolę pełni pakiet na R5, R1 i R2?
+
+**Pytanie 3.** R1 pokazuje aktywną trasę \`Direct\` do 10.12.0.0/30, ale nie odpowiada na ping do własnego 10.12.0.1. Czy sama obecność \`Direct\` gwarantuje lokalną odpowiedź ICMP?
+
+**Pytanie 4.** W tablicy R1 znajdują się dwa prefiksy: 172.16.0.0/16 oraz 172.16.60.0/24. Który z nich będzie bardziej szczegółowym dopasowaniem do 172.16.60.1?
+
+**Pytanie 5.** R1 widzi w RIB właściwą trasę. Czy można zakończyć troubleshooting bez sprawdzania forwardingu, security i drogi powrotnej?
+
+**Pytanie 6.** Co dokładnie pokazuje \`show route forwarding-table\` w klasycznym modelu Junos? Czy oznacza to automatycznie odczyt z fizycznego układu PFE?
+
+**Pytanie 7.** R5 ma dwie drogi do R6 przez R2 i R3. Czy samo istnienie obu połączeń oznacza automatyczny failover, jeśli routing jest wyłącznie statyczny?
+
+**Pytanie 8.** Dlaczego \`ping 10.12.0.2\` uruchomiony na R1 nie potwierdza, że ruch tranzytowy od R5 do R2 jest dozwolony?
+
+**Pytanie 9.** R3 nie odpowiada na traceroute, ale ruch aplikacyjny przez R3 działa. Czy musi to oznaczać awarię?
+
+**Pytanie 10.** Co sprawdzisz najpierw, gdy \`rpd\` ma wysokie CPU: zrestartujesz proces czy zbierzesz dane o stanie, obciążeniu i wpływie na routing?
+
+### Odpowiedzi z wyjaśnieniem
+
+**1.** Nie. R1 jest odbiorcą pingu, dlatego jest to host-bound na R1.
+
+**2.** R5 jest nadawcą, R1 przekazuje pakiet jako tranzyt, a R2 jest jego odbiorcą. Ten sam pakiet pełni różne role na różnych urządzeniach.
+
+**3.** Nie. Trasa mówi o osiągalności/powiązaniu adresu z interfejsem. Odpowiedź ICMP wymaga jeszcze odpowiedniej lokalnej obsługi oraz dopuszczenia przez zabezpieczenia.
+
+**4.** Prefiks 172.16.60.0/24. Zasada longest prefix match preferuje bardziej szczegółowy pasujący prefix, jeśli trasa jest użyteczna.
+
+**5.** Nie. RIB to tylko jeden element procesu. Trzeba zweryfikować next-hop, forwarding, interfejsy, zabezpieczenia i odpowiedź z drugiej strony.
+
+**6.** Pokazuje widok master forwarding table po stronie RE w klasycznym Junos. Nie jest sam w sobie gwarancją odczytu sprzętowego PFE; szczegóły poleceń PFE zależą od platformy.
+
+**7.** Nie. Przy statycznych trasach musimy świadomie zaprojektować mechanizm wycofania niewłaściwej drogi i wybór alternatywy oraz zapewnić spójny powrót.
+
+**8.** Ping z R1 jest ruchem wygenerowanym lokalnie. Pakiet R5→R2 przechodzi przez R1 z innym źródłem, na innym ingress i może wymagać security policy CE→CORE.
+
+**9.** Nie. Odpowiedzi traceroute podlegają osobnym ograniczeniom i filtrom; forwarding użytkowników może nadal działać.
+
+**10.** Najpierw zbiorę dane read-only, ocenię wpływ na routing i ustalę przyczynę. Restart procesu sterującego bez diagnozy może wywołać kolejne problemy.
+
+### Po czym poznasz, że rozdział był dla Ciebie przydatny?
+
+Nie potrzebujesz dziś pamiętać nazw wszystkich procesów. Powinieneś jednak potrafić stanąć przed konsolą nowego vSRX i odpowiedzieć własnymi słowami na następujące pytania: skąd router wziął daną trasę, czy ma przygotowaną decyzję forwarding, czy dany pakiet ma przejść **przez** router, czy **do** routera, oraz jak odróżnić brak routingu od blokady w SRX security flow.
+
+Jeśli potrafisz to zrobić na R5–R1–R2, a potem wskazać górną i dolną drogę DIAMOND-6R, masz fundament potrzebny do kolejnych rozdziałów. Teraz nauczymy się **sprawnie wydawać polecenia i bezpiecznie zatwierdzać konfigurację w CLI**. To temat rozdziału III.
+
+---
+
+## Źródła, zakres i status techniczny
+
+Ten rozdział opracowano od nowa, korzystając z wcześniejszej wersji rozdziału II, zunifikowanego blueprintu oraz oficjalnej dokumentacji Juniper. Zachowano pełne cele **2.1 architektura**, **2.2 control/forwarding**, **2.3 RE**, **2.4 PFE**, **2.5 transit**, **2.6 exception**. Laboratorium, scenariusze awarii i pytania kontrolne są rozszerzeniem dydaktycznym, nie dodatkowymi oficjalnymi punktami egzaminu.
+
+Obowiązkowe referencje repozytorium:
+
+- [Unified Blueprint](../JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md)
+- [DIAMOND-6R — pełna adresacja i role](../../labs/reference-diamond-6vsrx/README.md)
+- [DIAMOND-6R — schemat Mermaid](../../labs/reference-diamond-6vsrx/DIAMOND_TOPOLOGY.md)
+- [Archiwum poprzedniej wersji rozdziału II](../archive/JUNOS_Rozdzial_02_pre_novice_rewrite_2026-11-20.md)
+- [Rozdział VIII — wzorzec narracji i dalszy rozwój routing policies](JUNOS_Rozdzial_08_Routing_Policy_and_Firewall_Filters.md)
+
+Podstawowe materiały producenta:
+
+- [Junos OS Architecture Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-architecture.html)
+- [Routing Engine Components and Processes](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-components-and-processes.html)
+- [Routing and Forwarding Tables](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/junos-software-routing-forwarding-table-overview.html)
+- [Routing Databases Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-overview/topics/concept/routing-protocols-routing-databases-overview.html)
+- [Router Data Flow Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-router-data-flow-overview.html)
+- [show route forwarding-table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html)
+- [Junos OS Evolved Differences](https://www.juniper.net/documentation/us/en/software/junos/overview-evo/topics/concept/evo-top-differences.html)
+- [Traffic Processing on SRX Series](https://www.juniper.net/documentation/us/en/software/junos/flow-packet-processing/topics/topic-map/security-srx-devices-processing-overview.html)
+- [monitor traffic CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-traffic.html)
+
+**Status walidacji: SOURCE REVIEWED / STATIC EDITORIAL REVIEW / NOT RUNTIME VALIDATED.** Wszystkie topologie, konfiguracje i spodziewane wyniki są projektem ćwiczenia. Nie wykonano rzeczywistych testów \`commit check\`, \`ping\`, sesji SRX ani fizycznego odczytu PFE na urządzeniach. Rysunki Mermaid są autorskie. Przy realizacji należy podać model oraz release Junos, sprawdzić mapowanie NIC, istniejące konfiguracje stref, wsparcie konkretnych poleceń i faktyczne ścieżki pakietów.
+
+*Po tym rozdziale nie powinieneś już używać zdania „router działa” bez dopowiedzenia, **co dokładnie zostało przetestowane**. To prosta zmiana w myśleniu, ale jedna z najważniejszych w pracy inżyniera sieci.*
