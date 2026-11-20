@@ -24,7 +24,7 @@ Rozdział II (kanoniczny): `docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_O
 2. docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md — pełny rozdział 2 (nie skracaj, nie nadpisuj streszczeniem).
 2a. docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md — pełny rozdział 3, wydanie v3 (2026-11-20), od podstaw dla początkującego. Obejmuje 3.1–3.11, CLI/hierarchię/candidate/commit/load/rollback/J-Web oraz laboratorium 1 vSRX → 2 vSRX → DIAMOND-6R. Wcześniejsze wydanie: docs/archive/JUNOS_Rozdzial_03_pre_beginner_rewrite_2026-11-20.md. Nie zastępuj rozdziału streszczeniem; ucz znaczenia komend, wyników i skutków zmian.
 2b. docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md — pełny rozdział IV v3 (20.11.2026), dla czytelnika z ~1 rokiem doświadczenia, bez założenia znajomości Cisco. Blueprint 4.1–4.14 i 4.15 LAB: initial config, management, local accounts, classes, AAA, interfaces, groups, NTP, SNMPv3, syslog, archival, traceoptions, rescue. Ćwiczenia 1 vSRX → usługi zewnętrzne → DIAMOND-6R. Starsza wersja: docs/archive/JUNOS_Rozdzial_04_pre_beginner_rewrite_2026-11-20.md. NIE zastępuj jej streszczeniem.
-2c. docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md — pełny rozdział 5 (5.1–5.8 oraz 5.9 LAB), workflow diagnostyki i maintenance, interface counters/DOM, show/monitor, ping/source/VRF, upgrade, reboot/halt i root recovery.
+2c. docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md — pełny rozdział V v3 (2026-11-20) od podstaw dla Network Engineera z ~1 rokiem doświadczenia. Blueprint 5.1–5.8 plus 5.9 LAB; show/monitor, counters i fizyczny DOM, test source/return, upgrade/reboot/recovery i diagnostyka. Ćwiczenia 1×vSRX → R5/R1/R2 → DIAMOND-6R. Poprzednia wersja: docs/archive/JUNOS_Rozdzial_05_pre_beginner_rewrite_2026-11-20.md.
 3. **labs/reference-diamond-4vsrx-2vpcs/README.md — baza CH01–CH07: 4 vSRX + 2 VPCS, interfejsy, CIDR i loopbacki /32. Dla CH08 stosuj jawny wariant DIAMOND-6R opisany wyżej.**
 3a. **labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md — diagram Mermaid do osadzania i linkowania w podręczniku (sześć łączy, oba IP/CIDR każdego segmentu, wszystkie loopbacki).** W rozdziałach wykorzystuj ten sam model, a w razie korekty diagramu aktualizuj również jego kopię w referencyjnym README.
 3a. labs/reference-diamond-4vsrx-2vpcs/CODEX_GCP_EVE_NG_PROMPT.md — instrukcja wdrożenia na EVE-NG/GCP, bez ingerencji w istniejące laby.
@@ -32,7 +32,7 @@ Rozdział II (kanoniczny): `docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_O
 4. labs/ch02-four-vsrx/CODEX_TASK.md — kryteria implementacji i walidacji.
 5. labs/ch03-cli-change-management/README.md — lab z dwiema sesjami administratorów, konsolą i kontrolowanym commit confirmed; status PLANNED, dopóki nie ma rzeczywistych testów.
 6. labs/ch04-initial-config/README.md — nowy izolowany lab z vSRX, Linux bastion i services (NTP, syslog, SNMPv3, SCP, AAA opcjonalnie), status PLANNED.
-7. labs/ch05-operational-monitoring/README.md — DIAMOND 4×vSRX+2×VPCS, pełna kompatybilność z rozdziałem 5.9, status PLANNED; poprzednia topologia 2×vSRX zachowana w docs/archive.
+7. labs/ch05-operational-monitoring/README.md — historyczna specyfikacja CH05 4×vSRX+2×VPCS zachowana jako wariant legacy, lecz nowy rozdział V v3 korzysta z DIAMOND-6R (R5/R6 są vSRX). Status PLANNED, nie twierdź o wykonanym EVE runtime.
 
 ## Aktualizacja 2026-11-20 — rozdział 8 używa DIAMOND-6R (decyzja właściciela projektu)
 
@@ -178,6 +178,9 @@ Dla rozdziału 2 odpowiedni rejestr źródeł: \`docs/research/CH02_GOTCHAS_ZROD
 
 ## Specjalne zasady CH05 — monitoring i maintenance
 
+**CH05 v3, uwaga platformowa:** używaj pełnej adresacji DIAMOND-6R z referencji; nie zamieniaj mechanicznie PC-A/PC-B na R5/R6 w historycznych labach, bo `ping` z R5 jest locally originated, a do R6 host-bound. Na SRX wymagane są poprawne security zones i policy. Zapasowe static `qualified-next-hop` nie gwarantuje end-to-end failover, jeśli druga strona nie zmienia return path. Obserwacja DOM wymaga fizycznej wkładki, nie vSRX. Na Junos z wymuszonym commit comment używaj `commit confirmed ... comment ...` oraz końcowego `commit comment ...`; `commit check` w trakcie timera może potwierdzić zmianę.
+
+
 - Kanoniczny rozdział: `docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md`; zachowaj 5.1–5.9 i pełny wykład narracyjny.
 - Rób **dwa pomiary counters z interwałem**, nie oceniaj awarii tylko po wartościach skumulowanych; `show interfaces terse up/up` nie dowodzi braku CRC, drops i problemów optyki.
 - DOM `show interfaces diagnostics optics` wymaga wspieranej **fizycznej wkładki**, nie jest sensownym testem „laser Rx power” na vSRX. Rx local to sygnał pochodzący z TX peer; interpretuj wartości względem specyfikacji modułu.
@@ -185,5 +188,5 @@ Dla rozdziału 2 odpowiedni rejestr źródeł: \`docs/research/CH02_GOTCHAS_ZROD
 - `ping`/traceroute testuj z właściwym `source`, `routing-instance`, z klienta, w obu kierunkach. Ping do gateway nie wystarcza do potwierdzenia aplikacji klienta.
 - Software maintenance wymaga exact model/Junos release/image, Suggested Releases JTAC, upgrade matrix, backup, OOB console i pre/post. `no-validate` tylko na udokumentowanych wyjątkach; `rollback 1` config ≠ software rollback; snapshot może nadpisać poprzedni image.
 - `request system reboot/halt`, `restart routing`, `clear interfaces statistics` i root recovery mogą być destrukcyjne. Nie uruchamiaj ich na produkcji bez zatwierdzonej procedury, impact analysis i konsoli. Root recovery zależy od FreeBSD/Junos Evolved/security hardening.
-- Laboratorium: `labs/ch05-operational-monitoring/README.md`, oddzielny 2×vSRX/2×VPCS; test admin disable, missing static route, policy deny; `commit confirmed` i automatyczny rollback, bez dodatkowego `commit check` podczas pending.
+- Laboratorium: `labs/ch05-operational-monitoring/README.md`, aktualizacja wariantu dla początkującego 1 vSRX → 3 vSRX → DIAMOND-6R. Faults: admin disable, missing static route, policy deny, błędna droga powrotna, asymmetric failover. Wymagany niezależny console i `commit confirmed` bez dodatkowego `commit check` podczas timera. Wszystkie scenariusze NOT RUNTIME VALIDATED.
 - Źródła i 18 gotchas: `docs/research/CH05_MONITORING_MAINTENANCE_GOTCHAS_I_ZRODLA_2026-11-17.md`. Nie przedstawiaj własnych case studies jako pytań certyfikacyjnych ani runtime PASS bez dowodów.
