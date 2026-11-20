@@ -14,13 +14,15 @@ Rozdział II (kanoniczny): `docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_O
 
 **Weryfikacja**: materiał Markdown i przykłady stanowią SOURCE REVIEWED/PLANNED; RUNTIME VALIDATED wymaga rzeczywistych wyników z konkretnego vSRX/release i EVE-NG.
 
+**Rozdział III v3** stosuje ten sam profil czytelnika co rozdział II. `commit check` przed `commit confirmed` może być bezpiecznym pre-checkiem, ale **`commit check` podczas oczekiwania po `commit confirmed` potwierdza warunkowy commit**; po aktywacji wykonywać post-check read-only i potwierdzać dopiero po PASS. Laboratorium ma status PLANNED i nie zostało uruchomione na vSRX.
+
 ## Canonical source of truth
 
 **Rozdział 1**: docs/chapters/JUNOS_Rozdzial_01_Networking_Fundamentals_i_Enterprise_Portfolio.md — fundamenty + [EXT] portfolio Campus LAN, HLD/BOM i wersje Junos. Portfolio jest zmienne w czasie; sprawdzaj datasheets, supported models, Juniper JTAC KB21476 i release notes, zwłaszcza przed projektowaniem ofert.
 
 1. docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md — obowiązujący, zunifikowany spis treści; zachowaj zakres i numerację.
 2. docs/chapters/JUNOS_Rozdzial_02_Architektura_Junos_OS.md — pełny rozdział 2 (nie skracaj, nie nadpisuj streszczeniem).
-2a. docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md — pełny rozdział 3 (3.1–3.11), warstwa CLI/candidate/commit/load/rollback/J-Web. Nie zastępuj streszczeniem i nie przenoś wszystkich gotchas na koniec.
+2a. docs/chapters/JUNOS_Rozdzial_03_Junos_User_Interfaces_CLI.md — pełny rozdział 3, wydanie v3 (2026-11-20), od podstaw dla początkującego. Obejmuje 3.1–3.11, CLI/hierarchię/candidate/commit/load/rollback/J-Web oraz laboratorium 1 vSRX → 2 vSRX → DIAMOND-6R. Wcześniejsze wydanie: docs/archive/JUNOS_Rozdzial_03_pre_beginner_rewrite_2026-11-20.md. Nie zastępuj rozdziału streszczeniem; ucz znaczenia komend, wyników i skutków zmian.
 2b. docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md — pełny rozdział 4 (4.1–4.14 oraz 4.15 LAB), Cisco ↔ Junos, AAA, NTP, SNMPv3, syslog, archival, traceoptions, rescue.
 2c. docs/chapters/JUNOS_Rozdzial_05_Operational_Monitoring_and_Maintenance.md — pełny rozdział 5 (5.1–5.8 oraz 5.9 LAB), workflow diagnostyki i maintenance, interface counters/DOM, show/monitor, ping/source/VRF, upgrade, reboot/halt i root recovery.
 3. **labs/reference-diamond-4vsrx-2vpcs/README.md — baza CH01–CH07: 4 vSRX + 2 VPCS, interfejsy, CIDR i loopbacki /32. Dla CH08 stosuj jawny wariant DIAMOND-6R opisany wyżej.**
