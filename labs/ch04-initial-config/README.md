@@ -2,6 +2,12 @@
 
 **Status: PLANNED / NOT RUNTIME VALIDATED.** Nie ma wygenerowanego `.unl`, nie uruchamiano wymienionych usług i nie ma potwierdzonych wyników. To specyfikacja do późniejszego wdrożenia.
 
+**Aktualizacja 2026-11-20 — Rozdział IV v3 (dla początkujących):** [kanoniczny podręcznik](../../docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md) prowadzi od pierwszego vSRX, przez prawdziwą integrację z usługami NTP/syslog/SNMPv3/SCP/AAA, aż do etapowego zastosowania standardu na DIAMOND-6R. **Poniższa oryginalna topologia 192.0.2.0/24 jest historycznym, odrębnym wariantem CH04 i nie jest automatycznie połączona z LAN-A DIAMOND-6R**. Dla nowego wariantu OOB możesz dodać izolowany segment administracyjny **203.0.113.0/24** z `LAB-ADMIN` 203.0.113.20, `LAB-SERVICES` 203.0.113.30 oraz **R1 OOB 203.0.113.10 dopiero po potwierdzeniu realnego portu, mapowania QEMU i routing instance**. Nie dodawaj OOB jako nowej fizycznej ścieżki przez core i nie podmieniaj adresów LAN-A 192.0.2.0/24 na management.
+
+**Warianty to alternatywy, nie elementy do automatycznego łączenia:** oryginalny lab CH04 `LAB-SRX01` oraz nowy kontekst R1/R5/R2/R3/R4/R6 służą innym ćwiczeniom. Nie nadpisuj istniejącego `.unl`, nie zmieniaj instancji innych kursów. Wszystkie wyniki PASS wymagają rzeczywistych dowodów z właściwego routera i serwera; inaczej zapisuj NOT TESTED.
+
+
+
 **Podręcznik:** [Rozdział 4](../../docs/chapters/JUNOS_Rozdzial_04_Initial_Configuration_and_System_Services.md), sekcja **4.15**.  
 **Blueprint:** [4.1–4.15](../../docs/JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md).  
 **Research/gotchas:** [CH04 research](../../docs/research/CH04_GOTCHAS_ZRODLA_I_WERYFIKACJA.md).
