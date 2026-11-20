@@ -707,19 +707,30 @@ Zanim wejdziemy w zaawansowane zastosowania w OSPF, IS-IS i BGP, zapoznaj się z
 
 W Cisco IOS, jeśli napisałeś 50-liniową `route-map` i chciałeś sprawdzić, co ona właściwie zrobi z prefiksami w tablicy routingu, najczęściej analizowałeś ją ręcznie albo testowałeś wynik przy konkretnym sąsiedzie!
 
-W Junos można sprawdzić politykę na trasach, które **już istnieją w odpowiedniej tabeli**, nie przypinając jej jeszcze do sąsiada. `test policy` jest użyteczne przy analizie `route-filter`, ale ma dwie ważne granice: nie tworzy nieistniejących tras oraz stosuje **domyślną akcję accept**. Test pozbawiony końcowego `reject` może więc wyglądać na zbyt szeroki, a wynik nie uwzględni w pełni zachowania sesji BGP i jej kontekstu eksportowego.
+W Junos można sprawdzić politykę na trasach, które **już istnieją w odpowiedniej tabeli**, nie podpinając jej jeszcze do BGP. `test policy` jest użyteczne przy analizie `route-filter`, ale **nie tworzy tras z powietrza** i stosuje **domyślne accept**. Dlatego test policy bez jawnego końcowego `reject` może przyjąć więcej, niż zakładałeś, a wynik nie jest zamiennikiem rzeczywistego eksportu.
 
-**R1-vSRX — Operational Mode, test definicji polityki oraz odczyt rzeczywistej reklamy**
+Najpierw utwórz prosty testowy `policy-statement` (tylko w odizolowanym labie). Zakładamy, że R1 zna już prefiksy z R6 przez BGP, zgodnie z bazowym scenariuszem.
+
+**R1-vSRX — Configuration Mode, samodzielna polityka demonstracyjna**
 
 ~~~junos
-test policy PREFIX-EXAMPLE 172.16.0.0/16
+set policy-options policy-statement CHECK-CE-B term ALLOW from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement CHECK-CE-B term ALLOW then accept
+set policy-options policy-statement CHECK-CE-B term REST then reject
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R1-vSRX — Operational Mode, test logiki i rzeczywistego BGP**
+
+~~~junos
+test policy CHECK-CE-B 172.16.0.0/16
 show route 172.16.60.0/24 exact extensive
 show route advertising-protocol bgp 192.0.2.10
 ~~~
 
-W pierwszym poleceniu nazwa `PREFIX-EXAMPLE` odnosi się do **wcześniej utworzonej polityki demonstracyjnej z sekcji 8.6**; jeśli jej nie ma, trzeba najpierw stworzyć ją w odseparowanym labie. Druga komenda sprawdza istniejącą trasę, a trzecia faktyczną reklamę do R5. Jeżeli `test policy` coś akceptuje, nie znaczy to automatycznie, że R1 wysłał prefiks do sąsiada. Od tego są odpowiednie widoki `advertising-protocol`. Nie zamieszczamy tu zmyślonego outputu i liczników — zebrane wyniki powinny pochodzić z konkretnego vSRX.
-
-
+Pierwszy odczyt sprawdza zachowanie polityki na istniejących trasach. Drugi potwierdza obecność prefiksu w RIB, a trzeci pokazuje, czy R1 **naprawdę reklamuje** go do R5. Dopiero trzy obserwacje razem pozwalają sensownie ocenić wynik. Po pozytywnym teście potwierdź `commit` w Configuration Mode lub pozwól warunkowej zmianie się cofnąć, jeśli polityka była tylko eksperymentem. Nie pokazujemy zmyślonego outputu jako odczytu urządzenia.
 
 Podstawowy zestaw komend monitorowania obu silników (zestawiony z odpowiednikami Cisco):
 
@@ -771,9 +782,9 @@ Zatrzymaj go, zanim straci godzinę na szukaniu, dlaczego jego polityka nie dzia
 
 2. **OSPF `import` policy NIE MOŻE filtrować tras wewnętrznych** (Intra-area LSA Type 1/2 ani Inter-area LSA Type 3)! Jeśli spróbujesz odrzucić trasę wewnętrzną OSPF polityką `import`, Junos ją po prostu zignoruje i i tak zainstaluje trasę w `inet.0`!
 
-3. **Co więc w ogóle robi OSPF `import` policy?** Działa **WYŁĄCZNIE na trasy zewnętrzne (External — LSA Type 5 oraz NSSA Type 7)**! Pozwala zapobiec instalacji niechcianej trasy zewnętrznej OSPF w lokalnej tablicy `inet.0` (uwaga: nawet wtedy router nadal rozsyła jej LSA Type 5 dalej do innych sąsiadów, aby zachować spójność LSDB!) albo pozwala zmodyfikować lokalny parametr `preference` (np. zmienić domyślną preferencję OSPF External z 150 na 180) czy `tag`.
+3. **Co więc robi OSPF `import` policy?** Może **odfiltrować trasę zewnętrzną (External — LSA Type 5 albo NSSA Type 7) z lokalnej RIB**, ale nie usuwa odpowiadającego jej LSA z LSDB ani nie powstrzymuje flooding. Dla tras wewnętrznych `reject` jest ignorowany; Junos pozwala natomiast używać import policy do ustawienia **priorytetu aktualizacji tras OSPF** (`then priority high|medium|low`). To inny cel niż blokowanie prefiksów. [Juniper: OSPF Routing Policy](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-routing-policy.html).
 
-4. **A co robi OSPF `export` policy?** To juniperski odpowiednik Cisco `redistribute`! Pobiera aktywne trasy z `inet.0` (np. `static`, `direct`, `bgp`) i wstrzykuje je do OSPF jako **External Type 2 (E2)** z domyślną metryką **0** (możesz zmienić na `external type 1` oraz nadać `metric` i `tag`).
+4. **A co robi OSPF `export` policy?** To juniperski odpowiednik Cisco `redistribute`! Pobiera aktywne trasy z `inet.0` (np. `static`, `direct`, `bgp`) i wstrzykuje je do OSPF jako zewnętrzne LSA (w typowym wariancie E2). Metrykę, typ external i tag ustal świadomie w polityce, zamiast polegać na przypadkowej wartości domyślnej.
 
 > **Pułapka na Cisco-engineera (Jak rozgłosić podsieć LAN do OSPF?):** Jeśli masz na routerze podsieć `192.0.2.0/24` na porcie `ge-0/0/2.0` i chcesz, żeby znali ją sąsiedzi OSPF, **NIE** rób tego polityką `export` dla `from protocol direct`, bo zamienisz swoją czystą podsieć wewnętrzną w brzydką trasę zewnętrzną **E2 (LSA Type 5, preferencja 150)**! Zamiast tego dodaj interfejs do OSPF jako pasywny: `set protocols ospf area 0.0.0.0 interface ge-0/0/2.0 passive`. Wtedy trafi do OSPF jako natywna trasa wewnętrzna (**LSA Type 1, preferencja 10**)!
 
