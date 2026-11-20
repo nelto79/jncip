@@ -998,3 +998,356 @@ Dopiero gdy widzisz, że poprzedni komunikat powrócił, możesz odnotować rezu
 
 To ćwiczenie jest ważniejsze niż zapamiętanie samej składni `commit confirmed 2`. Uczysz się **różnicy między aktywacją warunkową a trwałym zatwierdzeniem**.
 
+
+### Poziom 2. Dwie sesje administratorów i dwa routery — dlaczego wspólny candidate bywa ryzykowny?
+
+Na tym poziomie nie potrzebujemy skomplikowanej topologii. Wystarczą R1 i R5, a na R1 — **dwie niezależne sesje administracyjne**, nazwane tutaj Admin-A i Admin-B. Jedna może być otwarta przez SSH, druga przez konsolę EVE-NG. Właśnie dostęp konsolowy będzie naszym zabezpieczeniem.
+
+Najpierw przećwiczymy współdzieloną konfigurację, bez zatwierdzania cudzych zmian. Ustal z drugim administratorem (albo przełączając się między dwiema własnymi sesjami), że **obie sesje należą do tego samego eksperymentu**.
+
+**R1-vSRX — Operational Mode, sesja Admin-A**
+
+~~~junos
+configure
+~~~
+
+**R1-vSRX — Operational Mode, sesja Admin-B**
+
+~~~junos
+configure
+~~~
+
+W pierwszej sesji wpisz opis portu do R2. W drugiej wpisz opis portu do R3. Oba polecenia są bezpieczne z punktu widzenia routingu, ale pozwalają zaobserwować wspólną candidate.
+
+**R1-vSRX — Configuration Mode [edit], sesja Admin-A**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-ADMIN-A-R2"
+show | compare
+~~~
+
+**R1-vSRX — Configuration Mode [edit], sesja Admin-B**
+
+~~~junos
+set interfaces ge-0/0/1 description "CH03-ADMIN-B-R3"
+show | compare
+~~~
+
+Co powinieneś zauważyć? Mimo że każdy operator wpisał inną linię, wspólny `show | compare` może pokazywać **obydwie**. Candidate jest współdzielona, a wykonanie commit w jednej sesji mogłoby zatwierdzić zarówno opis A, jak i opis B.
+
+W tej fazie **nie wykonujemy commit**. Dopiero po sprawdzeniu, że te dwie linie są wyłącznie naszą pracą laboratoryjną i że nikt inny nie ma zmian, wracamy do aktywnej konfiguracji.
+
+**R1-vSRX — Configuration Mode [edit], sesja Admin-A, za uzgodnioną zgodą obu operatorów**
+
+~~~junos
+show | compare
+rollback 0
+show | compare
+~~~
+
+**Nie wolno stosować `rollback 0` jako ogólnego sposobu czyszczenia shared candidate w sieci produkcyjnej**. To ćwiczenie działa tylko dlatego, że obaj administratorzy wiedzą, jakie zmiany są w niej zapisane.
+
+### Drugi eksperyment: konfiguracje prywatne
+
+Zakończ poprzednie sesje edycji, a następnie ponownie otwórz dwa połączenia. Tym razem użyj `configure private`. Każdy administrator powinien zobaczyć własną kopię roboczą.
+
+**R1-vSRX — Operational Mode, sesja Admin-A**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Operational Mode, sesja Admin-B**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-A**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-PRIVATE-A"
+show | compare
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-B**
+
+~~~junos
+set interfaces ge-0/0/1 description "CH03-PRIVATE-B"
+show | compare
+~~~
+
+Jeżeli obie sesje są rzeczywiście prywatne, nie powinny bezpośrednio pokazywać zmian drugiego administratora jako własnych niezacommitowanych edycji. Ale to jeszcze nie oznacza, że mogą być zatwierdzane dowolnie, bez kontroli.
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-A, tylko po potwierdzeniu niezależności zmian**
+
+~~~junos
+show | compare
+commit check
+commit
+~~~
+
+Teraz Admin-B ma prywatną kopię przygotowaną przed commitem A. Jeśli spróbuje ją zatwierdzić, Junos może wymagać synchronizacji stanu z nowym active albo zgłosić konflikt. Nie przewiduj bezwarunkowo sukcesu czy porażki: zachowanie zależy od zmian, ich zakresu i właściwego wydania.
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-B, po zidentyfikowaniu nowszego active**
+
+~~~junos
+status
+show | compare
+update
+show | compare
+~~~
+
+`update` próbuje połączyć nowy aktywny stan z prywatną kandydacką konfiguracją B. Sprawdź, czy opis A nadal występuje w aktualnej konfiguracji, a opis B znajduje się w prywatnym diffie. Dopiero wtedy można rozważyć commit B.
+
+**R1-vSRX — Configuration Mode [edit private], sesja Admin-B, wyłącznie po sprawdzeniu wyniku update**
+
+~~~junos
+commit check
+commit
+~~~
+
+Zwróć uwagę na różnicę z poprzednim scenariuszem. W shared candidate obydwie osoby edytowały jeden wspólny tekst. W private były to dwie osobne propozycje, które musiały zostać pogodzone ze zmianami zatwierdzonymi w międzyczasie.
+
+### Po co w tym labie R5?
+
+R5 to drugi router z tej samej topologii DIAMOND-6R. Nie zmieniamy w nim adresacji ani routingu. Wykorzystujemy go do **kontroli niezależności urządzeń**. Opis portu R1→R2 nie powinien magicznie pojawić się na R5; candidate i historia commit są lokalne dla każdego vSRX.
+
+**R5-vSRX — Operational Mode: odczyt niezależnego stanu**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+show system commit
+~~~
+
+Jeśli chcesz powtórzyć ćwiczenie na R5, użyj osobnego nieszkodliwego opisu jego portu `ge-0/0/0` do R1, zapamiętując poprzedni stan. Zmiany na R5 i R1 będą miały osobne commity, historię i procedurę powrotu. W sieci z większą liczbą urządzeń to bardzo ważny fakt: **Junos nie wykonuje automatycznej transakcji obejmującej wszystkie routery DIAMOND-6R tylko dlatego, że należą do jednego laboratorium.**
+
+### Trzeci eksperyment: załaduj plik bez ruszania interfejsów danych
+
+W R1 przygotuj dwa krótkie, niekrytyczne ustawienia: testowy komunikat logowania i opis portu. Wykorzystaj `load set terminal` z sekcji 3.8, a po zakończeniu importu sprawdź `show | compare`.
+
+Przed commit porównaj zawartość candidate z zamierzonym wynikiem. Jeżeli import obejmie cokolwiek innego — adres IP, strefę, policy, default route — **nie zatwierdzaj**. Odrzuć tylko własną prywatną próbę lub przywróć zweryfikowany snapshot. To dobry moment, żeby nauczyć się, że plik nie jest wiarygodny tylko dlatego, że ktoś nazwał go „final config”.
+
+### Co oznacza zaliczenie poziomu 2?
+
+Powinieneś potrafić przewidzieć, czy po danym poleceniu zmieniła się **shared candidate**, **private candidate**, czy już **active configuration**. Powinieneś również wiedzieć, dlaczego `update` może być potrzebne po commicie kolegi, a `load update` nie służy do tego samego.
+
+---
+
+### Poziom 3. DIAMOND-6R — jedna zmiana administracyjna, sześć niezależnych urządzeń
+
+Pełna topologia jest już znana: R5–R1–R2/R3–R4–R6. Na tym etapie czytelnik ma rozumieć, co się dzieje, gdy zmiana dotyczy więcej niż jednego routera. **Nie uruchamiamy nowego protokołu routingu**, ponieważ przedmiotem rozdziału jest bezpieczna praca z konfiguracją.
+
+Wybierzmy proste zadanie: na **R1** i **R4** trzeba dopisać czytelne opisy odpowiednich połączeń do rdzenia. Zmiany mają być zatwierdzone osobno, a stan R2 i R3 nie powinien się zmienić.
+
+**R1-vSRX — Operational Mode: pre-check pierwszego urządzenia**
+
+~~~junos
+show version
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+show configuration interfaces ge-0/0/0 | display set
+show configuration interfaces ge-0/0/1 | display set
+show system commit
+~~~
+
+**R4-vSRX — Operational Mode: pre-check drugiego urządzenia**
+
+~~~junos
+show version
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+show configuration interfaces ge-0/0/0 | display set
+show configuration interfaces ge-0/0/1 | display set
+show system commit
+~~~
+
+Na obu routerach zapisz poprzednie opisy i potwierdź niezależną konsolę. Upewnij się też, że fizyczne porty w EVE-NG są rzeczywiście zmapowane zgodnie z referencją. W przeciwnym razie „opis do R2” może trafić na niewłaściwą kartę.
+
+**R1-vSRX — Operational Mode: prywatny edytor dla pierwszego urządzenia**
+
+~~~junos
+configure private
+~~~
+
+**R1-vSRX — Configuration Mode [edit private]: opis obu korytarzy od strony R1**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-UPPER-TO-R2"
+set interfaces ge-0/0/1 description "CH03-LOWER-TO-R3"
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Teraz z **drugiej sesji na R1** sprawdź, czy oba opisy są aktywne i czy porty zachowały swój poprzedni stan. Nie wykonuj kolejnego `commit check` podczas oczekującego timera.
+
+**R1-vSRX — Operational Mode, osobna sesja: odczyt po warunkowej aktywacji**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+show configuration interfaces ge-0/0/1 | display set
+show interfaces terse
+show system commit
+~~~
+
+Jeśli wszystko jest poprawne, zatwierdź zmianę w tej samej edycji. **Nie zaczynaj konfiguracji R4, dopóki nie zakończysz post-check i potwierdzenia R1.** Zostawianie kilku timerów `commit confirmed` na różnych urządzeniach jednocześnie utrudnia pracę początkującego i zwiększa ryzyko pomyłki.
+
+**R1-vSRX — Configuration Mode [edit private]: zakończenie po pozytywnym wyniku**
+
+~~~junos
+commit
+~~~
+
+Dopiero teraz przejdź na R4.
+
+**R4-vSRX — Operational Mode: wejście do prywatnego edytora drugiego urządzenia**
+
+~~~junos
+configure private
+~~~
+
+**R4-vSRX — Configuration Mode [edit private]: opisy połączeń do R2 i R3**
+
+~~~junos
+set interfaces ge-0/0/0 description "CH03-UPPER-TO-R2"
+set interfaces ge-0/0/1 description "CH03-LOWER-TO-R3"
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R4-vSRX — Operational Mode, osobna sesja: post-check**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+show configuration interfaces ge-0/0/1 | display set
+show interfaces terse
+show system commit
+~~~
+
+**R4-vSRX — Configuration Mode [edit private]: ostateczne zatwierdzenie po PASS**
+
+~~~junos
+commit
+~~~
+
+Teraz warto porównać stan wszystkich sześciu urządzeń. Nie ma sensu przepisywać tych samych sześciu bloków identycznych komend, lecz **musisz wiedzieć, które urządzenie sprawdzasz**. Poniższe odczyty wykonaj osobno na routerach, których nazwy podano nad blokami.
+
+**R2-vSRX — Operational Mode: upewnij się, że R2 nie otrzymał przypadkowej zmiany**
+
+~~~junos
+show interfaces terse
+show system commit
+~~~
+
+**R3-vSRX — Operational Mode: niezależny stan drugiego korytarza**
+
+~~~junos
+show interfaces terse
+show system commit
+~~~
+
+**R5-vSRX — Operational Mode: stan routera CE-A**
+
+~~~junos
+show interfaces terse
+show system commit
+~~~
+
+**R6-vSRX — Operational Mode: stan routera CE-B**
+
+~~~junos
+show interfaces terse
+show system commit
+~~~
+
+**Oczekiwany rezultat:** opisy są zmienione tylko na R1 i R4, a stan interfejsów i konfiguracje pozostałych routerów nie zostały przez ten scenariusz zmienione. Opis portu **nie powoduje sam w sobie automatycznego przełączenia ruchu**, więc nie myl tego z testem failover.
+
+### A co, gdyby zmiana dotyczyła rzeczywiście routingu?
+
+Na razie nie wykonujmy takiej operacji. Wyobraźmy sobie jednak, że zmieniasz preferencję drogi przez R2, a potem musisz zmienić coś na R4, żeby zachować spójny powrót ruchu. Wtedy kolejność działań i niezależne potwierdzanie commitów nie są jedynie kwestią wygody — mają znaczenie dla ciągłości komunikacji.
+
+Pełny DIAMOND-6R pomaga zrozumieć, dlaczego rozbudowany change plan zawiera **pre-checki na wszystkich istotnych urządzeniach, punkty wdrożenia na konkretnych routerach, testy obu kierunków i plan rollback**. Sama komenda `commit confirmed` nie zastępuje takiego projektu.
+
+---
+
+## 3.TS. Gdy Junos nie zachowuje się tak, jak oczekiwałeś [EXT]
+
+W dalszej pracy spotkasz objawy, które na pierwszy rzut oka wyglądają podobnie. Kluczowe jest rozróżnienie, **na jakim etapie zmiana przestała odpowiadać planowi**.
+
+### „Wpisuję `set`, ale nic się nie zmienia”
+
+Najpierw spójrz na prompt. Jeśli jesteś w Configuration Mode i nie wykonałeś commit, zmieniłeś candidate, ale niekoniecznie active. Porównaj `show | compare` i odczyt aktywnej konfiguracji z innej sesji. To nie musi być awaria, tylko poprawny mechanizm transakcyjny.
+
+**R1-vSRX — Configuration Mode [edit]: odczyt wersji roboczej**
+
+~~~junos
+show | compare
+~~~
+
+**R1-vSRX — Operational Mode, osobna sesja: sprawdzenie działającego stanu**
+
+~~~junos
+show configuration interfaces ge-0/0/0 | display set
+~~~
+
+### „Commit failed” — czy wszystko wróciło do poprzedniego stanu?
+
+Jeśli commit został odrzucony podczas sprawdzania konfiguracji, nie oznacza to automatycznie, że każde polecenie wpisane do candidate zostało usunięte. Kandydacka konfiguracja nadal może zawierać poprawki wymagające naprawy.
+
+**R1-vSRX — Configuration Mode [edit]: poznaj błąd bez losowych poprawek**
+
+~~~junos
+show | compare
+commit check
+~~~
+
+Jeśli `commit check` wskazuje konkretną niezgodność, popraw właściwą gałąź. Nie usuwaj wszystkich ustawień routingu ani stref bezpieczeństwa tylko po to, by zniknął komunikat o błędzie.
+
+### „Mój commit zatwierdził zmianę kolegi”
+
+Najpierw sprawdź, czy używaliście `configure`, czyli shared candidate. Jeżeli tak, zatwierdzenie wspólnych zmian jest spodziewanym zachowaniem. W incydencie nie cofaj ich mechanicznie bez uzgodnienia, bo mogły zostać wprowadzone z ważnego powodu. Przy kolejnych zmianach rozważ `configure private` i jawny proces akceptacji diffu.
+
+### „Private candidate nie może zostać zatwierdzona”
+
+Sprawdź, czy ktoś inny nie zmienił active od chwili otwarcia Twojej prywatnej kopii. Wtedy potrzebny może być `update` lub ręczne rozwiązanie konfliktu. `update` nie jest obietnicą zachowania wszystkiego, jeśli dwaj operatorzy edytowali tę samą gałąź.
+
+**R1-vSRX — Configuration Mode [edit private], świadoma synchronizacja**
+
+~~~junos
+status
+show | compare
+update
+show | compare
+~~~
+
+### „Po `load set` diff wygląda znacznie szerzej niż planowaliśmy”
+
+Nie uruchamiaj commit. Wczytany plik może mieć nieodpowiednie interfejsy, adresy albo odnosić się do innego vSRX. Sprawdź dokument źródłowy i dokładnie przeanalizuj każdą usuniętą oraz dodaną pozycję. Jeśli pracujesz tylko nad własnymi zmianami w prywatnej candidate, możesz je wycofać i poprawić plik.
+
+### „Po `commit confirmed` zmiana działała, ale za chwilę zniknęła”
+
+To zachowanie zgodne z założeniem, jeśli nie nastąpiło potwierdzenie przed upływem czasu. Sprawdź historię commit i aktywną konfigurację. Jeśli mechanizm wycofał zmianę, dowiesz się, że warunkowy commit zadziałał. Przy następnym wdrożeniu dokładnie zaplanuj testy i moment potwierdzenia, zamiast bezmyślnie zwiększać timer.
+
+### „Po `rollback 1` nadal widzę nową aktywną konfigurację”
+
+To również może być poprawne. `rollback 1` **ładuje starszą wersję do candidate**; dopiero osobny commit aktywuje ten stan. Jeśli chciałeś jedynie obejrzeć dawną konfigurację, używaj `show system rollback 1`, a nie polecenia modyfikującego candidate.
+
+### „J-Web nie odpowiada, ale ping i SSH działają”
+
+To trzy różne usługi. Sprawdź, czy Twój model i release wspierają J-Web, czy skonfigurowano HTTPS i certyfikat, czy dostęp ze strefy management jest dozwolony oraz czy aplikacja nasłuchuje na właściwym porcie. Nie otwieraj wszystkich usług management na całym urządzeniu tylko po to, żeby „coś zaczęło odpowiadać”.
+
+**R1-vSRX — Operational Mode: pierwszy odczyt przy problemie z J-Web**
+
+~~~junos
+show version
+show configuration system services web-management | display set
+show configuration security zones | display set
+show interfaces terse
+~~~
+
+### Jak dokumentować przyczynę?
+
+Po zdiagnozowaniu problemu zapisz przynajmniej, **co zgłosił użytkownik, na którym routerze wykonano zmianę, czym różniła się candidate od active, jaki był wynik walidacji, co nastąpiło po aktywacji i czy rollback się wykonał**. Nie pisz „Junos się zawiesił”, jeśli dowody wskazują jedynie na brak potwierdzenia `commit confirmed`.
+
