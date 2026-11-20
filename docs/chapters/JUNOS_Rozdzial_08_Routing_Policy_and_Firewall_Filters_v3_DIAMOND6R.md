@@ -1527,3 +1527,362 @@ show configuration protocols bgp | display set
 
 **Kryterium PASS fazy 3:** R5 i R6 mają po jednym Established, R2 i R3 po dwa, a R1 i R4 po trzy. Każdy peer ma oczekiwany numer AS oraz prawidłowy interfejs źródłowy. Nie kontynuuj, jeśli sesja jest w \`Active\`, \`Connect\` lub niestabilna.
 
+
+### 8.14.6. Faza 4 — jawny export: CE reklamują swoje sieci, rdzeń przekazuje tylko uzgodnione prefixy
+
+Zestawione sesje eBGP pozwalają wymieniać informacje, ale R5 i R6 muszą najpierw **wprowadzić własne sieci** do BGP. Dopiero potem R1/R4 przekażą je dalej.
+
+Zaczynamy od R5. Ma dwa prefiksy \`Direct\` i oba mogą być reklamowane do R1. Nie chcemy jednak przypadkowo wysłać adresacji tranzytowej, loopbacków router ID ani żadnej przyszłej sieci zarządzającej.
+
+**R5-vSRX — Configuration Mode, tylko Business-A i Services-A**
+
+~~~junos
+set policy-options policy-statement CE-A-OUT term BUSINESS from protocol direct
+set policy-options policy-statement CE-A-OUT term BUSINESS from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement CE-A-OUT term BUSINESS from route-filter 172.16.51.0/24 exact
+set policy-options policy-statement CE-A-OUT term BUSINESS then accept
+set policy-options policy-statement CE-A-OUT term REST then reject
+set protocols bgp group TO-R1 export CE-A-OUT
+~~~
+
+Na R6 świadomie dodajemy także jedną statyczną trasę testową. Chcemy, aby jej NLRI dotarło do R1, a następnie zostało **odrzucone w imporcie R1**. To test polityki, nie próba udostępnienia aplikacji.
+
+**R6-vSRX — Configuration Mode, trzy jawnie określone prefiksy CE-B**
+
+~~~junos
+set policy-options policy-statement CE-B-OUT term REAL-NETS from protocol direct
+set policy-options policy-statement CE-B-OUT term REAL-NETS from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement CE-B-OUT term REAL-NETS from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement CE-B-OUT term REAL-NETS then accept
+set policy-options policy-statement CE-B-OUT term TEST-NET from protocol static
+set policy-options policy-statement CE-B-OUT term TEST-NET from route-filter 172.16.62.0/24 exact
+set policy-options policy-statement CE-B-OUT term TEST-NET then accept
+set policy-options policy-statement CE-B-OUT term REST then reject
+set protocols bgp group TO-R4 export CE-B-OUT
+~~~
+
+Na brzegu R1 i R4 oddzielamy **export do rdzenia** od **export do własnego CE**. R1 do rdzenia ma wysyłać tylko \`172.16.50/24\` i \`172.16.51/24\`, które otrzymał od R5 jako BGP. R4 do rdzenia ma wysyłać tylko \`172.16.60/24\`, \`172.16.61/24\` i testowy \`172.16.62/24\`, które otrzymał od R6. Nie chcemy, aby R1 został nieplanowanym tranzytem BGP pomiędzy R2 a R3.
+
+**R1-vSRX — Configuration Mode, whitelist export do CORE**
+
+~~~junos
+set policy-options policy-statement CORE-OUT-CE-A term CE-A from protocol bgp
+set policy-options policy-statement CORE-OUT-CE-A term CE-A from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement CORE-OUT-CE-A term CE-A from route-filter 172.16.51.0/24 exact
+set policy-options policy-statement CORE-OUT-CE-A term CE-A then accept
+set policy-options policy-statement CORE-OUT-CE-A term REJECT-REST then reject
+set protocols bgp group CORE export CORE-OUT-CE-A
+~~~
+
+**R4-vSRX — Configuration Mode, whitelist export do CORE**
+
+~~~junos
+set policy-options policy-statement CORE-OUT-CE-B term CE-B from protocol bgp
+set policy-options policy-statement CORE-OUT-CE-B term CE-B from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement CORE-OUT-CE-B term CE-B from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement CORE-OUT-CE-B term CE-B from route-filter 172.16.62.0/24 exact
+set policy-options policy-statement CORE-OUT-CE-B term CE-B then accept
+set policy-options policy-statement CORE-OUT-CE-B term REJECT-REST then reject
+set protocols bgp group CORE export CORE-OUT-CE-B
+~~~
+
+Wreszcie R2 i R3. Mają przenosić tylko pięć uzgodnionych prefiksów i nie powinny przypadkiem rozgłaszać kolejnych tras. W tym labie możemy użyć wspólnej polityki z dokładnymi prefiksami. Na obu routerach nadal muszą obowiązywać zasady eBGP, m.in. wykrywanie pętli w AS_PATH — policy \`accept\` nie znosi automatycznie wszystkich ograniczeń protokołu.
+
+**R2-vSRX oraz R3-vSRX — Configuration Mode, uruchom ten sam fragment osobno na obu routerach**
+
+~~~junos
+set policy-options policy-statement CORE-TRANSIT term ALLOWED from protocol bgp
+set policy-options policy-statement CORE-TRANSIT term ALLOWED from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement CORE-TRANSIT term ALLOWED from route-filter 172.16.51.0/24 exact
+set policy-options policy-statement CORE-TRANSIT term ALLOWED from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement CORE-TRANSIT term ALLOWED from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement CORE-TRANSIT term ALLOWED from route-filter 172.16.62.0/24 exact
+set policy-options policy-statement CORE-TRANSIT term ALLOWED then accept
+set policy-options policy-statement CORE-TRANSIT term REJECT-REST then reject
+set protocols bgp group CORE import CORE-TRANSIT
+set protocols bgp group CORE export CORE-TRANSIT
+~~~
+
+Dlaczego dopuszczamy testowe 172.16.62.0/24 w samym tranzycie? Aby ten **konkretny prefiks dotarł do R1 od R2 i R3**, gdzie pokażemy prawdziwe odrzucenie import policy. W rzeczywistej sieci filtrowalibyśmy go możliwie blisko źródła i nie przesyłali dalej bez potrzeby.
+
+Nie kończymy jednak konfiguracji eksportu na samym rdzeniu. R1 ma wiedzieć, co wysłać do R5, a R4 — co do R6. W każdym kierunku przekazujemy tylko uzgodnione sieci przeciwnego CE.
+
+**R1-vSRX — Configuration Mode, co wolno przekazać klientowi CE-A R5**
+
+~~~junos
+set policy-options policy-statement CE-A-INCOMING term SERVICES from protocol bgp
+set policy-options policy-statement CE-A-INCOMING term SERVICES from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement CE-A-INCOMING term SERVICES from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement CE-A-INCOMING term SERVICES then accept
+set policy-options policy-statement CE-A-INCOMING term REST then reject
+set protocols bgp group CE-A export CE-A-INCOMING
+~~~
+
+**R4-vSRX — Configuration Mode, co wolno przekazać klientowi CE-B R6**
+
+~~~junos
+set policy-options policy-statement CE-B-INCOMING term SERVICES from protocol bgp
+set policy-options policy-statement CE-B-INCOMING term SERVICES from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement CE-B-INCOMING term SERVICES from route-filter 172.16.51.0/24 exact
+set policy-options policy-statement CE-B-INCOMING term SERVICES then accept
+set policy-options policy-statement CE-B-INCOMING term REST then reject
+set protocols bgp group CE-B export CE-B-INCOMING
+~~~
+
+Po wprowadzeniu przygotowanego zestawu na każdym urządzeniu przeprowadź \`show | compare\`, \`commit check\`, \`commit confirmed 10\` i właściwe post-checki. **Nie zatwierdzaj wszystkich routerów naraz bez kontroli kolejności:** R5/R6 powinny najpierw reklamować własne prefixy, R1/R4 je odebrać, a R2/R3 przenieść je między brzegami.
+
+**R5-vSRX — Operational Mode, oczekiwane ogłoszenie dwóch prefiksów CE-A**
+
+~~~junos
+show route advertising-protocol bgp 192.0.2.1
+show route 172.16.50.0/24 exact
+show route 172.16.51.0/24 exact
+~~~
+
+**R6-vSRX — Operational Mode, oczekiwane ogłoszenie trzech prefiksów CE-B**
+
+~~~junos
+show route advertising-protocol bgp 198.51.100.1
+show route 172.16.60.0/24 exact
+show route 172.16.61.0/24 exact
+show route 172.16.62.0/24 exact
+~~~
+
+**R2-vSRX — Operational Mode, czy górny korytarz przenosi prefiksy obu stron?**
+
+~~~junos
+show bgp summary
+show route protocol bgp
+show route advertising-protocol bgp 10.12.0.1
+show route advertising-protocol bgp 10.24.0.2
+~~~
+
+**R3-vSRX — Operational Mode, drugi niezależny korytarz**
+
+~~~junos
+show bgp summary
+show route protocol bgp
+show route advertising-protocol bgp 10.13.0.1
+show route advertising-protocol bgp 10.34.0.2
+~~~
+
+**Oczekiwany rezultat:** R1 ma możliwość otrzymania wszystkich trzech prefiksów R6 od R2 i R3; R4 otrzymuje dwa prefiksy R5; na R2/R3 trasy z CE-A i CE-B są przenoszone zgodnie z whitelistą. Zanim poprawimy import na R1, testowe 172.16.62.0/24 może być jeszcze widoczne jako kwalifikująca się trasa. **Nie jest to zdalna aplikacja i nie należy pingować tego prefiksu jako dowodu usługi.**
+
+### 8.14.7. Faza 5 — import na R1: Business-B górą, Services-B dołem, testowy prefix odrzucony
+
+Teraz wykorzystamy najważniejsze mechanizmy poznane w części teoretycznej. R1 będzie miał dwie polityki importu. Wspólny filtr \`FILTER-CE-B\` odrzuci 172.16.62.0/24. Następnie \`PREFER-UPPER\` i \`PREFER-LOWER\` nadadzą różne wartości LOCAL_PREF zależnie od peera.
+
+Te konfiguracje pojawiły się już w sekcji 8.13 jako ilustracja. Tutaj są **docelowym wariantem labu** — nie wpisuj ich ponownie, jeśli istnieją już w identycznej formie.
+
+**R1-vSRX — Configuration Mode, wspólny filtr prefixu testowego**
+
+~~~junos
+set policy-options policy-statement FILTER-CE-B term DROP-TEST from route-filter 172.16.62.0/24 exact
+set policy-options policy-statement FILTER-CE-B term DROP-TEST then reject
+set policy-options policy-statement FILTER-CE-B term CONTINUE then next policy
+~~~
+
+**R1-vSRX — Configuration Mode, R2 preferowany dla sieci 172.16.60.0/24**
+
+~~~junos
+set policy-options policy-statement PREFER-UPPER term BUSINESS from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement PREFER-UPPER term BUSINESS then local-preference 200
+set policy-options policy-statement PREFER-UPPER term BUSINESS then accept
+set policy-options policy-statement PREFER-UPPER term SERVICES from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement PREFER-UPPER term SERVICES then local-preference 100
+set policy-options policy-statement PREFER-UPPER term SERVICES then accept
+set policy-options policy-statement PREFER-UPPER term REST then reject
+~~~
+
+**R1-vSRX — Configuration Mode, R3 preferowany dla sieci 172.16.61.0/24**
+
+~~~junos
+set policy-options policy-statement PREFER-LOWER term BUSINESS from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement PREFER-LOWER term BUSINESS then local-preference 100
+set policy-options policy-statement PREFER-LOWER term BUSINESS then accept
+set policy-options policy-statement PREFER-LOWER term SERVICES from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement PREFER-LOWER term SERVICES then local-preference 200
+set policy-options policy-statement PREFER-LOWER term SERVICES then accept
+set policy-options policy-statement PREFER-LOWER term REST then reject
+~~~
+
+**R1-vSRX — Configuration Mode, dokładne łańcuchy importu na obu sąsiadach**
+
+~~~junos
+set protocols bgp group CORE neighbor 10.12.0.2 import [ FILTER-CE-B PREFER-UPPER ]
+set protocols bgp group CORE neighbor 10.13.0.2 import [ FILTER-CE-B PREFER-LOWER ]
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+Przewidujmy wynik. Dla 172.16.60.0/24 ścieżka od R2 ma LOCAL_PREF 200, ścieżka od R3 100, więc R1 powinien preferować górę. Dla 172.16.61.0/24 odwrotnie. Dla 172.16.62.0/24 obie ścieżki zostaną odrzucone zanim dojdą do termów LOCAL_PREF.
+
+**R1-vSRX — Operational Mode, odczyt trzech przypadków**
+
+~~~junos
+show route 172.16.60.0/24 exact extensive
+show route 172.16.61.0/24 exact extensive
+show route 172.16.62.0/24 exact extensive
+show route hidden detail
+show route receive-protocol bgp 10.12.0.2 hidden
+show route receive-protocol bgp 10.13.0.2 hidden
+show bgp summary
+~~~
+
+**Oczekiwany rezultat (niezweryfikowany):** dla 60 aktywny BGP next-hop wskazuje 10.12.0.2, dla 61 — 10.13.0.2; 62 nie jest aktywną trasą i może pozostać widoczne w hidden zgodnie z rzeczywistą retencją BGP. Nie nazywamy hidden „nie przyszło od peera”. Właśnie przeciwnie: może to być dowód, że prefix został otrzymany, ale nie uzyskał pozwolenia na użycie.
+
+Po sprawdzeniu tych wyników potwierdź warunkowy commit. Jeśli oczekiwany wynik nie wystąpił, sprawdź priorytety tras w RIB i istniejące inne źródła — sam LOCAL_PREF nie naprawi np. aktywnej static /5 do tego samego prefiksu.
+
+**R1-vSRX — Configuration Mode, tylko po PASS**
+
+~~~junos
+commit
+~~~
+
+### 8.14.8. Faza 6 — ruch powrotny: R4 musi wiedzieć, którędy odpowiedzieć
+
+To ważny etap, którego łatwo zabraknąć w prostych kursach. Na R1 wybraliśmy dwie różne ścieżki **do R6**. Ale co stanie się z odpowiedzią R6 → R5?
+
+R4 ma dwa BGP paths do prefiksów R5: przez R2 i przez R3. Jeśli odpowie dowolnym korytarzem, ruch może stać się asymetryczny. W zwykłym routerze IP nie zawsze jest to problem. Na sześciu vSRX, gdzie każda maszyna może utrzymywać własne stateful sessions, odpowiedź przez router, który nie widział żądania, może zostać odrzucona.
+
+Dlatego dla podstawowych testów wybierzemy **pary source/destination w sposób, który zapewnia zgodną drogę w obu kierunkach**:
+
+| Przepływ testowy | Forward | Return |
+|---|---|---|
+| \`172.16.50.1 → 172.16.60.1\` | R5–R1–**R2**–R4–R6 | R6–R4–**R2**–R1–R5 |
+| \`172.16.51.1 → 172.16.61.1\` | R5–R1–**R3**–R4–R6 | R6–R4–**R3**–R1–R5 |
+
+Aby tak się stało, R4 musi mieć analogiczny import: preferować **172.16.50.0/24 przez R2**, a **172.16.51.0/24 przez R3**.
+
+**R4-vSRX — Configuration Mode, preferencje powrotne z R2**
+
+~~~junos
+set policy-options policy-statement RETURN-UPPER term BUSINESS-A from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement RETURN-UPPER term BUSINESS-A then local-preference 200
+set policy-options policy-statement RETURN-UPPER term BUSINESS-A then accept
+set policy-options policy-statement RETURN-UPPER term SERVICES-A from route-filter 172.16.51.0/24 exact
+set policy-options policy-statement RETURN-UPPER term SERVICES-A then local-preference 100
+set policy-options policy-statement RETURN-UPPER term SERVICES-A then accept
+set policy-options policy-statement RETURN-UPPER term REST then reject
+~~~
+
+**R4-vSRX — Configuration Mode, preferencje powrotne z R3**
+
+~~~junos
+set policy-options policy-statement RETURN-LOWER term BUSINESS-A from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement RETURN-LOWER term BUSINESS-A then local-preference 100
+set policy-options policy-statement RETURN-LOWER term BUSINESS-A then accept
+set policy-options policy-statement RETURN-LOWER term SERVICES-A from route-filter 172.16.51.0/24 exact
+set policy-options policy-statement RETURN-LOWER term SERVICES-A then local-preference 200
+set policy-options policy-statement RETURN-LOWER term SERVICES-A then accept
+set policy-options policy-statement RETURN-LOWER term REST then reject
+set protocols bgp group CORE neighbor 10.24.0.1 import RETURN-UPPER
+set protocols bgp group CORE neighbor 10.34.0.1 import RETURN-LOWER
+~~~
+
+R4 nie ma tu dodatkowego wspólnego filtra, ponieważ obie \`RETURN\` policies są już kompletnymi whitelistami dwóch prefiksów R5. W rozbudowanej sieci można rozdzielić je na wspólny filtr i polityki preferencji tak jak na R1.
+
+**R4-vSRX — Operational Mode, czy drogę powrotną mamy pod kontrolą?**
+
+~~~junos
+show route 172.16.50.0/24 exact extensive
+show route 172.16.51.0/24 exact extensive
+show bgp summary
+~~~
+
+Jeżeli wyniki pokazują 50 przez R2 i 51 przez R3, możemy rozpocząć właściwe testy end-to-end. Jeśli nie, nie przechodź do fault injection; najpierw sprawdź aktywne trasy i poprawność polityk powrotnych.
+
+### 8.14.9. Faza 7 — akceptacja na routerach CE i pierwsze prawdziwe testy
+
+Dopiero teraz konfigurujemy whitelisty importu na R5 i R6, aby nie pozostawiać niekontrolowanej polityki default-accept.
+
+**R5-vSRX — Configuration Mode, przyjmujemy z R1 tylko dwie sieci CE-B**
+
+~~~junos
+set policy-options policy-statement CE-A-IN term ALLOW from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement CE-A-IN term ALLOW from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement CE-A-IN term ALLOW then accept
+set policy-options policy-statement CE-A-IN term REST then reject
+set protocols bgp group TO-R1 import CE-A-IN
+~~~
+
+**R6-vSRX — Configuration Mode, przyjmujemy z R4 tylko dwie sieci CE-A**
+
+~~~junos
+set policy-options policy-statement CE-B-IN term ALLOW from route-filter 172.16.50.0/24 exact
+set policy-options policy-statement CE-B-IN term ALLOW from route-filter 172.16.51.0/24 exact
+set policy-options policy-statement CE-B-IN term ALLOW then accept
+set policy-options policy-statement CE-B-IN term REST then reject
+set protocols bgp group TO-R4 import CE-B-IN
+~~~
+
+**R5-vSRX — Operational Mode, oczekiwana tabela CE-A**
+
+~~~junos
+show bgp summary
+show route 172.16.60.0/24 exact extensive
+show route 172.16.61.0/24 exact extensive
+show route 172.16.62.0/24 exact extensive
+~~~
+
+Teraz wykonujemy dwa najważniejsze testy. Nie jest to ping z emulowanego PC: **oba CE są routerami i generują ICMP lokalnie**. Wpis \`source\` pozwala wybrać adres biznesowego loopbacku R5.
+
+**R5-vSRX — Operational Mode, ruch przez górny korytarz R2**
+
+~~~junos
+ping 172.16.60.1 source 172.16.50.1 count 5
+traceroute 172.16.60.1 source 172.16.50.1
+~~~
+
+**R5-vSRX — Operational Mode, ruch przez dolny korytarz R3**
+
+~~~junos
+ping 172.16.61.1 source 172.16.51.1 count 5
+traceroute 172.16.61.1 source 172.16.51.1
+~~~
+
+**Oczekiwany wynik (niezweryfikowany):** obie próby ICMP mogą dotrzeć do odpowiedniego loopbacku R6, a routing preferuje różne korytarze. \`traceroute\` w SRX może nie ujawniać wszystkich hopów, jeśli urządzenia nie generują lub nie przepuszczają potrzebnych ICMP TTL exceeded. Dlatego **brak pełnej listy hopów nie jest sam w sobie dowodem awarii BGP**.
+
+Sprawdź również stateful sessions i route/FIB na routerach pośrednich:
+
+**R1-vSRX — Operational Mode, forwarding po dwóch różnych korytarzach**
+
+~~~junos
+show route forwarding-table destination 172.16.60.1
+show route forwarding-table destination 172.16.61.1
+show security flow session
+~~~
+
+**R2-vSRX — Operational Mode, obserwacja ruchu górnego**
+
+~~~junos
+show route 172.16.60.0/24 exact
+show security flow session
+~~~
+
+**R3-vSRX — Operational Mode, obserwacja ruchu dolnego**
+
+~~~junos
+show route 172.16.61.0/24 exact
+show security flow session
+~~~
+
+**R4-vSRX — Operational Mode, droga powrotna i stan sesji**
+
+~~~junos
+show route forwarding-table destination 172.16.50.1
+show route forwarding-table destination 172.16.51.1
+show security flow session
+~~~
+
+**R6-vSRX — Operational Mode, testy odpowiedzi do CE-A**
+
+~~~junos
+ping 172.16.50.1 source 172.16.60.1 count 3
+ping 172.16.51.1 source 172.16.61.1 count 3
+show security zones
+~~~
+
+Wynik pozytywny wymaga połączenia kilku dowodów: sesje BGP są Established; prefiksy są aktywne w odpowiednich RIB; wybrane next-hopy są zgodne z import policy; security pozwala na nową sesję; test ICMP z właściwym source otrzymuje odpowiedź. W tym miejscu mamy **sprawdzony stan odniesienia** — ale dopiero po uruchomieniu labu i uzyskaniu rzeczywistych outputów.
+
