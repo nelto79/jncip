@@ -1,891 +1,744 @@
-# Rozdział 4 — Initial Configuration and System Services
-## Od urządzenia wyjętego z pudełka do zarządzalnego elementu sieci Enterprise
+# Rozdział IV. Pierwsze uruchomienie Junos — od dostępu przez konsolę do bezpiecznie zarządzanego routera
 
-**Ścieżka:** JNCIA-Junos [A] → JNCIS-ENT → JNCIP-ENT  
-**Zakres dokładnie według unified blueprint:** **4.1–4.14 [A]**, **4.15 [LAB]**  
-**Stan merytoryczny:** 17 listopada 2026 · oficjalna dokumentacja Juniper/HPE + scenariusze autorskie  
-**Platformy:** klasyczny Junos na EX/SRX/MX, kontekst Junos OS Evolved; laboratorium referencyjne **vSRX w EVE-NG**.  
-**Status labu:** **PLANNED — nie zweryfikowano runtime**. Żaden przykładowy output w rozdziale nie jest przedstawiany jako rzeczywisty odczyt z Twojego urządzenia.
+**JUNOS Enterprise Routing & Switching • JNCIA-Junos → JNCIS-ENT → JNCIP-ENT**  
+**Unified Blueprint:** 4.1–4.14 [A] + 4.15 [LAB]  
+**Dla kogo:** Network Engineer z około rocznym doświadczeniem, który zna podstawy IP, routera, switcha i VLAN, ale nie musi znać Cisco ani żadnego wcześniejszego egzaminu sieciowego.  
+**Wersja:** 3.0, 20.11.2026  
+**Lab referencyjny:** [DIAMOND-6R](../../labs/reference-diamond-6vsrx/README.md). Do ćwiczeń zarządzania dodamy *opcjonalnie* odizolowany segment administracyjny, bez zmiany sześciu istniejących połączeń danych.  
+**Status:** **PLANNED / NOT RUNTIME VALIDATED.** Komendy są przykładami do sprawdzenia na konkretnym vSRX i release; nie stanowią wyników wykonanych testów.
 
-> **Umowa dydaktyczna:** w Cisco wiesz, jak postawić nowe urządzenie na nogi. Teraz chcemy zrobić to samo na Juniperze, ale zrozumieć każdą decyzję: *dlaczego ten port, skąd system zna godzinę, kto może się zalogować, co zostanie po utracie AAA i kto otrzyma informację o awarii?* Nie wystarczy „commit complete”. Włączony w sieć router ma być **bezpieczny, obserwowalny i możliwy do odzyskania**.
+## Co musi działać, zanim nowy router oddamy administratorowi?
 
-## Prolog: poniedziałek, 08:15 — instalator telefonuje z nowego biura
+Postawiono nowy router R1. Na ekranie konsoli widać nazwę urządzenia i znak zachęty Junos. Router może mieć aktywne interfejsy i poprawną tablicę routingu. Czy jest gotowy do pracy w firmie?
 
-„W szafie stoi nowy Juniper. Kontrolka świeci na zielono. Wpiąłem go do patch panelu, ale nie mogę dostać się przez SSH. Na dwóch switchach widać ten sam domyślny hostname. NOC nie widzi ich w monitoringu. Logi mają niewłaściwą godzinę. Czy mogę już przekazać site do produkcji?”
+Jeszcze nie. Jeżeli tylko jedna osoba zna hasło administracyjne, serwer monitoringu nie widzi urządzenia, jego zegar wskazuje niepoprawną godzinę, a konfiguracja istnieje tylko na lokalnym dysku, to pierwsza poważniejsza awaria może być bardzo trudna do naprawienia. Niewiele pomoże znajomość OSPF czy BGP, jeśli nie możesz bezpiecznie zalogować się na router albo ustalić, co wydarzyło się kilka minut wcześniej.
 
-W Cisco zaczynasz od `show version`, `show run`, `show ip interface brief`, AAA, NTP, syslog, SNMP i kopii konfiguracji. Z Juniperem będziesz myślał o dokładnie **tych samych obowiązkach operacyjnych**, lecz w innych miejscach hierarchii Junos.
+Ten rozdział dotyczy właśnie tej części pracy sieciowej, którą często wykonuje się *przed* uruchomieniem właściwych usług. Będziemy konfigurować urządzenie tak, żeby dało się nim zarządzać, ograniczyć dostęp do uprawnionych osób, otrzymywać informacje o problemach i odzyskać działanie po pomyłce. Nie zaczniemy jednak od dwudziestu komend wklejonych do terminala. Najpierw zrozumiemy, **co każda usługa wnosi do działania sieci**.
 
-Załóżmy, że projekt to dwa piętra biura:
-- dwa przełączniki access EX4400;
-- jeden brzegowy SRX (WAN/security);
-- oddzielna sieć zarządzania;
-- centralny TACACS+/RADIUS, NTP, syslog/SIEM, monitoring;
-- SSH tylko z bastiona;
-- backup konfiguracji i rescue na każdym urządzeniu.
+Z poprzednich dwóch rozdziałów znasz już trzy rzeczy: Junos ma osobny obszar konfiguracji roboczej (*candidate*), zmiany aktywujesz przez *commit*, a sprzętowy lub wirtualny router może przekazywać pakiety niezależnie od tego, czy usługa administracyjna działa prawidłowo. Teraz połączymy te wiadomości w procedurę uruchomienia urządzenia.
 
-Wybór konkretnego modelu, PoE i BOM przećwiczyliśmy w [rozdziale 1, punkcie 1.12](JUNOS_Rozdzial_01_Networking_Fundamentals_i_Enterprise_Portfolio.md). Teraz pozostaje pytanie bardziej niewygodne: **co musi być skonfigurowane, żeby operacje IT mogły takim site'em zarządzać o trzeciej nad ranem?**
+### Jedna topologia, kilka różnych ról
+
+W tej książce używamy DIAMOND-6R, a więc sześciu vSRX w stałym układzie. R5 jest routerem przy sieciach A, R6 przy sieciach B, R1/R4 są brzegami rdzenia, a R2/R3 dają dwie alternatywne drogi.
 
 ~~~mermaid
 flowchart LR
-  ENGINEER["Inżynier / Bastion"] -->|SSH / konsola| OOB["Oddzielna sieć management"]
-  OOB --> EX["EX4400 / me0"]
-  OOB --> SRX["SRX / port właściwy modelowi"]
-  EX -->|NTP| SERVICES["NTP / DNS / Syslog / NMS / AAA"]
-  SRX -->|AAA / telemetry| SERVICES
-  SRX -->|Firewall i WAN| USERS["VLAN-y biura i Internet"]
-  EX -->|Access| USERS
+  R5["R5 CE-A<br/>192.0.2.10/24"] ---|"LAN-A<br/>192.0.2.0/24"| R1["R1 EDGE-A<br/>192.0.2.1/24"]
+  R1 ---|"10.12.0.0/30"| R2["R2 CORE-1"]
+  R1 ---|"10.13.0.0/30"| R3["R3 CORE-2"]
+  R2 ---|"10.24.0.0/30"| R4["R4 EDGE-B<br/>198.51.100.1/24"]
+  R3 ---|"10.34.0.0/30"| R4
+  R4 ---|"LAN-B<br/>198.51.100.0/24"| R6["R6 CE-B<br/>198.51.100.10/24"]
 ~~~
 
-**Co powinieneś zauważyć?** Zwykły ruch klientów, usługi zarządzające oraz dostęp ratunkowy to **trzy różne zależności**. Możesz mieć działające VLAN-y bez sysloga, działający SSH bez NTP i poprawny ping bez możliwości zalogowania się przez TACACS+. Zadaniem initial configuration jest zredukować liczbę takich ukrytych niewiadomych.
+*Rysunek 4.1. Nie zmieniamy żadnego z czterech łączy rdzeniowych. R1–R5 i R4–R6 nadal należą do referencyjnych LAN-A/LAN-B. Pełne adresy interfejsów, loopbacki i nazwy portów: [DIAMOND-6R README](../../labs/reference-diamond-6vsrx/README.md).*
 
-### Mapa podróży — czego chcę Cię nauczyć
+Do samej nauki kont, SSH i rescue wystarczy jedna izolowana instancja R1. Do sprawdzenia logowania sieciowego przyda się R5 jako drugi router lub niewielka Linux VM. Do NTP, syslog, SNMPv3 i archiwizacji potrzebujesz **prawdziwych usług po drugiej stronie**, np. Linux VM jako `LAB-SERVICES`. Sam router nie stworzy nam serwera NTP ani odbiornika syslog tylko dlatego, że go wpisaliśmy do konfiguracji.
 
-W blueprint mamy **15 punktów**, a nie tylko „hostname + root password”. Przejdziemy kolejno: factory defaults (4.1), konfiguracja systemowa (4.2), lokalne konta (4.3), role (4.4), AAA (4.5), interfejsy (4.6), groups (4.7), NTP (4.8), SNMP (4.9), syslog (4.10), archiwizacja (4.11), tracing (4.12), rescue (4.13), zintegrowana weryfikacja (4.14) i pełne laboratorium (4.15).
-
-**Na pamięć:** podstawowe hierarchie `system`, `interfaces`, `routing-options`, `snmp`; różnica `me0/fxp0/irb`; `root-authentication`; `login user/class`; `authentication-order`; `apply-groups`; `system ntp`; `system syslog`; `system archival`; `request system configuration rescue save`.
-
-**Do zrozumienia:** to, że system się uruchamia, nie oznacza, że ma bezpieczny profil startowy; AAA timeout i AAA reject to dwa różne zdarzenia; routing management nie zawsze ma osobny VRF; `show configuration` może nie pokazać wartości odziedziczonych; NTP/syslog/SNMP mają różne drogi i kierunki ruchu; „mam rollback” nie oznacza „mam off-device backup”.
-
-**Do przećwiczenia:** inicjalizacja przez konsolę, druga niezależna sesja administracyjna, RBAC, pomiar RTT do NTP/AAA, wysyłka sysloga, SNMPv3 authPriv z NMS, kontrolowany błąd DNS/NTP/ACL, backup i powrót do rescue — wyłącznie na odizolowanym labie.
+Jeżeli chcesz zbudować **oddzielną sieć administracyjną OOB**, można użyć izolowanego segmentu ćwiczebnego **203.0.113.0/24**, z serwerami `LAB-ADMIN 203.0.113.20` i `LAB-SERVICES 203.0.113.30`. To **opcjonalne rozszerzenie zarządzania**, a nie siódme łącze między routerami DIAMOND-6R. Adres zarządzania R1, numer jego interfejsu OOB i sposób podłączenia do EVE-NG ustalisz **dopiero po sprawdzeniu konkretnego obrazu vSRX**. Nie przypisuj z góry `fxp0` do losowej karty QEMU. Oddzielny segment jest w pełni odizolowany od Internetu i środowiska firmowego.
 
 ---
 
-## Wspólna topologia szkoleniowa DIAMOND — obowiązująca adresacja
+## 4.1. Factory-default state — dlaczego dwa nowe Junipery mogą wyglądać zupełnie inaczej? [A]
 
-**Źródło prawdy:** [DIAMOND — Mermaid + pełne adresy obu końców każdego łącza](../../labs/reference-diamond-4vsrx-2vpcs/DIAMOND_TOPOLOGY.md) oraz [tabela interfejsów i loopbacków](../../labs/reference-diamond-4vsrx-2vpcs/README.md). Diagram poniżej jest ten sam we wszystkich rozdziałach — **4×vSRX + 2×VPCS, sześć segmentów**.
+### Urządzenie „fabryczne” nie zawsze oznacza pusty system
 
-```mermaid
-flowchart LR
-  PCA["PC-A / VPC1<br/>VPCS<br/>Gateway: 192.0.2.1"]
-  R1["R1-vSRX<br/>lo0.0: 10.255.255.1/32"]
-  R2["R2-vSRX<br/>lo0.0: 10.255.255.2/32"]
-  R3["R3-vSRX<br/>lo0.0: 10.255.255.3/32"]
-  R4["R4-vSRX<br/>lo0.0: 10.255.255.4/32"]
-  PCB["PC-B / VPC2<br/>VPCS<br/>Gateway: 198.51.100.1"]
+Jeżeli rozpakujesz nowy router i switch tego samego producenta, możesz oczekiwać podobnego menu. Ale na jednym urządzeniu producent mógł przygotować uproszczoną konfigurację na potrzeby pierwszego połączenia, a na drugim jedynie dostęp konsolowy. Dotyczy to również rodziny Juniper: EX, MX, SRX i vSRX służą do różnych zadań.
 
-  PCA ---|"LAN-A · 192.0.2.0/24<br/>PC-A eth0: 192.0.2.10/24<br/>R1 ge-0/0/2.0: 192.0.2.1/24"| R1
-  R1 ---|"P2P-12 · 10.12.0.0/30<br/>R1 ge-0/0/0.0: 10.12.0.1/30<br/>R2 ge-0/0/0.0: 10.12.0.2/30"| R2
-  R1 ---|"P2P-13 · 10.13.0.0/30<br/>R1 ge-0/0/1.0: 10.13.0.1/30<br/>R3 ge-0/0/0.0: 10.13.0.2/30"| R3
-  R2 ---|"P2P-24 · 10.24.0.0/30<br/>R2 ge-0/0/1.0: 10.24.0.1/30<br/>R4 ge-0/0/0.0: 10.24.0.2/30"| R4
-  R3 ---|"P2P-34 · 10.34.0.0/30<br/>R3 ge-0/0/1.0: 10.34.0.1/30<br/>R4 ge-0/0/1.0: 10.34.0.2/30"| R4
-  R4 ---|"LAN-B · 198.51.100.0/24<br/>R4 ge-0/0/2.0: 198.51.100.1/24<br/>PC-B eth0: 198.51.100.10/24"| PCB
+**Factory-default configuration** to ustawienia przygotowane jako punkt startowy. Nie należy jej mylić z przypadkową konfiguracją po poprzednim właścicielu ani z szablonem wirtualnej maszyny EVE-NG, który mógł zostać już wcześniej zmodyfikowany.
 
-  classDef vsrx fill:#e6f1fc,stroke:#1565a6,stroke-width:2px,color:#13344f;
-  classDef vpcs fill:#e8f5e9,stroke:#2f7d4a,stroke-width:1.5px,color:#17422a;
-  class R1,R2,R3,R4 vsrx;
-  class PCA,PCB vpcs;
-```
+Przykładowo niektóre fizyczne SRX mają w stanie fabrycznym przygotowane strefy `trust`/`untrust`, DHCP i inne elementy ułatwiające pierwsze uruchomienie. Switch EX może mieć odmienny sposób uruchamiania portu management. Nasz vSRX może nie posiadać tych samych fabrycznych połączeń ani mapowania interfejsów.
 
-W tym rozdziale konfigurujemy przede wszystkim **R1-vSRX z DIAMOND** (nazwę urządzenia, konta, dostęp i usługi), zachowując jego **data-plane z kanonicznego diagramu**. Dla NTP, TACACS+, SNMPv3 i backupów potrzebny jest jednak **osobny segment OOB / dodatkowy serwer**, którego sześciowęzłowy DIAMOND sam nie zawiera. Dlatego oznaczone niżej przykłady usług management stanowią **niezależny rozszerzony lab**, z odrębną podsiecią `172.31.240.0/24`; **nie dodawaj tych adresów do `ge-0/0/x` bazowego diamentu ani nie traktuj ich jako siódmego połączenia**. Port `fxp0` jest zależny od obrazu, a dostęp nie jest potwierdzony runtime.
+Dlatego pierwsze uruchomienie zaczyna się od **rozpoznania rzeczywistego stanu**, nie od założenia „wszystko jest puste”.
 
----
-
-## 4.1. Factory-default state — czy „z pudełka” znaczy to samo na SRX i EX? [A]
-
-### 4.1.1. Pierwszy haczyk: jeden producent, wiele różnych punktów startowych
-
-Wyobraź sobie, że pracownik remote hands przysyła zdjęcie przodu urządzenia i pyta: „Jakie IP ma Juniper domyślnie?”. Jeśli odpowiesz od razu `192.168.1.1`, możesz popełnić błąd jeszcze przed otwarciem PuTTY.
-
-**SRX300 z typową fabryczną konfiguracją branch** i **EX4400 przygotowany do pierwszego uruchomienia** to nie identyczne profile bezpieczeństwa:
-
-- Dla **SRX300** dokumentacja sprzętowa opisuje fabryczny układ `trust/untrust`; port WAN `ge-0/0/0` ma inną rolę niż porty LAN `ge-0/0/1..6`, połączone przez `irb.0` ze stanem usługi DHCP, z fabrycznym adresem `192.168.1.1/24`. To **opis określonego modelu i obrazu domyślnego**, nie uniwersalna obietnica dla każdej gałęzi SRX.
-- Dla **EX4400** oficjalny Quick Start wskazuje dedykowany port management **`me0`** oraz pierwszą konfigurację przez console. Sprawdzasz, czy port ma fabryczne DHCP, czy działa provisioning/ZTP, a nie zgadujesz konkretny adres IP.
-- Dla **vSRX w EVE-NG** zachowanie startowe zależy od obrazu, sposobu uruchomienia i mapowania wirtualnych NIC. Wcześniejszy snapshot może już zawierać konta, routing lub policies — dlatego **laboratoryjny vSRX nie jest automatycznie stanem factory-default**.
-- Na części nowych platform **Junos OS Evolved** zmieniają się reguły początkowego logowania i zachowanie systemu. Nie przejmuj na ślepo procedury starego SRX300.
-
-**Most z Cisco:** to ta sama pułapka, gdy ktoś miesza fabryczną konfigurację Catalyst 9300, Cisco Business, ISR i FTD. Nazwa producenta nie jest specyfikacją domyślnego IP ani polityki dostępu.
-
-Źródła producenta: [SRX300 — Configuring Junos OS](https://www.juniper.net/documentation/us/en/hardware/srx300/topics/topic-map/srx300-configuring-junos.html), [EX4400 — initial configuration](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html).
-
-### 4.1.2. Co naprawdę oznacza fabryczne logowanie `root`?
-
-W instrukcjach wielu klasycznych urządzeń Juniper znajdziesz informację o początkowym logowaniu `root` **z lokalnej konsoli bez ustawionego hasła**. To okno do pierwszej konfiguracji, **nie stan, w którym wolno pozostawić sprzęt w produkcji**.
-
-**Nie zakładaj, że „root bez hasła” działa przez SSH.** Na przykład nowe platformy Junos OS Evolved mogą od razu blokować zdalne logowanie root. W praktycznym rolloutcie dostęp konsolowy i prawidłowy kanał zarządzania muszą być zaplanowane, zanim aktywujesz zdalne usługi.
-
-Na Cisco root w tej formie nie występuje w IOS XE CLI; łatwiej myśleć o lokalnym administracyjnym dostępie console przed konfiguracją AAA. Różnica Junos: **`root-authentication`** jest elementem hierarchii, a hasło root często jest wymagane do pierwszego `commit` na minimalnym systemie.
-
-**Urządzenie: LAB-SRX01 — Operational Mode (wyłącznie odczyt stanu, jeśli już jesteś w CLI)**
+**R1-vSRX — Operational Mode, bezpieczna inspekcja przed pierwszą zmianą**
 
 ~~~junos
 show version
 show chassis hardware
-show configuration | display set
 show interfaces terse
+show configuration | display set
+show system commit
 show system alarms
 ~~~
 
-Wyjściem z tego kroku nie jest „wykonano `show`”, lecz odpowiedzi: **jaki model, jaki Junos, jakie interfejsy, co jest skonfigurowane i czy urządzenie jest na pewno świeże?**
+`show version` pomaga zidentyfikować wersję Junos i model. `show chassis hardware` pokazuje dostępne informacje o platformie (na vSRX są to informacje wirtualne). `show interfaces terse` pozwala sprawdzić faktyczne nazwy portów. Odczyt konfiguracji odpowiada na pytanie, co zostało już zapisane. Historia commit pomoże zauważyć, czy urządzenie było wcześniej zmieniane.
 
-### 4.1.3. Zero-touch provisioning nie jest pustą konfiguracją
+Nie publikuj całego `show configuration` w publicznym repozytorium. Mogą się w nim znajdować adresy management, zakodowane hasła lub inne dane wrażliwe.
 
-W nowoczesnym campie access możesz spotkać **ZTP/PnP/Mist onboarding**. Nowy EX podłączony do właściwej sieci może pobrać informacje potrzebne do zarządzania i konfiguracji z infrastruktury. Jeżeli bez sprawdzenia włożysz taki switch do cudzej sieci DHCP, możesz przypadkowo uruchomić proces, którego nie planowałeś.
+### Co z kontem root?
 
-**Gotcha:** `factory-default` to nie synonim „zero procesu w tle”. Właśnie dlatego pierwszy test i instalacja powinny odbywać się w **kontrolowanej sieci provisioningowej lub przez konsolę**, z wiedzą o polityce Mist/ZTP.
+W wielu scenariuszach pierwsze uruchomienie wymaga skonfigurowania uwierzytelniania użytkownika `root`. Jest to konto o najwyższych uprawnieniach systemowych. W zależności od sprzętu i wersji sposób pierwszego logowania może być różny; nie zakładaj uniwersalnego pustego hasła dla każdego urządzenia Juniper.
 
-Na Cisco analogią jest PnP/ZTP na przełącznikach Catalyst. Nie traktuj jednak protokołów i formatów ofert DHCP jako identycznych.
+Pierwsze ważne rozróżnienie to **root przez konsolę** i **root przez SSH**. Są to różne ścieżki dostępu, dla których mogą obowiązywać odmienne zasady. To, że możesz wejść do urządzenia jako root przez konsolę, nie oznacza, że jego SSH powinno dopuszczać ten sam login.
 
-### 4.1.4. `load factory-default` kontra wymazywanie urządzenia
+W rozdziale 4.3 utworzymy osobne konto administratora. Dopiero kiedy przetestujemy je przez nową sesję, rozważymy ograniczenie logowania root przez SSH.
 
-Mamy dwa zupełnie różne cele:
+### Czy powrót do factory default i „wymazanie” urządzenia to to samo?
 
-1. **Wczytać fabryczny szablon** do candidate, aby zobaczyć, jaka konfiguracja byłaby po zatwierdzeniu.
-2. **Wyzerować sprzęt do przekazania, zwrotu lub ponownego użycia**, usuwając wrażliwe dane, konta i lokalne pliki zgodnie z procedurą sanitizacji.
+Nie. `load factory-default` jest mechanizmem wczytania fabrycznej konfiguracji do edytora; wymaga dalszego przygotowania i zatwierdzenia. `request system zeroize` to osobna, znacznie bardziej destrukcyjna operacja związana z czyszczeniem danych i konfiguracji. Takie działania mają różne konsekwencje na urządzeniu i nie powinny być traktowane jako synonimy.
 
-Polecenie **`load factory-default`** jest operacją na candidate, którą można porównać przed commit. Nie należy jej utożsamiać z pełną procedurą sanitizacji. W oficjalnym przewodniku EX4400 producent zauważa, że po `load factory-default` hasło root może zostać zachowane i procedura EZsetup nie musi ponownie wystartować.
+**Nie wykonujemy żadnej z tych operacji na istniejącym labie ani na urządzeniu firmowym.** Do nauki nowego systemu lepiej przygotować świeżą maszynę wirtualną i zrobić jej zewnętrzny snapshot.
 
-Polecenia typu **`request system zeroize`** są destrukcyjne, a ich dokładny zakres i warianty zależą od platformy i wydania. **Nie zamieszczamy ich jako poleceń do automatycznego uruchomienia w naszym labie.** W produkcji mogą wywołać utratę zarządzania, plików, kluczy i konfiguracji.
+### A jeśli urządzenie próbuje samo pobrać konfigurację?
 
-**Urządzenie: LAB-SRX01 — Configuration Mode (wyłącznie ANALIZA składni, nie zatwierdzaj bez izolowanego labu i konsoli)**
+Niektóre modele i wdrożenia obsługują **Zero-Touch Provisioning (ZTP)**. To proces automatycznego pobrania ustawień lub wykonania pierwszych etapów konfiguracji przez odpowiednią infrastrukturę, np. z usług sieciowych. ZTP nie oznacza „braku konfiguracji”; może oznaczać wręcz, że urządzenie rozpoczęło automatyczne przygotowanie.
 
-~~~junos
-load factory-default
-show | compare
-~~~
+Nie podłączaj nowego lub resetowanego sprzętu do niezweryfikowanej sieci DHCP/ZTP, jeżeli nie wiesz, jakie opcje dostanie i co pobierze. W naszym labie używamy kontrolowanego, izolowanego środowiska.
 
-Jeśli nie masz absolutnej pewności, że candidate należy wyłącznie do Ciebie i jest to izolowany lab, **nie wykonuj tego ćwiczenia**. Po obejrzeniu diffu wróć do poprzedniej candidate tylko w kontrolowanym środowisku. Nie wykonuj przypadkowego `commit`.
+**Wniosek z pierwszej lekcji:** zanim wprowadzisz pierwsze `set`, musisz znać urządzenie, wersję, aktywną konfigurację, interfejsy i dostęp ratunkowy. Dopiero wtedy wiesz, od którego miejsca zaczynasz.
 
-### 4.1.5. Pułapka wersji: domyślne `netconf ssh` może zniknąć
-
-Dokumentacja SRX300 podaje bardzo konkretną zmianę: **począwszy od Junos OS 25.2R1 fabryczna konfiguracja nie zawiera już automatycznie `system services netconf ssh`**. Czyli automatyzacja, która zakłada NETCONF od pierwszego startu na każdym SRX300, może przestać działać, mimo że samo SSH nadal działa.
-
-**Urządzenie: LAB-SRX01 — Operational Mode**
-
-~~~junos
-show version
-show configuration system services | display set
-~~~
-
-Nie próbuj rozwiązywać nieobecnego NETCONF przez „otwórz wszystkie porty”. Najpierw sprawdź, czy usługa jest włączona, który interfejs/strefa ją dopuszcza i czy rzeczywiście chcesz udostępniać NETCONF do narzędzia automatyzacyjnego.
-
-**Do zapamiętania:** factory defaults są **per model i per release**. **Do przećwiczenia:** porównaj output twojego vSRX z dokumentacją dokładnego PID/obrazu. 
+**Dokumentacja:** [SRX initial configuration](https://www.juniper.net/documentation/us/en/hardware/srx300/topics/topic-map/srx300-configuring-junos.html), [EX4400 initial configuration](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html).
 
 ---
 
-## 4.2. Initial configuration — tożsamość, bezpieczny dostęp i management [A]
+## 4.2. Initial configuration — jak nadać routerowi tożsamość i nie stracić dostępu? [A]
 
-### 4.2.1. Hostname to nie ozdoba: od niego zależy obsługa P1
+### Hostname nie przesyła pakietów, ale jest ważny dla ludzi
 
-W incydencie użytkownik opisuje problem lokalizacji „FRA-Office-2”, ale monitorowanie pokazuje trzy elementy `router`. Czy w logach, alertach i archiwach konfiguracji rozpoznasz właściwą lokalizację? Zły hostname nie zatrzyma od razu BGP, ale **może wydłużyć outage**, bo SOC/NOC stracą wiarygodną identyfikację urządzenia.
+Na naszej topologii wszystkie urządzenia mają konkretne role: R1 jest EDGE-A, R2 górnym routerem rdzenia, R3 dolnym. W środowisku klienta nazwa hosta zwykle zawiera również lokalizację i funkcję. Bez niej łatwo pomylić urządzenia, szczególnie przy pracy przez kilka okien SSH.
 
-W Cisco zwykle konfigurujesz `hostname`, `ip domain-name`, DNS oraz NTP. W Junos naturalnym miejscem jest **`system`**.
+W Junos nazwę określa ustawienie `system host-name`. Zróbmy najpierw tylko tę zmianę na izolowanym R1.
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], po potwierdzeniu izolacji**
-
-~~~junos
-set system host-name LAB-SRX01
-set system domain-name lab.example
-set system time-zone Europe/Warsaw
-set system name-server 172.31.240.53
-~~~
-
-**Komentarz dydaktyczny:** `lab.example` to domena dokumentacyjna; serwer DNS `172.31.240.53` **jest przykładem** i nie musi istnieć w Twoim labie. Dodanie adresu DNS w konfiguracji **nie stworzy serwera DNS**. Jeśli serwis DNS ma być testowany, uruchom go w topologii.
-
-**Most z Cisco:**
-- `hostname SITE-EX01` ↔ `set system host-name SITE-EX01`;
-- `ip name-server` ↔ `set system name-server`;
-- `clock timezone` i konfiguracja NTP ↔ `set system time-zone` i `system ntp`.
-Nie jest to kopiowanie 1:1: systemy różnią się zakresem CLI, obsługą strefy czasowej i sposobem zasilania usług z DNS.
-
-### 4.2.2. Dwie bramy: routowana sieć użytkowników i sieć zarządzania
-
-Wyobraź sobie EX4400 jako L3 access switch. Ma interfejsy `irb` dla VLAN-ów użytkowników, ale również dedykowane **`me0`** na tylnym panelu, przeznaczone do OOB management. Z drugiej strony vSRX może eksponować **`fxp0`**, a część innych platform używa innych nazw interfejsów zarządzania.
-
-**Pułapka:** sam fakt użycia `me0` lub `fxp0` **nie dowodzi**, że urządzenie ma niezależną routing instance dla zarządzania. Możliwe jest współdzielenie domyślnej tablicy; w niektórych projektach konfiguruje się **`system management-instance`** i tablicę `mgmt_junos.inet.0`. Zmiana tego zachowania może odciąć SSH, NTP, syslog, TACACS+ i backup.
-
-Dla nowego site ustalamy przed wpisaniem pierwszego `set interfaces`:
-- **adres i maskę** interfejsu OOB;
-- **gateway i routing instance**, jeśli potrzebna;
-- **skąd przyjdzie SSH** i jak będzie filtruje dostęp do RE;
-- **którędy wychodzi AAA/NTP/syslog/SNMP/archiwizacja**;
-- czy bastion/monitoring ma fizyczną drogę do urządzenia po awarii campus/core.
-
-~~~mermaid
-flowchart LR
-  ADMIN["Bastion 172.31.240.20"] --> SWITCH["OOB switch/segment 172.31.240.0/24"]
-  SWITCH --> SRX["LAB-SRX01\nfxp0.0 172.31.240.10"]
-  SWITCH --> SVR["LAB-SERVICES\n172.31.240.30"]
-  SWITCH --> GW["OOB gateway 172.31.240.1"]
-  SRX -. "niezależna płaszczyzna ruchu" .-> DATA["ge-0/0/x\ntraffic/firewall"]
-~~~
-
-**To jest ilustracja docelowego labu, nie odkryta automatycznie topologia EVE-NG.** Przed wdrożeniem potwierdź mapowanie QEMU NIC i obecność `fxp0`.
-
-### 4.2.3. Dwie możliwe ścieżki konfiguracji OOB — nie mieszaj ich w jednej zmianie
-
-Jeśli urządzenie i wydanie rzeczywiście używają `fxp0.0` jako zarządzania oraz **domyślnej tablicy `inet.0`**, możesz ustawić adres w `interfaces` i trasę do sieci zarządzania przez właściwy gateway. Ale jeśli włączono **`management-instance`**, potrzebujesz odpowiedniego routing context dla ruchu OOB.
-
-**Wariant A — LAB-SRX01, klasyczny vSRX z `fxp0.0` i bez dedykowanej management-instance; Configuration Mode [edit]**
+**R1-vSRX — Operational Mode, wejście do konfiguracji**
 
 ~~~junos
-set interfaces fxp0 unit 0 family inet address 172.31.240.10/24
+configure private
 ~~~
 
-To wystarczy do komunikacji z bastionem i serwerami **na tej samej podsieci**. Dla ruchu poza podsiecią potrzebujesz świadomie zaprojektowanej trasy (np. statycznej w właściwej tablicy), a nie „magicznego default gateway”.
-
-**Wariant B — EX4400 z portem OOB `me0`; Configuration Mode [edit], przykład osobnego urządzenia**
+**R1-vSRX — Configuration Mode [edit private], ustawienie nazwy**
 
 ~~~junos
-set interfaces me0 unit 0 family inet address 172.31.240.11/24
-~~~
-
-**Nigdy nie wklejaj obu wariantów do tego samego urządzenia** — są odpowiednie dla różnych platform. Jeśli fabrycznie masz na `me0.0` klienta DHCP, przy przejściu na adres statyczny najpierw sprawdź jego konfigurację i usuń sprzeczne elementy zgodnie z planem. Jeśli używasz **Virtual Chassis**, interfejs zarządzania może mieć postać **`vme`**, więc przeczytaj dokumentację topologii.
-
-### 4.2.4. Root password i SSH: kolejność ma znaczenie
-
-Znasz z Cisco sytuację, w której nowy router ma brakującego lokalnego użytkownika, źle ustawione `aaa new-model` albo VTY ACL. W Junos równie łatwo doprowadzić do lockout, jeśli zaczynasz od zakazu root SSH, zanim sprawdzisz drugą działającą metodę logowania.
-
-**Bezpieczna kolejność:**
-1. Konsola/OOB i pełna identyfikacja urządzenia.
-2. Ustawienie hasła root i osobnego konta administratora.
-3. Włączenie SSH na właściwych interfejsach i w odpowiednich strefach/filtrach.
-4. Test NOWEJ sesji SSH z bastiona, nie tylko utrzymanie starej sesji.
-5. Ograniczenie zdalnego login root i usunięcie zbędnych serwisów.
-6. Zapisanie rescue **dopiero po weryfikacji całości**.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], ustawienie hasła root z interaktywnym promptem**
-
-~~~junos
-set system root-authentication plain-text-password
-~~~
-
-System poprosi o hasło i potwierdzenie, nie wpisuj go jako dosłownego fragmentu w publicznym GitHubie. Hasło zostanie zapisane w konfiguracji w formie hasha. **Nie używaj `encrypted-password` z hasłem podanym zwykłym tekstem** — ta opcja oczekuje już poprawnie zaszyfrowanej wartości i może skutkować utratą logowania.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], udostępnienie SSH pod warunkiem prawidłowego management access**
-
-~~~junos
-set system services ssh
-set system services ssh root-login deny
-~~~
-
-**Uwaga:** na SRX samo `set system services ssh` nie zawsze wystarczy. Jeżeli połączenie przychodzi do interfejsu w security zone, musisz odpowiednio skonfigurować **`host-inbound-traffic system-services ssh`** (a do tego filtering i routing). Dla dedykowanego `fxp0` model ochrony może być inny. Zwróć uwagę również na fakt, że same SSH i NETCONF/SSH to osobne usługi w hierarchii.
-
-**Ważna granica bezpieczeństwa:** powyższe ustawienie `root-login deny` ma sens dopiero **po** działającym osobnym koncie administracyjnym. W labie możesz odroczyć tę linijkę do punktu 4.3 i końcowego prechecku.
-
-Źródła: [root-authentication](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/root-authentication-edit-system.html), [EX4400 Quick Start](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html), [SSH root-login](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/ssh-edit-system.html).
-
-### 4.2.5. Commit to dopiero początek testu
-
-W rozdziale 3 omawialiśmy `show | compare`, `commit check` i `commit confirmed`. W initial setup jest jeszcze jeden etap: przetestuj **zalogowanie na nowe konto z nowego klienta**, ponieważ stara sesja console/SSH nie dowodzi sprawności nowej konfiguracji.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], dopiero po ustawieniu działającego konta w 4.3**
-
-~~~junos
+set system host-name R1-vSRX
 show | compare
 commit check
 commit confirmed 5
 ~~~
 
-**Haczyk:** po `commit confirmed` **nie uruchamiaj ponownie `commit check` tylko z przyzwyczajenia** — na Junos może to potwierdzić oczekujący commit i wyłączyć timer rollback. Sprawdzaj stan **operacyjnie** (`run show system commit`) i realnym testem usługi; dopiero potem świadomie potwierdź commit.
+Teraz sprawdź z osobnej sesji, czy system wyświetla nową nazwę. Dopiero potem potwierdź zmianę w edytorze przez `commit`. Pamiętasz z rozdziału III, że **nie uruchamiamy kolejnego `commit check` podczas oczekującego `commit confirmed`**, ponieważ może to potwierdzić warunkową zmianę.
 
----
-
-## 4.3. Konta użytkowników lokalnych — nie zostawiaj jednego wspólnego admina [A]
-
-### 4.3.1. Dlaczego `root` nie powinien być Twoim codziennym loginem
-
-Masz trzy osoby w zespole, a wszystkie logują się na `root`. Incydent: ktoś zmienił routing policy i nie wiadomo kto. W logu widzisz jedynie jedno konto. To problem nie tylko security, ale także **operacyjnego przypisania odpowiedzialności**.
-
-W Cisco tworzysz lokalne `username ... privilege 15` albo pracujesz z AAA. W Junos podstawowy obiekt to **`system login user`**, a zakres uprawnień daje **login class** (rozdział 4.4). Na urządzeniach produkcyjnych najlepiej mieć **osobiste konta**, centralne AAA oraz **kontrolowane konto break-glass**, dostępne gdy sieć zarządzania/AAA jest niedostępna.
-
-### 4.3.2. Tworzenie użytkownika krok po kroku
-
-Chcemy dwóch kont w labie: `labadmin` do pełnej administracji i `nocview` do obserwacji. Pierwsze jest odpowiednikiem indywidualnego uprzywilejowanego użytkownika Cisco; drugie później otrzyma login class ograniczającą uprawnienia.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], konta laboratoryjne z hasłami wpisanymi interaktywnie**
+**R1-vSRX — Operational Mode, osobna sesja: post-check**
 
 ~~~junos
-set system login user labadmin full-name "Junos Lab Administrator"
-set system login user labadmin class super-user
-set system login user labadmin authentication plain-text-password
-set system login user nocview full-name "NOC Read Only"
-set system login user nocview class read-only
-set system login user nocview authentication plain-text-password
+show configuration system host-name
+show system uptime
+show system commit
 ~~~
 
-W trakcie `plain-text-password` CLI poprosi o sekret i potwierdzenie. **Nie umieszczaj przykładowego prawdziwego hasła w pliku Markdown**, nawet jeśli używasz `lab`. Hasło w logach, terminal scrollback i GitHub jest później trudne do usunięcia.
-
-Przed commit sprawdź, czy nie ma konfliktów i czy nie nadpisałeś cudzych kont. Po zatwierdzeniu przeprowadź **nową sesję** osobno dla obu użytkowników.
-
-**Urządzenie: LAB-SRX01 — Operational Mode, weryfikacja po commit i teście logowania**
+**R1-vSRX — Configuration Mode [edit private], tylko po pozytywnym teście**
 
 ~~~junos
-show configuration system login | display set
-show system users
-show log messages | match "login|sshd"
+commit
 ~~~
 
-Wynik `show configuration` może wyświetlać zaszyfrowane elementy kont; nie kopiuj pełnego outputu do publicznego repo ani ticketu z szerokim dostępem.
+To mała zmiana, lecz ustanawia nawyk: **każdy commit ma cel, pre-check i post-check**, nawet kiedy jego ryzyko jest niewielkie. **Uwaga przy zupełnie świeżym urządzeniu:** Junos może wymagać ustawienia `system root-authentication`, zanim przyjmie pierwszy commit. Jeśli go jeszcze nie ma, wykonaj interaktywny krok z ustawieniem root z §4.15 **przed** zatwierdzeniem hostname; nie traktuj błędu walidacji jako awarii CLI.
 
-### 4.3.3. SSH keys — zamiast wklejać hasła do skryptów
+### Jaka jest różnica między hostname, domain-name a DNS server?
 
-W środowisku automatyzacji zamiast hasła w skrypcie wolisz **klucz publiczny** użytkownika z ograniczonymi uprawnieniami. Junos dopuszcza różne typy kluczy; ich wsparcie zależy od modelu, polityki kryptograficznej, FIPS i wydania.
+`host-name` to nazwa samego urządzenia. `domain-name` to domena, np. `lab.example`, która może być używana do budowania pełnych nazw systemowych. `name-server` wskazuje serwer DNS, od którego router może uzyskać odpowiedzi na zapytania o nazwy.
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], przykład z jawnym kluczem PUBLICZNYM (nie klucz prywatny)**
+Wiele początkujących osób traktuje te trzy pola jako odmiany jednego ustawienia. Ale wyobraź sobie, że ustawiłeś hostname R1 i domenę lab.example, a zapomniałeś skonfigurować serwer DNS albo nie ma do niego routingu. Router będzie miał poprawną nazwę, ale może nie umieć rozwiązać nazwy `ntp.lab.example` na adres IP.
+
+**R1-vSRX — Configuration Mode [edit private], przykład tożsamości laboratorium**
 
 ~~~junos
-set system login user labadmin authentication ssh-ed25519 "ssh-ed25519 AAAA...TU-WKLEJ-ZWERYFIKOWANY-KLUCZ-PUBLICZNY..."
-~~~
-
-**To nie jest kompletny działający klucz** — przykład pokazuje miejsce i strukturę. Nie commituj tekstu z wielokropkiem. W realnym labie wklej poprawny własny **public key** i sprawdź, czy dany release wspiera `ssh-ed25519`.
-
-Alternatywnie możesz użyć mechanizmu `load-key-file` do pobrania klucza publicznego z wcześniej dostępnego pliku. To lepsze niż kopiowanie długiego klucza z terminala, ale wymaga wiarygodnego źródła i sprawdzenia zawartości.
-
-**Gotcha:** **klucz publiczny** zapisany w Junos nie nadaje uprawnień sam z siebie. O tym, co użytkownik może zrobić, decyduje jego **class** i odpowiednie policy uprawnień.
-
-### 4.3.4. Kiedy można wyłączyć login root przez SSH?
-
-Dopiero gdy:
-- `labadmin` ma poprawne hasło lub klucz i odpowiadającą mu klasę;
-- SSH jest osiągalny z bastiona i nowa sesja rzeczywiście loguje się na `labadmin`;
-- istnieje metoda awaryjna console/OOB;
-- nie jesteś w środku niepotwierdzonego `commit confirmed` z ryzykiem utraty dostępu.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], hardening po pomyślnym teście nowego administratora**
-
-~~~junos
-set system services ssh root-login deny
-show | compare
-~~~
-
-Następnie stosujesz test `commit confirmed` oraz weryfikujesz **nową sesję**, zanim zatwierdzisz. Nie odcinaj sobie ostatniej metody administracji.
-
-**Do zapamiętania:** root password, individual login, login class i centralne AAA to **cztery odrębne elementy**, nawet jeśli w codziennym języku nazywamy wszystko „logowaniem”.
-
-Źródła: [Junos User Accounts](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-user-accounts.html), [Root Password](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-root-password.html).
-
-
-
----
-
-## 4.4. Login classes — skoro login działa, dlaczego komenda jest zabroniona? [A]
-
-### 4.4.1. „Mogę się zalogować, ale nie mogę zrobić show configuration”
-
-Pomyśl o budynku przemysłowym. Jedna karta wejściowa otwiera recepcję, inna serwerownię, a przepustka administratora otwiera szafę i pozwala wymienić zasilacz. Fakt, że **bramka rozpoznała kartę**, nie oznacza, że możesz wejść do każdego pomieszczenia.
-
-Tak samo w Junos: **authentication** odpowiada na pytanie „kim jesteś?”, a **authorization** — „co wolno Ci robić?”. Lokalnie rolę i uprawnienia wyznacza **login class**, zdalny TACACS+/RADIUS może dostarczać dodatkowe atrybuty zależne od integracji.
-
-**Most z Cisco:** zwykłe `username noc privilege 1` kontra `privilege 15` i TACACS+ command authorization. Jednak Junos nie sprowadza uprawnień do jednego numeru 0–15. Ma klasy i **permission flags**, a także mechanizmy dopuszczania/odmawiania konkretnych komend i gałęzi konfiguracji.
-
-### 4.4.2. Cztery klasy, które powinieneś rozpoznawać bez Google
-
-Zanim stworzysz własną klasę, zrozum cztery wbudowane:
-- **`super-user` / `superuser`** — administracja z pełnym zakresem uprawnień według systemu i wydania;
-- **`operator`** — możliwość wykonywania typowych działań operacyjnych, m.in. clear, network, reset, trace, view; to **nie** znaczy to samo co read-only;
-- **`read-only`** — ograniczona obserwacja;
-- **`unauthorized`** — brak użytecznych uprawnień CLI.
-
-W praktyce do NOC L1 możesz chcieć **mniej niż operator**, bo operator potrafi wykonać niektóre działania destrukcyjne. Czy osoba odpowiedzialna tylko za obserwację powinna móc czyścić sesje lub resetować statystyki? To decyzja bezpieczeństwa i change management.
-
-**Urządzenie: LAB-SRX01 — Operational Mode, sprawdzenie własnych uprawnień**
-
-~~~junos
-show cli authorization
-show system users
-~~~
-
-Po zalogowaniu jako `labadmin` i `nocview` porównaj wyniki. Nie zgaduj, co oznacza read-only na konkretnej platformie — pokaż dowód.
-
-### 4.4.3. Własna klasa bez przypadkowego przyznania pełnego dostępu
-
-Tworzymy `LAB-NOC`, która może wyświetlać informacje, ale nie ma dostępu do typowych operacji administracyjnych.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit]**
-
-~~~junos
-set system login class LAB-NOC permissions view
-set system login class LAB-NOC idle-timeout 15
-set system login user nocview class LAB-NOC
-show | compare
-~~~
-
-Po commit sprawdź sesję nowo zalogowanego `nocview`. **15** oznacza tu minuty bezczynności. Nie każda próba `show configuration` musi działać przy każdym zestawie permission flags. Jeśli potrzebujesz szerszego wglądu, rozważ osobną flagę `view-configuration`, ale sprawdź **dokładną listę uprawnień i nazwy w `permissions ?` na danym release**.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], interaktywne odkrywanie flag**
-
-~~~junos
-edit system login class LAB-NOC
-set permissions ?
-~~~
-
-Dla takiego polecenia `?` jest narzędziem pomocy CLI, nie linijką automatycznie importowaną z pliku `.set`.
-
-### 4.4.4. Gotcha: „allow-commands” nie jest magicznym obejściem pozostałych przywilejów
-
-Junos pozwala definiować m.in. **`allow-commands`, `deny-commands`, `allow-configuration`, `deny-configuration`** oraz ich warianty dopasowań. To kuszące: „dam NOC dostęp tylko do `show route` jednym regexem”.
-
-Ale pamiętaj o dwóch warstwach:
-1. **Permission flags** decydują o bazowym dostępie do grup poleceń i hierarchii.
-2. **Reguły allow/deny** precyzują wyjątki, a ich semantyka zależy od wybranego wariantu regex.
-
-Oficjalna dokumentacja ostrzega, że stara rodzina `allow/deny-commands` i nowsza `*-regexps` mogą stosować różny mechanizm dopasowania. **Nie wgrywaj przypadkowego wyrażenia regularnego z forum do produkcji**; testuj go na koncie ograniczonym w labie.
-
-Dodatkowy haczyk: przy pewnych rozszerzonych regexach występują ograniczenia dotyczące `load override`; nie projektuj RBAC tak, jakby jedna flaga „all” plus deny regex dawała automatycznie bezpieczną izolację. [Junos User Access Privileges](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html).
-
-### 4.4.5. Model inżynierski do projektowania uprawnień
-
-Gdy projektujesz role dla klienta, podziel zespół:
-- **NOC Read-Only** — odczyt statusów i konfiguracji w dopuszczonym zakresie;
-- **LAN Operator** — określone komendy operacyjne, np. testy sieciowe, tylko jeśli akceptuje to procedura;
-- **Network Engineer** — zarządzanie wybranymi gałęziami i zmiany;
-- **Break Glass Administrator** — awaryjna, audytowana rola z pełnymi uprawnieniami.
-
-Nie utożsamiaj „operator” z „bezpieczne polecenia”. Uprawnienia są zależne od komendy i **jej parametrów**: na Cisco `clear ip bgp *` ma inne skutki niż `show ip bgp summary`, i w Junos ta sama intuicja jest cenna.
-
-Źródła: [Login Classes Overview](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-login-class-overview.html), [show cli authorization](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-cli-authorization.html), [Login Class Permissions](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html).
-
----
-
-## 4.5. Metody uwierzytelniania — AAA i pułapka „serwer milczy” kontra „serwer odmawia” [A]
-
-### 4.5.1. Centrala AAA przestała odpowiadać w piątek po 18:00
-
-Wyobraź sobie, że administrujesz kilkuset urządzeniami. Każdy inżynier ma indywidualne konto, a prawo do komend jest zarządzane przez firmowy TACACS+. W piątek jeden z serwerów AAA przestaje odpowiadać. Czy zespół utraci dostęp do wszystkich switchy? Czy lokalny administrator uratuje sytuację?
-
-Prawidłowa odpowiedź zależy od **authentication order**, odpowiedzi serwera i konfiguracji lokalnych kont. Nie wystarczy zapamiętać „Junos fallback to local”.
-
-W Cisco `aaa authentication login default group tacacs+ local` wygląda znajomo, ale na Junos implementacja **`system authentication-order`** ma kluczowy szczegół: **brak odpowiedzi** z serwera i **jawny reject** nie zawsze prowadzą do tego samego wyniku.
-
-### 4.5.2. Zanim włączysz AAA, narysuj przepływ dostępu
-
-~~~mermaid
-flowchart TD
-  LOGIN["Nowa sesja SSH: labadmin"] --> KEY{"Klucz publiczny skonfigurowany\n i poprawny?"}
-  KEY -->|Tak| ACCESS["Dostęp zgodny z login class / AAA"]
-  KEY -->|Nie lub nie użyto| TAC["TACACS+ / RADIUS według order"]
-  TAC -->|Accept| ACCESS
-  TAC -->|Timeout / brak odpowiedzi| LOCAL["Próba local password\njako last resort"]
-  TAC -->|Reject| CHECK{"Czy password jest\njawnie w authentication-order?"}
-  CHECK -->|Tak| LOCAL
-  CHECK -->|Nie| DENY["Odmowa logowania"]
-  LOCAL -->|Valid| ACCESS
-  LOCAL -->|Invalid| DENY
-~~~
-
-**Zastrzeżenie:** diagram upraszcza szczegóły autoryzacji, typy kluczy SSH i złożone sekwencje dwóch usług AAA. Dla konkretnego order użyj oficjalnej tabeli zachowania z dokumentacji. Schemat pokazuje najważniejszy kontrast **reject vs timeout**.
-
-### 4.5.3. Bezpieczny pierwszy etap: local only
-
-Dopóki nie ma uruchomionego serwera AAA w EVE-NG, przećwicz lokalne konta i ich login classes. Samo wpisanie `authentication-order tacplus` nie uruchamia serwera TACACS+ w sieci.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant laboratoryjny LOCAL ONLY**
-
-~~~junos
-set system authentication-order password
-show | compare
-~~~
-
-To działa z kontami skonfigurowanymi w `system login`. Pamiętaj, że prawidłowo skonfigurowane **SSH public keys** mogą być sprawdzane przed metodami z `authentication-order`, dlatego przy testach z hasłami odróżnij sposób logowania klienta SSH od ustawień samego Junos.
-
-### 4.5.4. Wariant Enterprise — TACACS+ jako pierwsza próba, local password jako fallback
-
-Zakładamy wyizolowane środowisko szkoleniowe, w którym serwer TACACS+ istnieje naprawdę pod `172.31.240.40` i jest osiągalny. **Jeżeli go nie ma, nie wykonuj tego wariantu.** Nie zapisuj tajnego shared secret do GitHuba.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant demonstracyjny wymagający serwera AAA**
-
-~~~junos
-set system authentication-order [ tacplus password ]
-set system tacplus-server 172.31.240.40 source-address 172.31.240.10
-~~~
-
-Osobno trzeba wprowadzić wymagany **shared secret** w bezpiecznej sesji/zarządzanym kanale, ale nie dostarczamy tu wrażliwej wartości:
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], szablon polecenia z obowiązkowym sekretami z vault, nie do bezpośredniego commit**
-
-~~~text
-set system tacplus-server 172.31.240.40 secret <Z_VAULT_NIE_W_GITHUB>
-~~~
-
-**To polecenie jest NIEKOMPLETNE bez rzeczywistego sekretu** i powyższy wiersz z nawiasami kątowymi nie jest przeznaczony do wklejenia. Trzeba także skonfigurować zgodne konto/template i mapowanie praw na serwerze AAA. Same `tacplus-server` oraz `authentication-order` nie gwarantują, że użytkownik dostanie oczekiwaną klasę.
-
-**Uwaga o priorytecie:** gdy ustawisz `[ tacplus password ]`, Junos spróbuje TACACS+, a następnie metodę lokalną zgodnie z warunkami. Jeśli zamiast tego określisz samo `tacplus`, zachowanie przy remote REJECT będzie inne.
-
-### 4.5.5. Nieuświadomiony gotcha: jawny remote REJECT nie musi pozwolić użyć lokalnego konta
-
-Zapamiętaj konkretny przypadek, bo może Cię zaskoczyć w production outage.
-
-**Wariant 1 — `authentication-order tacplus`:** jeśli serwer jest osiągalny i **odrzuca login**, Junos zwykle **kończy próbę odmową**, zamiast przechodzić do local password. Gdy **wszystkie serwery nie odpowiadają**, Junos przewiduje awaryjne sięgnięcie po local password.
-
-**Wariant 2 — `authentication-order [ tacplus password ]`:** local password jest jawnie dodane do kolejności, więc po **reject** z TACACS+ również może zostać podjęta lokalna próba (zgodnie z konfiguracją i specyfiką metody).
-
-Nie zakładaj, że wszystko to działa identycznie jak Cisco `group tacacs+ local`. Wciąż musisz sprawdzić, **czy hasło lokalne istnieje** dla danego użytkownika i jaka klasa nada uprawnienia.
-
-**Urządzenie: LAB-SRX01 — Operational Mode, weryfikacja po poprawnym wdrożeniu AAA**
-
-~~~junos
-show configuration system authentication-order
-show configuration system tacplus-server
-show log messages | match "sshd|tac|login"
-show cli authorization
-~~~
-
-Źródło potwierdzające dokładnie różnicę timeout/reject: [Authentication Order for RADIUS, TACACS+, and Local Password](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-authentication-order.html).
-
-### 4.5.6. Wariant RADIUS i kwestia `source-address`
-
-Centralne AAA może opierać się na RADIUS (np. ClearPass lub ISE), również w sieciach Juniper. Tu kluczowy błąd operatorski polega na zapomnieniu **adresu źródłowego**, z którego Junos wyśle zapytanie. Serwer AAA może akceptować pakiety tylko od zarejestrowanych klientów. Gdy Junos wybierze inny source IP, prawidłowy shared secret nie pomoże.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant RADIUS alternatywny wobec TACACS**
-
-~~~junos
-set system authentication-order [ radius password ]
-set system radius-server 172.31.240.41 source-address 172.31.240.10
-~~~
-
-Tutaj również wymagany jest odpowiedni sekret i konfiguracja po stronie serwera; **nie uruchamiaj tego wariantu bez rzeczywistej infrastruktury RADIUS**. Pamiętaj, że `system radius-server` do administracyjnego logowania na router to **inny kontekst** niż `access profile` dla użytkowników 802.1X/captive portal.
-
-**Most z Cisco ISE/ClearPass:** często spotykasz `ip radius source-interface Loopback0` lub `ip tacacs source-interface`. W Junos wskazujesz `source-address` w konkretnym obiekcie serwera, a dodatkowe routing instances wymagają świadomego projektu ścieżki.
-
-### 4.5.7. AAA to także authorization i accounting
-
-Możesz mieć poprawnie uwierzytelnionego użytkownika TACACS+, ale serwer nie mapuje go na właściwy lokalny template albo nie dostarcza Juniper-specific VSA. Użytkownik wchodzi i widzi ograniczoną klasę lub brak polecenia.
-
-To nie oznacza „TACACS jest zepsuty”. Odróżnij:
-- **Authentication** — kto to?
-- **Authorization** — co wolno wykonać?
-- **Accounting** — jakie działania i sesje odnotowano?
-
-W Cisco te trzy A są dobrze znane. W Junos dochodzi przejrzysta hierarchia kont oraz login classes. Prawidłowy greenfield wymaga także logowania operacji administratorów i synchronizacji czasu (NTP), bo bez niej accounting i syslog mają wątpliwą wartość dowodową.
-
-Dalsza weryfikacja: [TACACS+ Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-tacacs-authentication.html), [RADIUS Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-radius-authentication.html).
-
----
-
-## 4.6. Typy interfejsów i ich właściwości — nie pomyl warstwy fizycznej z management [A]
-
-### 4.6.1. Dlaczego `ge-0/0/0` nie jest całym interfejsem IP
-
-W Cisco na ISR wpisujesz `interface Gi0/0/0`, a dalej `ip address`, `description`, `speed` itd. Na Junos struktura zwykle ma co najmniej trzy warstwy:
-- **interfejs fizyczny** (np. `ge-0/0/0`);
-- **logical unit** (np. `.0`);
-- **protocol family** (np. `family inet`, `inet6`, `ethernet-switching`).
-
-To nie jest kosmetyka parsera. Fizyczny port może mieć parametry niezależne od konkretnego logicznego `unit`, a rodzina protokołów określa, czy pracujemy z IPv4/IPv6/switching.
-
-~~~mermaid
-flowchart TD
-  PHY["ge-0/0/0 — port fizyczny"] --> DES["description / mtu / link status"]
-  PHY --> U0["unit 0 — logical interface"]
-  U0 --> INET["family inet — adres IPv4"]
-  U0 --> INET6["family inet6 — adres IPv6 (jeśli używany)"]
-  PHY --> U100["unit 100 — przykład subinterface"]
-  U100 --> TAG["vlan-id 100 — przy prawidłowym vlan-tagging"]
-~~~
-
-**Ograniczenie przykładu:** nie każda kombinacja families/units może współistnieć na każdym porcie i urządzeniu; trunki Ethernet i switching wymagają właściwego typu encapsulation i trybu interfejsu.
-
-### 4.6.2. Rzeczywiste zdjęcie portów — ale zdjęcie nie zastąpi Hardware Guide
-
-Zanim zaczniesz podawać numer portu remote hands, zwróć uwagę na fizyczne elementy w sprzęcie. Widzisz na poniższej fotografii interfejsy SFP i porty o różnej roli. **Nie odczytasz jednak z tego zdjęcia mapowania `fxp0`, `me0`, `ge-0/0/0` swojego modelu.**
-
-![Panel frontowy przełącznika Juniper QFX5100 z portami SFP i uplinkami; fotografia ilustracyjna starszej platformy, nie urządzenia laboratoryjnego](https://upload.wikimedia.org/wikipedia/commons/9/99/Juniper_Networks_QFX5100_ethernet_switch.jpg)
-
-*Źródło: Juniper Networks, „Juniper Networks QFX5100 ethernet switch.jpg”, [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Juniper_Networks_QFX5100_ethernet_switch.jpg), licencja [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), bez modyfikacji; obraz hostowany zewnętrznie. **Model historyczny wyłącznie jako ilustracja portów**, a nie rekomendacja zakupowa.*
-
-Na realnym EX4400 OOB `me0` jest z tyłu urządzenia; na części SRX port `fxp0` też może być w innym miejscu. W każdym rolloutcie porównuj **Hardware Guide, `show chassis hardware`, `show interfaces terse`** i opis patchpanelu.
-
-### 4.6.3. Adres na routerze SRX a port switchingowy EX
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], przykład L3 IPv4 na jednym porcie danych**
-
-~~~junos
-set interfaces ge-0/0/0 description "P2P-TO-LAB-R2"
-set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.1/30
-~~~
-
-To nie jest polecenie z założenia odpowiednie do każdego EX access. Na EX w roli L2 najpierw definiujesz switching, VLAN i ewentualny **IRB** jako bramę. Na SRX musisz też rozważyć **security-zone** i host-inbound albo flow policies; routing IP sam nie pozwala automatycznie na ruch użytkowników.
-
-**Urządzenie: EX-ACCESS-01 — Configuration Mode [edit], przykład adresu bramy L3 na logicznym IRB, wyłącznie dla wspieranej konfiguracji i VLAN**
-
-~~~junos
-set interfaces irb unit 20 family inet address 10.20.0.1/24
-~~~
-
-Ten wiersz **nie tworzy sam VLAN 20 ani nie podłącza go do IRB**. Szczegółowy model VLAN/IRB jest w rozdziale 14. W tym miejscu uczymy się rozpoznawać **role interfejsów** i zależności.
-
-### 4.6.4. Co oznaczają nazwy `lo0`, `irb`, `ae`, `me0`, `fxp0`, `vme`?
-
-Zamiast kolejnej tabeli bez kontekstu, pomyśl o projekcie nowego biura:
-
-**`ge-/xe-/et-`** wskazują zwykle fizyczne rodziny Ethernet i ich nominalne prędkości (np. 1/10/100G, z licznymi wyjątkami sprzętowymi). **`lo0`** to loopback — stabilny adres kontrolny, np. router ID, source dla usług, gdzie ma to sens. **`irb`** to L3 gateway dla domeny bridging/VLAN. **`ae`** to aggregated Ethernet (porównanie Cisco Port-channel). **`me0`** to management w wielu EX; **`fxp0`** na wielu routerach/SRX; **`vme`** może służyć do zarządzania Virtual Chassis.
-
-**Gotcha:** **`ge-0/0/0.0` i `ge-0/0/0` to nie identyczne poziomy konfiguracji**. Pierwsza forma wskazuje logical interface, druga fizyczną nazwę. Na Junos `unit 0` nie jest wirtualnym portem „niezależnym od physical”.
-
-### 4.6.5. Diagnostyka: port jest up, ale IP nie odpowiada
-
-**Urządzenie: LAB-SRX01 — Operational Mode**
-
-~~~junos
-show interfaces terse
-show interfaces ge-0/0/0 extensive
-show route table inet.0
-show arp
-show configuration interfaces | display set
-~~~
-
-Czy fizyczny link jest up? Czy logical unit jest up? Czy ma adres we właściwej rodzinie? Czy next-hop ma ARP? Czy forwarding nie jest blokowany security policy? Dopiero potem analizuj uplink.
-
-**Most z Cisco:** `show ip interface brief`, `show interfaces`, `show arp`, `show ip route` — ta sama logika troubleshooting, ale różne widoki danych.
-
-### 4.6.6. Management routing instance — nie wpisuj „default route” bez zrozumienia, gdzie trafi
-
-Przy przenoszeniu management do odrębnej instancji warto znać kontekst `mgmt_junos.inet.0`. W Junos **`set system management-instance`** może wydzielić tę instancję dla management, ale **należy sprawdzić wsparcie i dokładne zachowanie dla modelu/release**.
-
-Nie pokazujemy tego jako bezrefleksyjnego „jednolinijkowego hardeningu”, ponieważ w istniejącym site taka zmiana może przenieść ruch NTP/AAA/syslog poza aktualną trasę, odcinając urządzenie od infrastruktury.
-
-**Urządzenie: LAB-SRX01 — Operational Mode, odczyt przed decyzją o wydzieleniu management**
-
-~~~junos
-show configuration system management-instance
-show route table inet.0
-show route table mgmt_junos.inet.0
-show interfaces terse | match "fxp|me|vme"
-~~~
-
-Brak tabeli `mgmt_junos.inet.0` na danym obrazie nie jest awarią; to sygnał, że konfiguracja/wersja może jej nie wykorzystywać. Więcej o routing instances w rozdziale 6.
-
-Źródła: [Management Interface in a Dedicated Instance](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/topic-map/management-interface-in-non-default-instance.html), [EX4400 hardware initial configuration](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html).
-
----
-
-## 4.7. Configuration groups — jedna konfiguracja dla setek portów bez kopiowania 100 razy [A]
-
-### 4.7.1. Skąd bierze się różnica między template a rzeczywistą konfiguracją?
-
-Klient ma 120 switchy EX i jeden standard firmowy: `description` według konwencji, syslog do SIEM, NTP, wspólny parametr interfejsów. Masz dwa rozwiązania:
-
-**Pierwsze:** kopiujesz 120 razy te same `set` do każdego urządzenia. Kiedy zmienia się NTP, musisz sprawdzić i poprawić 120 konfiguracji.
-
-**Drugie:** definiujesz w Junos **configuration group**, a następnie decydujesz, gdzie ta grupa jest stosowana. Konfiguracja dziedziczona nie musi być zapisana bezpośrednio w każdej gałęzi.
-
-**Most z Cisco:** trochę jak template lub profile w Cisco Catalyst Center, `interface range` albo skrypt Ansible, ale **configuration groups działają wewnątrz samego Junos** i są elementem hierarchii. Nie są zewnętrznym systemem orkiestracji ani nie uruchamiają się na wszystkich switchach firmy bez uprzedniego wdrożenia.
-
-### 4.7.2. Własna grupa i jej aktywacja — dwie oddzielne czynności
-
-Zaczynamy od bezpiecznego parametru tekstowego, aby nie ryzykować routingu.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], izolowany LAB**
-
-~~~junos
-set groups LAB-IDENTITY system login message "LAB managed by group LAB-IDENTITY"
-set apply-groups LAB-IDENTITY
-show groups LAB-IDENTITY
-show system login | display inheritance
-show | compare
-~~~
-
-**Haczyk:** samo `set groups ...` **nie musi niczego zmienić**. Dopiero `apply-groups` na odpowiednim poziomie daje dziedziczenie. To jak przygotowanie template, którego jeszcze nie przypisałeś.
-
-**Ostrzeżenie labowe:** jeśli masz już skonfigurowany lokalnie `system login message`, wartość lokalna zwykle **ma pierwszeństwo** nad odziedziczoną i nie zobaczysz nowego banneru jako skutecznego ustawienia. To **celowy test precedence**, a nie awaria grup.
-
-### 4.7.3. Pierwszeństwo i efekt „niewidzialnej konfiguracji”
-
-Wyobraź sobie, że grupa wymusza `system login message "GLOBAL"`, ale w konfiguracji lokalnej ktoś wcześniej wstawił `"SITE-LOCAL"`. Którą wartość zobaczy użytkownik? **Lokalną**, bo konkretna konfiguracja na danym poziomie nadpisuje dziedziczoną.
-
-Teraz masz **dwie grupy** stosowane do tego samego poziomu. Oficjalna dokumentacja mówi: **pierwsza nazwa na liście `apply-groups` ma wyższy priorytet** niż kolejne. Dodatkowo grupa zastosowana głębiej w hierarchii może mieć pierwszeństwo przed grupami z wyższego poziomu.
-
-~~~mermaid
-flowchart TB
-  G1["Group A: NTP / banner"] --> APPLY["apply-groups [ A B ]"]
-  G2["Group B: fallback defaults"] --> APPLY
-  APPLY --> MERGE["Efektywna konfiguracja"]
-  LOCAL["Local statement (konkretny poziom)"] -->|ma pierwszeństwo| MERGE
-  MERGE --> SHOW["display inheritance / show | display inheritance"]
-~~~
-
-**Pytanie podchwytliwe:** czy `show configuration system login` musi jawnie pokazać wszystkie inherited statements? **Nie.** `| display inheritance` jest potrzebne, żeby zobaczyć, skąd wzięły się ustawienia.
-
-**Urządzenie: LAB-SRX01 — Operational Mode, weryfikacja dziedziczenia**
-
-~~~junos
-show configuration groups | display set
-show configuration system login | display inheritance
-show configuration | display inheritance
-~~~
-
-### 4.7.4. Jak wyłączyć dziedziczenie tylko tam, gdzie jest wyjątek?
-
-W prawdziwym projekcie jedna lokalizacja ma osobny syslog, drugi budynek inne NTP, a trzeci odmienny link. Nie usuwaj grupy globalnie dla wszystkich. Junos ma **`apply-groups-except`** pozwalające ograniczyć dziedziczenie na wybranym poziomie.
-
-Należy wiedzieć, że **nie da się zastosować `apply-groups-except` na samym root** w taki sam sposób jak wewnątrz gałęzi. Dokładny zakres wyłączenia i wynikowy config sprawdź w `display inheritance`.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], usunięcie laboratoryjnego przykładu po ćwiczeniu, nie zatwierdzaj cudzych zmian**
-
-~~~junos
-delete apply-groups LAB-IDENTITY
-delete groups LAB-IDENTITY
-show | compare
-~~~
-
-**Gotcha: `junos-defaults`** to specjalna, ukryta grupa systemowa; nie można jej traktować jak dowolnego własnego template ani przypisać zwykłym `apply-groups junos-defaults`. Zapisz w pamięci różnicę między **własną configuration group** i **systemowymi defaults**.
-
-### 4.7.5. A co z wildcard?
-
-W grupach możesz używać **wildcard** (np. dla rodziny portów). To przydatne, gdy konfigurowane są setki interfejsów, ale również bardzo niebezpieczne: zbyt szerokie dopasowanie może wpłynąć na **uplink core** albo port zarządzania, choć chciałeś zmienić tylko access.
-
-Nie pokazujemy tego na produkcyjnym porcie. W laboratorium najpierw używamy pojedynczego banneru, a dopiero potem testujemy wildcard z wyraźną listą pasujących interfejsów i kontrolą `show | compare` oraz `display inheritance`.
-
-**Na pamięć:** `groups` definiuje; `apply-groups` włącza; `apply-groups-except` wyłącza dziedziczenie w danej gałęzi; local statement zwykle wygrywa; kolejność grup ma znaczenie.  
-**Do zrozumienia:** configuration groups zwiększają powtarzalność, ale utrudniają intuicyjny odczyt rzeczywistej konfiguracji bez `display inheritance`.
-
-Źródła: [Use Configuration Groups to Quickly Configure Devices](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html), [apply-groups CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/apply-groups.html).
-
-
-
----
-
-## 4.8. NTP — gdy zegar kłamie, cała dokumentacja incydentu przestaje się składać [A]
-
-### 4.8.1. Trzy urządzenia, trzy czasy, jeden incydent P1
-
-Wyobraź sobie, że w środę o 09:04 firewall blokuje aplikację, o 09:05 switch zgłasza flap uplinku, a o 09:03 TACACS+ odnotowuje zmianę konfiguracji. Czy zdarzenia miały taką kolejność? Nie możesz tego stwierdzić, dopóki nie wiesz, czy zegary tych urządzeń są zsynchronizowane.
-
-W dużym środowisku Enterprise logi z routera, WLC, NAC, firewall i SIEM trafiają do jednego miejsca. **NTP jest spoiwem korelacji zdarzeń.** Nie wystarczy, że data wyświetlana przez `show system uptime` „mniej więcej się zgadza”.
-
-**Most z Cisco:** znasz `ntp server`, `ntp source`, `show ntp status`, `show ntp associations`. Na Junos odpowiedniki znajdują się pod `system ntp`, a obserwacja używa bardzo podobnych komend operational. Ważna różnica: konfiguracja źródłowego IP, routing instance i stan protokołu muszą zgadzać się z architekturą management.
-
-### 4.8.2. Server, association, stratum i realna synchronizacja
-
-NTP client kieruje zapytania do jednego lub kilku serwerów. Serwer może być skonfigurowany i odpowiadać, ale **nie zostać wybrany jako aktualne źródło synchronizacji**. Zależy to od jakości źródeł, błędów, preferencji i stanu protokołu. `prefer` nie wymusza wyboru serwera, który jest nieosiągalny lub niewiarygodny.
-
-~~~mermaid
-flowchart LR
-  MASTER["Autorytatywne źródło czasu\ncorporate NTP"] --> S1["NTP 172.31.240.30"]
-  MASTER --> S2["NTP 172.31.240.31"]
-  S1 --> EX["EX4400 / Junos"]
-  S2 --> EX
-  S1 --> FW["SRX / Junos"]
-  S2 --> FW
-  EX --> LOG["Syslog z porównywalnym timestamp"]
-  FW --> LOG
-~~~
-
-**Dwa serwery w konfiguracji nie oznaczają automatycznie, że oba są dobre.** Gdy jeden ma niepoprawny czas, Junos musi go rozpoznać i ocenić. Dla małych środowisk używaj oficjalnych firmowych serwerów lub świadomie zaprojektowanych źródeł, nie przypadkowych hostów w Internecie.
-
-### 4.8.3. Konfigurujemy NTP z zaufanego segmentu
-
-Na naszym izolowanym labie serwer czasu powinien znajdować się na `LAB-SERVICES` pod `172.31.240.30` — **jeśli faktycznie uruchomisz tam działającą usługę NTP**. Drugi `172.31.240.31` jest opcjonalny.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], NTP dla lokalnej sieci management**
-
-~~~junos
-set system ntp server 172.31.240.30 prefer
-set system ntp source-address 172.31.240.10
+set system domain-name lab.example
 set system time-zone Europe/Warsaw
 show | compare
 ~~~
 
-`source-address` musi należeć do właściwego interfejsu z osiągalnością do serwera. Jeśli korzystasz z dedykowanej `management-instance`, **routing-instance może być potrzebny również dla ruchu NTP** — nie kopiuj tego przykładu wprost bez sprawdzenia architektury.
+Ta konfiguracja nie tworzy serwera DNS. Jeżeli w labie istnieje rzeczywisty, osiągalny serwer nazw, dodajemy go świadomie po ustaleniu IP i tablicy routingu. W podręczniku nie będziemy wymyślać działającego DNS tylko po to, aby wstawić polecenie do listy.
 
-**Urządzenie: LAB-SRX01 — Operational Mode, po konfiguracji i odczekaniu na pracę NTP**
+Ustawienie strefy czasowej też nie synchronizuje zegara. Oznacza sposób lokalnej prezentacji czasu; synchronizacją zajmie się NTP w sekcji 4.8.
+
+### Co to właściwie jest management?
+
+Do routera możesz dostać się przez **konsolę**, przez połączenie sieciowe SSH albo przez inny wspierany interfejs zarządzania. W Enterprise często projektuje się oddzielny segment **OOB (out-of-band management)**. Jego celem jest zapewnienie dostępu administracyjnego nawet wtedy, gdy główna sieć transmisji danych jest niedostępna.
+
+W praktyce OOB zwykle wymaga osobnego połączenia, adresowania i urządzeń zapewniających dostęp. Nie wystarczy nazwać portu „management”. Jeżeli zarówno SSH, jak i routing użytkowników zależą od tego samego jedynego uplinku, utrata uplinku odcina oba.
+
+Na fizycznych Juniperach interfejs zarządzania może mieć nazwę `fxp0`, `me0`, `vme` lub inną, zależnie od rodziny sprzętu. **Nie zakładamy, że vSRX w EVE-NG na pewno ma `fxp0` oraz że jest to zawsze pierwszy NIC.**
+
+### Management port a management routing instance
+
+To rozróżnienie jest szczególnie ważne. **Interfejs management** to miejsce podłączenia sieci administracyjnej. **Management routing instance** to odrębny kontekst tablic routingu, w którym usługi systemowe mogą szukać dróg do serwerów zarządzania.
+
+W Junos niektóre platformy udostępniają instancję `mgmt_junos`; nie jest ona jednak automatycznie aktywna na każdej maszynie tylko dlatego, że port nazywa się `fxp0`. Jeżeli ją włączysz lub odziedziczysz z szablonu, musisz kontrolować właściwą tablicę routingu, obsługę DNS/NTP/syslog/AAA i możliwość powrotu do administratora.
+
+**R1-vSRX — Operational Mode, pre-check modelu zarządzania**
+
+~~~junos
+show interfaces terse
+show configuration system management-instance
+show route table inet.0
+show route table mgmt_junos.inet.0
+~~~
+
+Ostatnia komenda może nie pokazać wpisów albo instancja może nie istnieć w Twoim wariancie. To informacja diagnostyczna, nie dowód awarii.
+
+Nie podajemy na tym etapie gotowego `set interfaces fxp0 unit 0...`, ponieważ **nie znamy jeszcze rzeczywistego mapowania management**. W ćwiczeniu będzie osobny warunek: najpierw odczytaj realną nazwę i połączenie w EVE-NG, dopiero potem skonfiguruj adres z izolowanej sieci administracyjnej. Nie zmieniaj adresów R1–R4 na łączach DIAMOND-6R, aby uzyskać management.
+
+### Pierwsze SSH: bezpieczny, ale nie samodzielnie wystarczający krok
+
+SSH to szyfrowany dostęp tekstowy do routera. Aby zadziałał, potrzebujesz nie tylko włączonej usługi, ale również drogi IP, konta, odpowiednich uprawnień i ewentualnego dopuszczenia ruchu **do samego SRX**.
+
+**R1-vSRX — Configuration Mode [edit private], włączenie usługi SSH bez ruszania portów**
+
+~~~junos
+set system services ssh
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Na SRX ruch SSH do lokalnego adresu może dodatkowo zależeć od `host-inbound-traffic` i strefy, a dla niektórych połączeń OOB od specyfiki management. Samo `set system services ssh` nie otwiera uniwersalnie dostępu ze wszystkich portów.
+
+**Nie ograniczaj jeszcze root SSH**, dopóki nie utworzymy i nie przetestujemy nowego konta administracyjnego w następnej sekcji. Jeśli router ma już dostęp do SSH, nie zmieniaj jego konfiguracji bez sprawdzenia obecnego stanu.
+
+**R1-vSRX — Operational Mode, osobna sesja: weryfikacja usługi**
+
+~~~junos
+show configuration system services ssh
+show interfaces terse
+show system users
+show system commit
+~~~
+
+Nie traktuj tych odczytów jako testu końcowego. Aby potwierdzić SSH, trzeba naprawdę otworzyć **nowe połączenie z osobnego klienta**. Jeśli nie masz tego klienta, zaznacz wynik jako NOT TESTED, nie jako PASS.
+
+**Dokumentacja:** [Remote Access Overview](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-software-remote-access-overview.html), [Management Interface in Nondefault Instance](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/topic-map/management-interface-in-non-default-instance.html).
+
+---
+
+## 4.3. Lokalne konta — kto ma prawo zalogować się do R1? [A]
+
+### Pierwsza osoba, która ma własny login
+
+Wyobraź sobie, że R1 został uruchomiony i przez konsolę można go konfigurować jako `root`. Kolejny krok nie powinien polegać na przesłaniu wszystkim administratorom tego samego hasła. Jeśli pięć osób używa jednego loginu, w logach trudno będzie rozpoznać, kto wykonał zmianę.
+
+Lokalne konto w Junos tworzymy w gałęzi `system login user`. Każdy użytkownik ma nazwę, opcjonalny opis, sposób uwierzytelnienia i przypisaną **login class** — czyli zestaw uprawnień, który omówimy dokładniej za chwilę.
+
+Zaczniemy od dwóch kont. `labadmin` będzie administratorem testowym, a `nocview` będzie przeznaczony wyłącznie do odczytu wybranych informacji. Tworzymy je na R1, nie na wszystkich sześciu routerach naraz.
+
+**R1-vSRX — Configuration Mode [edit private], tworzenie kont bez wpisywania sekretów do pliku**
+
+~~~junos
+set system login user labadmin full-name "Administrator DIAMOND-6R"
+set system login user labadmin class super-user
+set system login user labadmin authentication plain-text-password
+~~~
+
+Ostatnie polecenie **nie zawiera hasła**. Urządzenie powinno uruchomić interaktywny dialog, w którym podasz i potwierdzisz hasło. Nie wpisuj swojego prawdziwego hasła do materiałów szkoleniowych, terminala rejestrującego sesje ani repozytorium GitHub.
+
+`super-user` jest bardzo szeroką klasą uprawnień, więc nadajemy ją wyłącznie kontu używanemu w odizolowanym labie. W firmie zakres przywilejów powinien wynikać z polityki bezpieczeństwa.
+
+**R1-vSRX — Configuration Mode [edit private], konto tylko do odczytu**
+
+~~~junos
+set system login user nocview full-name "Podglad stanu urzadzenia"
+set system login user nocview class read-only
+set system login user nocview authentication plain-text-password
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+To ważne miejsce, aby przypomnieć rozróżnienie z rozdziału III: dopiero zatwierdzenie konfiguracji powoduje, że nowy użytkownik staje się częścią działającego systemu. Po `commit confirmed` przetestuj oba loginy z **nowej**, niezależnej sesji. Nie wykonuj kolejnego `commit check` w czasie timera.
+
+**R1-vSRX — Operational Mode, odczyt konfiguracji kont i historii**
+
+~~~junos
+show configuration system login | display set
+show system users
+show system commit
+~~~
+
+Nie polegaj wyłącznie na `show configuration`: to dowód istnienia kont w konfiguracji, ale nie dowód, że nowy login może się faktycznie zalogować. Potrzebujesz przynajmniej jednego udanego testu z osobnej sesji konsoli lub SSH.
+
+### Dlaczego login i prawo do poleceń są różnymi sprawami?
+
+Pomyśl o wejściu do budynku i dostępie do konkretnych pomieszczeń. To, że strażnik rozpoznał Twoją kartę, nie znaczy, że możesz wejść do serwerowni. Podobnie w Junos:
+
+- **Authentication** odpowiada na pytanie: czy użytkownik przedstawił właściwy dowód tożsamości?
+- **Authorization**: co użytkownikowi wolno robić po zalogowaniu?
+- **Accounting**: jakie informacje o jego aktywności i zmianach można później odtworzyć?
+
+Te trzy funkcje składają się na pojęcie **AAA**. W kolejnych sekcjach dowiemy się, jak Junos łączy konta, login classes i serwery centralne.
+
+### SSH keys — dlaczego administrator może nie potrzebować hasła za każdym razem?
+
+W SSH można korzystać z pary kluczy: **prywatnego** i **publicznego**. Klucz prywatny zostaje u administratora i nigdy nie powinien trafić do konfiguracji routera ani repozytorium. Klucz publiczny można dodać do konta na Junos, aby umożliwić uwierzytelnienie za pomocą odpowiadającego mu klucza prywatnego.
+
+Nie oznacza to, że „klucz publiczny jest hasłem”. Klucz prywatny nadal trzeba chronić, najlepiej zabezpieczyć hasłem i przechowywać zgodnie z polityką organizacji.
+
+Na wspieranych wydaniach można używać nowoczesnych typów kluczy, np. Ed25519. Dostępność algorytmu i składnię potwierdź jednak dla **rzeczywistej wersji Junos**. Nie wpisujemy do podręcznika fikcyjnego ciągu `AAAA...` udającego działający klucz. Konfiguracja jest kompletna dopiero, gdy masz prawdziwy, zatwierdzony klucz publiczny.
+
+### Kiedy wolno zablokować logowanie root przez SSH?
+
+Dopiero po udanym teście indywidualnego konta, poprawnej roli i niezależnej konsoli. Wtedy można ograniczyć dostęp `root` przez sieć, nie usuwając automatycznie możliwości pracy ratunkowej przez konsolę.
+
+**R1-vSRX — Configuration Mode [edit private], dopiero po udanym teście labadmin z nowego SSH**
+
+~~~junos
+set system services ssh root-login deny
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Po tej zmianie z nowej sesji sprawdź, czy `labadmin` nadal może wejść na router i czy `nocview` nie uzyskał szerszych uprawnień. Potwierdź zmianę dopiero po pozytywnych testach. Nie wyłączaj zdalnego root na urządzeniu, do którego nie masz innej pewnej ścieżki administracyjnej.
+
+**R1-vSRX — Operational Mode, read-only kontrola polityki SSH**
+
+~~~junos
+show configuration system services ssh | display set
+show system users
+show system commit
+~~~
+
+**Dokumentacja:** [User Access Privileges](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html), [Remote Access Overview](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-software-remote-access-overview.html).
+
+---
+
+## 4.4. Login classes — dlaczego dwie zalogowane osoby widzą inne możliwości? [A]
+
+Po utworzeniu kont `labadmin` i `nocview` mamy dwóch użytkowników na tym samym R1. Mogą logować się przez ten sam interfejs, ale nie powinni mieć identycznych praw. Osoba odpowiedzialna za monitoring musi widzieć stan portów i alarmy; nie musi mieć prawa kasować konfiguracji czy restartować routera.
+
+W Junos zakres uprawnień opisuje **login class**. Nie jest ona tożsama z hasłem ani z samą możliwością otwarcia sesji. Konto wskazuje klasę; klasa określa, które grupy poleceń i konfiguracji są dostępne.
+
+Na początek wystarczą nam cztery nazwy klas wbudowanych:
+
+| Klasa | Ogólna rola | O czym pamiętać |
+|---|---|---|
+| `super-user` | Bardzo szerokie uprawnienia | Dla zaufanych administratorów |
+| `read-only` | Odczyt wielu informacji bez prawa edycji | Nie wszystkie polecenia operacyjne muszą być dostępne |
+| `operator` | Obsługa operacyjna urządzenia | To **nie** jest synonim read-only |
+| `unauthorized` | Minimalne uprawnienia | Celowo bardzo ograniczona klasa |
+
+Nie oceniaj klas tylko na podstawie nazwy. Najlepiej przetestować konkretne polecenia na rzeczywistym koncie. `operator` może pozwalać na czynności zmieniające stan systemu i nie powinna być stosowana jako „bezpieczny obserwator” bez weryfikacji.
+
+### Tworzymy własną klasę
+
+Załóżmy, że do nocnego dyżuru NOC potrzebujesz tylko podstawowego podglądu, a nie pełnych uprawnień. Możesz utworzyć klasę `CH04-NOC` z odpowiednimi prawami. Na początek dajemy jej minimalne uprawnienia do odczytu i sprawdzamy, czy wystarczają do wymaganych poleceń.
+
+**R1-vSRX — Configuration Mode [edit private], własna klasa laboratoryjna**
+
+~~~junos
+set system login class CH04-NOC permissions view
+set system login class CH04-NOC idle-timeout 15
+set system login user nocview class CH04-NOC
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+`idle-timeout 15` oznacza limit bezczynności sesji przewidziany przez tę konfigurację. Wymagany zakres i realne działanie zależą od wydania i typu sesji. `permissions view` jest przykładem bardzo ograniczonego dostępu do informacji, ale nie zakładaj, że pozwala czytać wszystkie gałęzie konfiguracji.
+
+Jeżeli NOC ma mieć prawo oglądania konfiguracji, trzeba rozważyć również odpowiednie uprawnienie do widoku konfiguracji, np. `view-configuration`, i przetestować tę decyzję. Więcej praw należy nadawać **dopiero wtedy, gdy istnieje konkretna potrzeba**.
+
+**R1-vSRX — Operational Mode, zalogowany jako nocview w nowej sesji**
+
+~~~junos
+show cli authorization
+show interfaces terse
+show system uptime
+~~~
+
+Sprawdź, które polecenia są dostępne, a które odrzucane. To pozwoli dowiedzieć się znacznie więcej niż samo przeczytanie opisu klasy. Nie próbuj zgadywać wyniku testu, jeśli nie uruchamiałeś go w konkretnej wersji Junos.
+
+### Co z bardzo szczegółowymi rolami?
+
+W bardziej zaawansowanych środowiskach klasy mogą używać dodatkowych ograniczeń poleceń i hierarchii, np. `allow-commands`, `deny-commands` lub innych ustawień dostępu. Ważne jednak, że te reguły **współpracują z bazowymi permissions** i nie powinny być traktowane jako sposób bezwarunkowego obejścia każdej kontroli.
+
+Jeżeli NOC ma móc wykonać wyłącznie jeden konkretny `show`, najpierw projektujesz rolę i testujesz ją na wydzielonym koncie. Nie kopiujesz przypadkowego regexu `allow-commands` z bloga, bo zbyt szeroki wzorzec może dopuścić więcej poleceń niż planowano.
+
+**Rozumienie na poziomie JNCIP** polega tu nie na zapamiętaniu wszystkich nazw permissions, lecz na umiejętności odróżnienia: udanego uwierzytelnienia, wyboru login class oraz konkretnej decyzji o dopuszczeniu polecenia.
+
+**Dokumentacja:** [Junos Access Privileges](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html).
+
+---
+
+## 4.5. AAA — co się dzieje, gdy serwer uwierzytelniania nie odpowiada? [A]
+
+### Po co firmie centralny serwer logowania?
+
+Na jednym routerze dwie lokalne nazwy użytkowników są proste w utrzymaniu. Ale firma może mieć setki urządzeń w kilkudziesięciu lokalizacjach. Zakładanie i wyłączanie kont na każdym z nich osobno szybko staje się problemem. Dlatego wiele organizacji korzysta z **centralnego AAA**, najczęściej przez **TACACS+** albo **RADIUS**.
+
+Kiedy administrator próbuje wejść na R1, router może wysłać zapytanie do serwera AAA. Serwer sprawdza przedstawione dane i zwraca odpowiedź. W odpowiednio skonfigurowanym rozwiązaniu może też uczestniczyć w przypisaniu uprawnień oraz rejestrowaniu działań.
+
+Nie potrzebujesz na razie znać formatu protokołów TACACS+ czy RADIUS. Kluczowe są trzy pytania: **kto potwierdza tożsamość**, **co się stanie, jeśli ten system nie działa** i **co się stanie, jeśli świadomie odmówi dostępu**.
+
+### Timeout nie jest tym samym co reject
+
+Wyobraź sobie dwa scenariusze.
+
+W pierwszym R1 wysyła zapytanie do serwera TACACS+, ale żaden pakiet z odpowiedzią nie wraca. Może nie działać droga management, serwer lub usługa. To **timeout** albo niedostępność metody.
+
+W drugim R1 wysyła zapytanie i otrzymuje poprawną odpowiedź „ten login nie powinien być zaakceptowany”. To **reject**. Serwer działa, tylko świadomie nie autoryzuje danego logowania.
+
+Na pierwszy rzut oka użytkownik w obu sytuacjach widzi nieudane logowanie. Ale dla zasad fallback to różne warunki.
+
+W klasycznym Junos zachowanie **`authentication-order`** zależy od metod znajdujących się w liście. Dokumentacja Juniper wskazuje m.in., że kiedy serwery zdalne **nie odpowiadają**, lokalne uwierzytelnianie hasłem może być stosowane jako ostatnia szansa, również gdy nie zostało jawnie wymienione w kolejności. Natomiast po **jawnej odmowie** z serwera system może przejść do następnej metody tylko wtedy, gdy ta metoda jest w skonfigurowanej sekwencji. Nie wyciągaj z tego wniosku, że local fallback jest identyczny dla wszystkich konfiguracji.
+
+Przykład:
+
+| Kolejność | Serwer TACACS+ milczy | Serwer odpowiada reject |
+|---|---|---|
+| `tacplus` | W typowym Junos możliwa lokalna próba awaryjna | Lokalna próba nie wynika automatycznie z samego reject |
+| `[ tacplus password ]` | Po niedostępnej metodzie możliwy local | Po odmowie można przejść do jawnie wymienionego `password` |
+| `password` | Zdalny TACACS+ nie bierze udziału | Zdalny TACACS+ nie bierze udziału |
+
+To uproszczenie mechaniki dla **logowania administratorów** w klasycznym Junos. Dokładny wynik zależy też od istnienia lokalnego konta, jego hasła, przypisania class, reguł zdalnego serwera i wydania. Na sesji SSH z kluczem publicznym może istnieć osobna wcześniejsza metoda uwierzytelnienia.
+
+### Bezpieczna kolejność wdrożenia AAA
+
+Zanim ustawisz TACACS+, upewnij się, że masz poprawne lokalne konto administracyjne, działa niezależna konsola i serwer jest osiągalny z właściwej **tablicy routingu** oraz source IP. Wtedy dopiero rozważamy dołączenie zdalnego AAA.
+
+Nie tworzymy fikcyjnego działającego serwera. Poniżej jest przykład **samej polityki kolejności**, nie kompletny projekt TACACS+.
+
+**R1-vSRX — Configuration Mode [edit private], przykład centralnego AAA z jawnym local fallback**
+
+~~~junos
+set system authentication-order [ tacplus password ]
+show | compare
+~~~
+
+To nie jest jeszcze gotowa konfiguracja. Brakuje wpisu serwera TACACS+, prawidłowego source-address, jego osiągalności i **shared secret**. Nie dodawaj `commit`, dopóki tych warunków nie spełniono i nie wykonano osobnych testów dostępu.
+
+### Gdzie skonfigurować serwer TACACS+?
+
+W klasycznym Junos serwery administracyjnego TACACS+ konfiguruje się pod `system tacplus-server`. Potrzebne jest IP serwera oraz sekret współdzielony z systemem AAA. Serwer musi wiedzieć, z jakiego adresu źródłowego router będzie nadawał zapytania. Przy odseparowanym OOB/VRF niewłaściwy source IP albo routing mogą uniemożliwić logowanie mimo poprawnego sekretu.
+
+Załóżmy wyłącznie jako **wariant laboratoryjny**, że `LAB-SERVICES` posiada prawidłowo uruchomiony serwer TACACS+ pod 203.0.113.30, a R1 ma faktycznie skonfigurowany i osiągalny adres zarządzania **203.0.113.10** w odpowiednim kontekście. Dopiero po weryfikacji tych faktów można rozważyć:
+
+**R1-vSRX — Configuration Mode [edit private], szablon TACACS+ bez sekretu — NIEKOMPLETNY**
+
+~~~junos
+set system tacplus-server 203.0.113.30 source-address 203.0.113.10
+set system authentication-order [ tacplus password ]
+show | compare
+~~~
+
+Celowo nie ma tu polecenia z hasłem TACACS+, bo nie wolno umieszczać prawdziwego sekretu w repozytorium. Sekret wprowadza się odpowiednim wspieranym mechanizmem lub z kontrolowanego vault, bez jego ujawniania w historii sesji. **Powyższy blok nie powinien być samodzielnie zatwierdzany jako pełny onboarding AAA.**
+
+### RADIUS — podobny cel, inny sposób działania
+
+RADIUS jest również protokołem używanym do AAA. Spotkasz go w systemach Wi-Fi, 802.1X i dostępie do urządzeń. Nie oznacza to jednak, że konfiguracja RADIUS i TACACS+ jest po prostu zmianą jednego słowa. W zależności od zastosowania różnią się możliwości zarządzania uprawnieniami oraz obsługa atrybutów.
+
+W wariancie urządzeń Junos można użyć `system radius-server` i wskazać kolejność `[ radius password ]`, pod warunkiem przygotowania serwera, source IP i zgodnego sekretu. **Nie włączaj jednocześnie kilku metod zdalnych bez zaprojektowania oczekiwanej kolejności**.
+
+### Jak udowodnić, że AAA naprawdę działa?
+
+Trzeba wykonać co najmniej trzy różne testy: udane logowanie z centralnym serwerem, kontrolowaną odmowę oraz niedostępność serwera z zachowaniem awaryjnego dostępu lokalnego. Jeśli nie masz prawdziwego serwera TACACS+/RADIUS, nie jesteś w stanie uczciwie oznaczyć tego eksperymentu jako PASS.
+
+**R1-vSRX — Operational Mode, pre-check do testu AAA**
+
+~~~junos
+show configuration system authentication-order
+show configuration system tacplus-server
+show route 203.0.113.30
+show log messages | match "tac|radius|sshd|login"
+show system users
+~~~
+
+Te odczyty nie dowodzą jeszcze logowania. Potrzebne są logi **z obu stron**: Junos i serwera AAA, plus rzeczywista nowa sesja. Ważne jest też, jaką login class otrzymał użytkownik. Udane hasło nie oznacza automatycznie `super-user`.
+
+**Dokumentacja:** [Authentication Order for RADIUS/TACACS+/Local Password](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-authentication-order.html), [TACACS+ Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-tacacs-authentication.html).
+
+---
+
+## 4.6. Interfejsy Junos — co tak naprawdę konfigurujesz, gdy wpisujesz adres IP? [A]
+
+### Port Ethernet, jednostka logiczna i protokół to trzy różne rzeczy
+
+W rozdziale II poznaliśmy różnicę między siecią bezpośrednio połączoną a trasą statyczną. W rozdziale III widzieliśmy już gałąź `interfaces`. Teraz możemy połączyć te wiadomości.
+
+Na R1 port `ge-0/0/0` prowadzi do R2. Z nazwy wiemy, że to fizyczny port Ethernet pewnej klasy. Ale w Junos adres IPv4 nie musi znajdować się bezpośrednio na poziomie fizycznego portu. Zwykle konfigurujemy **jednostkę logiczną `unit 0`**, a dopiero w niej rodzinę protokołów **`family inet`**.
+
+W naszym laboratorium adres R1 na tym łączu to 10.12.0.1/30. Pełna ścieżka wygląda więc tak:
+
+~~~text
+interfaces
+└── ge-0/0/0           ← interfejs fizyczny
+    └── unit 0         ← jednostka logiczna (.0)
+        └── family inet ← rodzina IPv4
+            └── address 10.12.0.1/30
+~~~
+
+Nie musisz dziś znać wszystkich rodzin protokołów. `inet` to IPv4, `inet6` jest związane z IPv6, a `ethernet-switching` dotyczy trybu przełączania na wspieranych platformach. Istnieją też interfejsy agregowane `ae`, loopback `lo0` i interfejsy VLAN L3, np. `irb`. Ich dostępność zależy od modelu i odpowiedniego trybu pracy.
+
+### Konkretny przykład na R1
+
+**R1-vSRX — Configuration Mode [edit private], tylko jeśli adres nie jest już ustawiony w bazowym labie**
+
+~~~junos
+set interfaces ge-0/0/0 description "DIAMOND-6R to R2"
+set interfaces ge-0/0/0 unit 0 family inet address 10.12.0.1/30
+show interfaces ge-0/0/0
+show | compare
+~~~
+
+Nie zatwierdzaj ślepo tej konfiguracji, jeśli interfejs już ma adres. W referencyjnym DIAMOND-6R port powinien być znany; celem ćwiczenia jest **zrozumienie hierarchii**, a nie duplikowanie parametrów czy zmiana istniejącej sieci.
+
+Po aktywowaniu interfejsu i połączeniu z R2 router może mieć bezpośrednią trasę `Direct 10.12.0.0/30` i lokalną `Local 10.12.0.1/32`, jak wyjaśniliśmy w rozdziale II. To dobry przykład konsekwencji prostej konfiguracji: wpisanie adresu zmienia nie tylko opis portu, ale również informacje routingu.
+
+**R1-vSRX — Operational Mode, weryfikacja powiązania portu i tras**
+
+~~~junos
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/0 extensive
+show route 10.12.0.0/30 exact
+show route 10.12.0.1/32 exact
+~~~
+
+### Czy interfejs fizyczny „up” oznacza, że IP działa?
+
+Nie. `Physical link is Up` oznacza, że port zgłasza działającą warstwę fizyczną lub emulowany link. Jednostka logiczna może jednak być nieaktywna, może mieć inny adres, złą rodzinę protokołów albo wpływ może mieć security zone. Na vSRX ruch do własnego adresu dodatkowo zależy od reguł host-inbound, a ruch tranzytowy od security policies.
+
+To znaczy, że test `show interfaces terse` jest początkiem diagnostyki, a nie jej końcem.
+
+### Czym różnią się `fxp0`, `me0`, `vme`, `irb`, `ae` i `lo0`?
+
+`fxp0` lub `me0` spotkasz w kontekście zarządzania, zależnie od platformy. `vme` może pełnić funkcję wirtualnego interfejsu zarządzania w wybranych rozwiązaniach przełącznikowych. `irb` pozwala powiązać routing warstwy trzeciej z odpowiednimi domenami przełączania, gdy urządzenie wspiera ten mechanizm. `ae` to interfejs agregujący kilka fizycznych połączeń. `lo0` to interfejs logiczny, często wykorzystywany do stabilnych adresów routera i mechanizmów ochrony control plane.
+
+Nie ma sensu konfigurować wszystkich tych typów na vSRX tylko po to, by zapamiętać ich nazwy. Przełącznik EX ma inne możliwości niż wirtualny firewall, a niektóre funkcje zależą od hardware i trybu pracy. Do ćwiczeń Layer 2 w późniejszych rozdziałach mogą być potrzebne EX/vEX lub inny wspierany obraz.
+
+### A co z adresacją management?
+
+W 4.2 ustaliliśmy, że rozróżniamy **sieć danych**, **port zarządzania** i **tablicę routingu, z której korzystają usługi systemowe**. Na R1 adres 192.0.2.1/24 należy do LAN-A, a 10.12.0.1/30 do łącza rdzeniowego. Nie chcemy przeznaczyć żadnego z tych portów na fikcyjny management.
+
+Jeśli masz prawdziwy izolowany interfejs OOB o zweryfikowanej nazwie, można go skonfigurować według jego instrukcji. Dopiero wtedy sprawdzisz, czy serwery AAA, NTP i syslog są osiągalne w odpowiedniej tablicy. Nie przenoś `default route` do `mgmt_junos.inet.0` bez zrozumienia skutku.
+
+**R1-vSRX — Operational Mode, dwa widoki tras, jeśli wspierana jest mgmt_junos**
+
+~~~junos
+show route table inet.0
+show route table mgmt_junos.inet.0
+show interfaces terse
+~~~
+
+**Wniosek:** dobrze skonfigurowany adres IP jest dopiero elementem procesu. Port, logiczna jednostka, rodzina, security zone i właściwa tablica routingu muszą pasować do rzeczywistego celu.
+
+---
+
+## 4.7. Configuration groups — jak uniknąć ręcznego przepisywania tych samych ustawień? [A]
+
+W małym laboratorium masz sześć routerów, a w prawdziwej firmie może być ich kilkaset. Wyobraź sobie, że na każdym urządzeniu obowiązuje ta sama firmowa zasada: standardowy komunikat logowania, pewne ustawienia systemowe, konwencja opisów i wybrane parametry monitoringu.
+
+Możesz ręcznie wpisywać identyczne linie na każdym routerze. To zadziała, lecz przy kolejnej zmianie standardu musisz poprawić wszystkie miejsca. W Junos istnieje mechanizm **configuration groups**, który pozwala wielokrotnie wykorzystywać fragmenty konfiguracji i dziedziczyć je w odpowiednich miejscach hierarchii.
+
+### Najpierw wyjaśnijmy samo dziedziczenie
+
+Gdy konfiguracja lokalna używa grupy, Junos może pobrać z niej wartości, które mają obowiązywać w danej części drzewa. Sama grupa to jednak **definicja szablonu**, a nie jego natychmiastowe zastosowanie. Potrzebne jest wskazanie `apply-groups`.
+
+Przyjmijmy prosty przykład. Na R1 chcemy zastosować standardowy komunikat logowania.
+
+**R1-vSRX — Configuration Mode [edit private], definicja grupy**
+
+~~~junos
+set groups CH04-BASE system login message "CH04: Lab device"
+show groups CH04-BASE
+~~~
+
+Zwróć uwagę: właśnie utworzyłeś grupę w candidate. Ale dopóki nie została zastosowana, nie musi wpływać na wynikową konfigurację systemu.
+
+**R1-vSRX — Configuration Mode [edit private], zastosowanie grupy**
+
+~~~junos
+set apply-groups CH04-BASE
+show | compare
+show system login | display inheritance
+~~~
+
+`apply-groups` na poziomie korzenia wskazuje, że system ma uwzględniać tę grupę w odpowiednich miejscach drzewa konfiguracji. `display inheritance` pokazuje wartości uwzględniające dziedziczenie. To ważne: bez tego polecenia inżynier może nie znaleźć ustawienia w miejscu, w którym go oczekiwał.
+
+### Co, gdy lokalnie ustawisz inną wartość?
+
+Załóżmy, że R1 potrzebuje innego komunikatu niż pozostałe urządzenia. Nie musisz od razu usuwać całej grupy. W typowym mechanizmie dziedziczenia **jawnie ustawiona wartość lokalna może mieć pierwszeństwo** nad wartością dziedziczoną.
+
+**R1-vSRX — Configuration Mode [edit private], lokalny wyjątek od grupy**
+
+~~~junos
+set system login message "CH04: R1 local exception"
+show system login | display inheritance
+show | compare
+~~~
+
+Sprawdź, która wartość pojawiła się w konfiguracji wynikowej. Dzięki temu nie uczysz się tylko komend, ale mechanizmu: najpierw przychodzi szablon, potem może go nadpisać ustawienie zdefiniowane bliżej konkretnego urządzenia albo odpowiedniego obiektu.
+
+Przy większej liczbie grup **kolejność `apply-groups` ma znaczenie** dla wyboru wartości. Nie próbuj zgadywać, że ostatnia wymieniona zawsze wygrywa w każdej sytuacji — sprawdź dokumentację i faktyczne `display inheritance`.
+
+### A jeśli chcę wyłączyć dziedziczenie tylko na jednym porcie?
+
+Junos posiada również **`apply-groups-except`**, które pozwala wyłączyć dziedziczenie wskazanej grupy w odpowiednim poddrzewie. To przydatne, kiedy setki interfejsów korzystają ze standardu, a pojedynczy wymaga wyjątku.
+
+Nie będziemy konfigurować fikcyjnych 120 portów na vSRX. Wystarczy zrozumieć, że grupa i jej wyłączenie są częścią **hierarchii**, a nie globalnymi tekstowymi „makrami”, które zawsze działają identycznie na każdym miejscu.
+
+W rozbudowanych konfiguracjach mogą występować także symbole dopasowujące, np. wildcards, pozwalające stosować wspólny fragment do większej liczby obiektów. To temat, przy którym warto szczególnie uważać na zakres dopasowania: zbyt szeroki wzorzec może objąć także interfejsy zarządzające lub porty z inną rolą.
+
+### Czy `apply-groups` wysyła konfigurację automatycznie na R2 i R3?
+
+Nie. Grupa w konfiguracji R1 jest lokalnym mechanizmem dziedziczenia na R1. Nie jest centralnym systemem zarządzania sześcioma routerami. Jeżeli chcesz zastosować standard na R2 i R3, musisz go świadomie dostarczyć i zatwierdzić na tych urządzeniach, ewentualnie korzystając z zewnętrznej automatyzacji.
+
+Właśnie dlatego configuration groups pomagają w **powtarzaniu konfiguracji**, ale nie zastępują repozytorium, backupu, orkiestracji ani kontroli zmian.
+
+### Jak bezpiecznie wycofać laboratoryjny eksperyment?
+
+Jeśli grupa i wyjątek nie zostały jeszcze zatwierdzone, a w prywatnej candidate masz wyłącznie własne testy, możesz usunąć ich elementy i porównać stan z active.
+
+**R1-vSRX — Configuration Mode [edit private], wycofanie własnego eksperymentu**
+
+~~~junos
+delete system login message
+delete apply-groups CH04-BASE
+delete groups CH04-BASE
+show | compare
+~~~
+
+Nie zakładaj pustego diffu, jeśli wcześniej istniał już jakiś `system login message` — w takim przypadku trzeba przywrócić poprzednią wartość, a nie usuwać ją na ślepo. W tym rozdziale wielokrotnie wracamy do zasady: **baseline ma większą wartość niż mechaniczny cleanup**.
+
+**Dokumentacja:** [Configuration Groups Usage](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html), [apply-groups](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/apply-groups.html).
+
+---
+
+## 4.8. NTP — dlaczego poprawna godzina jest częścią działania sieci? [A]
+
+### Dwie awarie i trzy różne zegary
+
+R1 pokazuje awarię portu o 10:04, R2 o 10:07, a serwer aplikacji zapisuje błąd o 10:03. Czy najpierw padło połączenie, a dopiero potem aplikacja? Jeśli zegary różnią się o kilka minut, nie możesz tego wiarygodnie ustalić.
+
+W środowisku Enterprise logi routerów, switchy, firewalli, AAA i serwerów trafiają często do jednego systemu. Żeby ustalić kolejność zdarzeń, urządzenia potrzebują możliwie wspólnego czasu. Do tego służy **NTP — Network Time Protocol**.
+
+NTP pozwala urządzeniu porównywać swój czas z wybranymi serwerami i stopniowo korygować zegar. Nie jest to tylko „pobranie aktualnej godziny raz na zawsze”. System utrzymuje informację o źródłach czasu i ich jakości; może też uznać serwer za niewiarygodny lub nieosiągalny.
+
+### Stratum, association i synchronized — co oznaczają?
+
+**NTP server** to urządzenie lub usługa udostępniająca czas innym. **Stratum** opisuje pozycję danego źródła w hierarchii NTP, ale niższa liczba nie zawsze oznacza, że ten serwer jest najlepszym wyborem dla konkretnego klienta. Ważne są także stabilność, osiągalność i inne parametry.
+
+**Association** to relacja klienta NTP z danym źródłem. Sama widoczność takiej relacji nie znaczy jeszcze, że system jest zsynchronizowany. Polecenia `show ntp associations` i `show ntp status` pozwalają rozróżnić serwer wpisany w konfigurację od serwera rzeczywiście używanego i stan synchronizacji urządzenia.
+
+### Konfigurujemy NTP dopiero po przygotowaniu drogi do serwera
+
+W wariancie dodatkowej sieci management załóżmy, że Linux VM `LAB-SERVICES` ma IP **203.0.113.30** i rzeczywiście uruchomiony daemon NTP. R1 musi mieć z niego osiągalną odpowiedź na odpowiednie pakiety, zwykle UDP/123.
+
+**R1-vSRX — Configuration Mode [edit private], serwer NTP w opcjonalnym izolowanym OOB**
+
+~~~junos
+set system ntp server 203.0.113.30
+set system time-zone Europe/Warsaw
+show | compare
+~~~
+
+To **szablon zależny od wariantu labu**. Jeśli nie utworzyłeś sieci management i nie uruchomiłeś usługi NTP na Linux, nie konfiguruj nieistniejącego serwera i nie oznaczaj testu jako PASS.
+
+`time-zone` odpowiada za prezentację czasu lokalnego. Nie synchronizuje zegara. NTP może prawidłowo utrzymywać czas UTC, a administrator zobaczy go w lokalnej strefie; to dwie różne sprawy.
+
+### Dlaczego `source-address` ma znaczenie?
+
+Router może mieć kilka adresów IP. Jeśli wysyła zapytanie do NTP z niewłaściwego source, serwer może nie mieć drogi powrotnej, filtrować zapytania albo traktować router jako nieznanego klienta.
+
+W rozbudowanym środowisku ważna jest także **routing instance** — z której tablicy router szuka drogi do serwera. W NTP istnieją specyficzne zależności od `mgmt_junos`, platformy i wydania, więc nie można po prostu skopiować `source-address` z cudzej konfiguracji i zakładać, że będzie poprawny.
+
+**R1-vSRX — Operational Mode, pre-check trasy do serwera czasu**
+
+~~~junos
+show interfaces terse
+show route 203.0.113.30
+show configuration system ntp | display set
+~~~
+
+Jeżeli korzystasz z wydzielonego management routing instance, sprawdź także odpowiednią tabelę, a nie tylko `inet.0`.
+
+### Jak udowodnić, że NTP działa?
+
+**R1-vSRX — Operational Mode, po rzeczywistym uruchomieniu NTP server**
 
 ~~~junos
 show ntp associations
 show ntp status
 show system uptime
-ping 172.31.240.30
 ~~~
 
-**Czego szukasz?** Zobacz, czy urządzenie ma widoczne association, czy właściwy serwer jest wybrany, jaki jest offset, delay i jakość synchronizacji. Sam działający ping do serwera **nie dowodzi**, że UDP/123 oraz NTP działają.
+Po konfiguracji i udanym commit system może potrzebować pewnego czasu, aby wybrać i zsynchronizować źródło. Nie interpretuj braku natychmiastowego `synchronized` jako jednoznacznej awarii.
 
-### 4.8.4. Gotcha: `set system time-zone` nie synchronizuje czasu
+Przy diagnozie przejdź kolejno przez następujący związek przyczynowy: **adres serwera → droga IP → source-address/VRF → dostęp UDP/123 → odpowiedź serwera → rzeczywista synchronizacja**.
 
-Jest 15:00 UTC, a polski operator widzi 16:00 lokalnie w listopadzie. Zmiana time-zone wyjaśnia sposób **wyświetlania czasu lokalnego**, ale **nie dostarcza informacji o prawidłowym czasie absolutnym**. To dwa różne zagadnienia.
+Ping do 203.0.113.30 potwierdza tylko pewien rodzaj osiągalności ICMP. Nie testuje NTP. Możesz mieć poprawny ping, ale zablokowany UDP/123 lub brak działającej usługi.
 
-**Na pamięć:** time-zone ≠ NTP. **Do zrozumienia:** zegar sprzętowy, synchronizacja NTP, wyświetlanie czasu i znacznik czasu w zewnętrznym SIEM są odrębnymi warstwami. W projektach międzynarodowych często standaryzuje się UTC dla logów i raportów, a lokalną strefę zostawia interfejsowi użytkownika.
-
-### 4.8.5. Gotcha: dobry adres serwera w konfiguracji nie oznacza dobrego źródła IP na urządzeniu
-
-Wyobraź sobie, że na urządzeniu masz zarówno `fxp0` jak i `ge-0/0/0`. NTP dochodzi do serwera tylko z OOB VRF. Router wysyła jednak pakiety z niewłaściwego source IP lub tablicy routingu. Monitoring pokazuje „NTP unreachable”, choć lokalny ping bez wskazania źródła potrafi przejść inną ścieżką.
-
-**Diagnostyka:** sprawdź `show route` we właściwej tabeli, ping z odpowiednim source, ACL pomiędzy urządzeniem a serwerem i `show ntp associations`. Jeśli NTP nie synchronizuje się mimo UDP connectivity, zweryfikuj konfigurację i stan **samego serwera**.
-
-Źródła: [Network Time Protocol](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/ntp-edit-system.html), [Example: Configure NTP](https://www.juniper.net/documentation/us/en/software/junos/time-mgmt/topics/example/example-configure-ntp.html).
+**Dokumentacja:** [NTP Configuration](https://www.juniper.net/documentation/us/en/software/junos/time-mgmt/topics/example/ntp-configuration.html), [NTP source-address and management instance](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/ntp-edit-system.html).
 
 ---
 
-## 4.9. SNMP — dlaczego monitoring ma widzieć urządzenie, ale nie móc nim dowolnie sterować? [A]
+## 4.9. SNMP — jak system monitoringu dowiaduje się, co dzieje się na routerze? [A]
 
-### 4.9.1. Router działa, ale Spectrum/Zabbix/Grafana widzą go jako „unknown”
+### Nie każdy administrator stale patrzy na konsolę
 
-W piątek po 18:00 system monitoringu wysyła alert „device lost”, choć SSH do routera działa. Co to oznacza? Nie wiesz jeszcze, czy padło urządzenie, SNMP agent, ACL/VRF, czy po prostu NMS nie rozpoznaje odpowiedniego użytkownika.
+Wyobraź sobie, że R1 działa w biurze oddalonym o kilkaset kilometrów. Zespół sieciowy nie będzie co minutę logował się przez SSH i wykonywał `show interfaces`. Potrzebuje systemu, który regularnie sprawdza stan urządzeń, zapisuje pomiary i powiadamia o problemach.
 
-W Cisco znasz SNMPv2c (community string) i SNMPv3 (`authPriv`). Na Junos logika jest podobna, ale konfiguracja SNMPv3 rozdziela **USM** (tożsamość, uwierzytelnienie, szyfrowanie) i **VACM** (kontrola dostępu do MIB). Nie wystarczy wpisać jednego hasła i liczyć na polling.
+Jednym ze sposobów zbierania takich informacji jest **SNMP — Simple Network Management Protocol**. Router udostępnia pewne dane przez SNMP agent, a system monitoringu — często nazywany **NMS (Network Management System)** — może je odczytywać.
 
-### 4.9.2. Dlaczego SNMPv2c community jest niewystarczające do nowej sieci
+Wśród typowych danych znajdują się informacje o czasie działania, interfejsach i licznikach. Ale odczyt informacji nie jest tym samym co wykrywanie każdego rodzaju awarii. Nie każda niedostępność aplikacji jest widoczna jako awaria interfejsu, a poprawne odpowiedzi SNMP nie dowodzą, że użytkownicy mają działający Internet.
 
-SNMPv2c używa community jako prostego mechanizmu dostępu, bez ochrony transmisji porównywalnej z SNMPv3 authPriv. W segmentach legacy może być nadal używane, ale **nie powinien to być domyślny wybór dla nowego Enterprise campus**, jeśli masz NMS wspierający v3.
+### Polling, trap i inform — trzy sytuacje
 
-**Gotcha:** community string w SNMPv2c **nie jest** pełnym uwierzytelnieniem użytkownika w znaczeniu SNMPv3. Nie nazywaj go bezpiecznym „hasłem szyfrującym”.
+Najczęściej monitoring działa jako **polling**: NMS sam pyta router o wybrane informacje, zwykle przez UDP/161. Wyobraź sobie, że co minutę sprawdza, czy port R1 do R2 jest w stanie `up`.
 
-### 4.9.3. USM, VACM, engine ID — trzy elementy jednej sesji monitoringu
+**Trap** działa w odwrotnym kierunku: router wysyła do systemu monitoringu powiadomienie o zdarzeniu, np. zmianie stanu interfejsu. W typowej konfiguracji SNMP służy do tego UDP/162. **Inform** jest podobnym rodzajem powiadomienia, ale przewiduje potwierdzenie odbioru przez system docelowy.
 
-~~~mermaid
-flowchart LR
-  NMS["NMS (np. Zabbix / Spectrum)\nSNMPv3 authPriv"] --> S["Agent SNMP Junos"]
-  S --> E["Engine ID"]
-  S --> U["USM: user/auth/privacy"]
-  U --> V["VACM: security-name → group → view"]
-  V --> M["Dozwolone OID/MIB"]
-  V -. "niedozwolone OID" .-> D["Brak uprawnienia"]
-~~~
+Te mechanizmy nie zastępują się nawzajem. Polling może wykryć aktualny stan, a zdarzeniowa notyfikacja pomaga zauważyć zmianę szybciej. Każdy wymaga poprawnej konfiguracji i ścieżki sieciowej.
 
-**Co widzisz na rysunku?** Najpierw NMS i agent uzgadniają kontekst bezpieczeństwa, a następnie **VACM** ustala, co danemu użytkownikowi wolno odczytać. Uwierzytelnienie może zakończyć się powodzeniem, lecz dostęp do konkretnego OID nadal może być zabroniony.
+### Dlaczego w nowej sieci wybieramy SNMPv3?
 
-**Kluczowy gotcha:** producent zaleca **skonfigurować stabilny lokalny SNMP engine ID przed utworzeniem użytkowników USM**. Klucze pochodne SNMPv3 zależą od engine ID; jego zmiana po utworzeniu użytkowników może zaburzyć poprawne uwierzytelnianie.
+W starszych środowiskach często spotkasz **SNMPv2c**, w którym dostęp opiera się na community string. Ta wartość nie zapewnia nowoczesnego szyfrowania komunikacji i nie powinna być domyślnym wyborem dla nowego projektu.
 
-### 4.9.4. Bezpieczna konfiguracja SNMPv3 authPriv — bez wpisywania tajnych haseł do GitHub
+**SNMPv3** pozwala używać uwierzytelniania i ochrony poufności danych. Poziom **authPriv** oznacza, że komunikacja używa zarówno uwierzytelniania, jak i szyfrowania. W Junos występują tu dwa istotne mechanizmy:
 
-W produkcyjnym projekcie uzgodnij:
-- nazwa użytkownika SNMPv3;
-- algorytm uwierzytelniania wspierany przez Junos i NMS;
-- algorytm privacy wspierany przez obie strony;
-- read-only MIB view;
-- właściwy engine ID;
-- droga i źródło ruchu NMS;
-- ograniczenie źródeł pollingu na sieci management.
+**USM (User-based Security Model)** odpowiada za bezpieczeństwo komunikatów związane z użytkownikiem SNMP, np. uwierzytelnianie i szyfrowanie. **VACM (View-based Access Control Model)** określa, jaki zakres danych dany użytkownik lub grupa może odczytywać.
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], bez sekretów, szkielet widoku i VACM**
+To podobne rozróżnienie do konta administracyjnego i jego uprawnień. Nie wystarczy znać hasło; trzeba jeszcze wiedzieć, **które informacje wolno odczytać**.
+
+### Czym jest engine ID?
+
+SNMPv3 korzysta z identyfikatora engine, który wiąże się z bezpieczeństwem i użytkownikami USM. W pewnych konfiguracjach zmiana engine ID po skonfigurowaniu kluczy powoduje problemy z uwierzytelnianiem i może wymagać ponownego skonfigurowania użytkowników/kluczy.
+
+Dlatego w produkcyjnym wdrożeniu najpierw ustala się właściwy, stabilny identyfikator, a dopiero później finalną konfigurację użytkowników USM. Nie zmieniaj go arbitralnie podczas troubleshootingu.
+
+### Projektujemy ograniczony widok do odczytu
+
+Na początku pokażmy część SNMP, która nie wymaga żadnego sekretu: zdefiniowanie widoku danych i powiązanie go z grupą uprawnień. W tym przykładzie nazwa `CH04-RO` oznacza *read-only*.
+
+**R1-vSRX — Configuration Mode [edit private], fragment modelu dostępu SNMPv3**
 
 ~~~junos
-set snmp engine-id use-mac-address
-set snmp view LAB-RO oid .1 include
-set snmp v3 vacm security-to-group security-model usm security-name NMS-RO group LAB-NMS
-set snmp v3 vacm access group LAB-NMS default-context-prefix security-model usm security-level privacy context-match exact
-set snmp v3 vacm access group LAB-NMS default-context-prefix security-model usm security-level privacy read-view LAB-RO
+set snmp view CH04-RO oid .1 include
+set snmp v3 vacm security-to-group security-model usm security-name CH04-NMS group CH04-MON
+set snmp v3 vacm access group CH04-MON default-context-prefix security-model usm security-level privacy read-view CH04-RO
+show | compare
 ~~~
 
-Teraz dochodzimy do kluczy USM. W pełnej konfiguracji potrzeba prawdziwych silnych sekretów, ale w publicznym podręczniku **nie zapisujemy ich jako działających haseł**. Poniższe wiersze to **szablon koncepcyjny, nie zestaw gotowy do `commit`**.
+W tej chwili **nie masz jeszcze działającego SNMPv3 authPriv**. Powstała tylko część dotycząca widoku i przypisania grupy. Brakuje prawdziwego użytkownika USM i jego bezpiecznie skonfigurowanych parametrów uwierzytelniania oraz szyfrowania.
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], NIEKOMPLETNY SZABLON SNMPv3 (sekrety uzupełnij z vault)**
+Wybrany OID `.1` pozwala w tej demonstracji zbudować szeroki widok danych SNMP. W produkcji najlepiej ograniczyć widok do informacji niezbędnych dla NMS — nie zakładaj, że „read-only” oznacza brak ryzyka ujawnienia informacji o infrastrukturze.
 
-~~~text
-set snmp v3 usm local-engine user NMS-RO authentication-sha authentication-password <AUTH_SECRET_Z_VAULT>
-set snmp v3 usm local-engine user NMS-RO privacy-aes128 privacy-password <PRIV_SECRET_Z_VAULT>
-~~~
+### Dlaczego nie wklejamy sekretów do dokumentacji?
 
-Pamiętaj: `<...>` to **placeholder**, nie dosłowna komenda do wysłania na urządzenie. W środowiskach wymagających nowszych algorytmów (np. SHA-2/AES w określonych wariantach) zweryfikuj model i release w [Juniper SNMPv3 Configuration](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html). Nie zakładaj, że `authentication-sha` oznacza w każdym modelu SHA-256.
+Do skonfigurowania authPriv potrzebne są m.in. hasła lub klucze uwierzytelniania i prywatności. W dokumentacji producenta znajdziesz składnię z `authentication-sha` i `privacy-aes128`, ale nie wolno umieszczać prawdziwych danych w GitHub ani w zapisywanej sesji terminala.
 
-### 4.9.5. Dlaczego sam SNMPv3 nie wystarczy do kontroli dostępu
+Dlatego zamiast udawać kompletną konfigurację wpisem `SECRET_PLACEHOLDER`, traktujemy poniższy opis jako **niedokończony etap wdrożenia**. Administrator musi:
 
-Juniper podkreśla, że **SNMPv3 nie używa tego samego mechanizmu `clients` co SNMPv2c**. To nie znaczy, że należy otwierać UDP/161 do całego Internetu. Najlepszą praktyką jest **odseparowana sieć zarządzania i odpowiedni firewall filter/ACL/policy** pozwalające tylko określonym NMS na polling.
+1. Wybrać obsługiwany algorytm dla konkretnego Junos i NMS.
+2. Ustalić engine ID.
+3. Utworzyć użytkownika USM oraz jego parametry bezpieczeństwa z bezpiecznego źródła.
+4. Zweryfikować VACM i ewentualną listę klientów/filtry sieciowe.
+5. Uruchomić rzeczywisty test SNMPv3 GET z serwera monitoringu.
 
-**Most z Cisco:** podobnie jak SNMPv3 view/group/user + ACL na Cisco. Nie pozwalaj, żeby sam silny sekret zastępował network-layer access control.
+W nowych wydaniach dostępne mogą być mocniejsze algorytmy niż historyczne SHA-1/AES128, ale ich wybór powinien wynikać z **wspólnego wsparcia urządzenia i klienta SNMP**. Nie zakładaj automatycznie, że składnia z dokumentacji innego modelu działa na naszym obrazie vSRX.
 
-### 4.9.6. Polling vs traps vs informs
+### Skąd wiadomo, że SNMPv3 jest skonfigurowany poprawnie?
 
-**Polling:** NMS wysyła żądanie SNMP do urządzenia (typowo UDP/161).  
-**Trap:** urządzenie wysyła powiadomienie do odbiorcy (typowo UDP/162), zwykle bez standardowego potwierdzenia dostarczenia.  
-**Inform:** powiadomienie z mechanizmem potwierdzania przez odbiorcę.
+Samo `show configuration snmp` oznacza tylko, że router przechowuje ustawienia. Potrzebny jest rzeczywisty **SNMPv3 authPriv GET**, np. odczyt `sysUpTime.0`, wykonany z przygotowanego serwera `LAB-SERVICES`. Odpowiedź ma też być dozwolona przez właściwe filtry oraz ścieżkę management.
 
-**Gotcha egzaminacyjny:** poprawny polling **nie dowodzi**, że trapy dochodzą. Ruch idzie w innym kierunku, może mieć inne source IP, port i politykę security. W Junos SNMPv3 trapy wymagają dodatkowo konfiguracji `notify`, `target-address`, `target-parameters` i ewentualnie `notify-filter`. Dlatego nie „włączamy trapów” jedną przypadkową komendą.
-
-W rozdziale Associate rozumiemy mechanizm; rozbudowaną konfigurację trapów i telemetry streaming rozwiniemy przy monitoringu i automatyzacji.
-
-### 4.9.7. Weryfikacja SNMPv3 i diagnostyka
-
-**Urządzenie: LAB-SRX01 — Operational Mode**
+**R1-vSRX — Operational Mode, podstawowa diagnostyka SNMP**
 
 ~~~junos
 show configuration snmp | display set
@@ -894,654 +747,691 @@ show snmp v3
 show log messages | match "snmp|SNMP"
 ~~~
 
-Na NMS wykonaj rzeczywisty test SNMPv3 (GET na podstawowy OID), a następnie sprawdź logi i liczniki na Junos. Jeśli pojawia się komunikat o błędnej autoryzacji, sprawdź **engine ID, security-name, authentication/privacy algorithms, VACM mapping i hasła**. Jeśli nie ma pakietów, najpierw routing/ACL.
+`show snmp statistics` pomoże zauważyć błędy obsługi, ale do rozstrzygnięcia problemu najlepiej zbierać wyniki po obu stronach. Jeśli router odpowiada na ping, lecz klient SNMP dostaje timeout, zbadaj także UDP/161, source IP, engine ID, użytkownika, algorytmy i VACM.
 
-**Do zapamiętania:** SNMPv3 = USM + VACM; `authPriv` = uwierzytelnienie + ochrona danych; trap ≠ polling; `clients` dla v2c ≠ kontrola dostępu v3.  
-**Do przećwiczenia:** ping z NMS, SNMPv3 GET, celowe niedopasowanie VACM security-name, sprawdzenie przyczyny, poprawa.
+Pamiętaj, że **trap/inform UDP/162** to inny test niż **polling UDP/161**. Udany GET nie dowodzi jeszcze dostarczania powiadomień.
 
-Źródła: [Configure SNMP in Junos OS](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmp-in-junos-os.html), [Configure SNMPv3](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html), [Junos SNMP FAQs](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/junos-os-snmp-faqs.html).
+**Dokumentacja:** [Configure SNMPv3](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html), [Configure SNMP in Junos OS](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmp-in-junos-os.html).
 
 ---
 
-## 4.10. System log / syslog — Router musi umieć opowiedzieć, co się wydarzyło [A]
+## 4.10. Syslog — jak router opowiada historię swojej awarii? [A]
 
-### 4.10.1. Widzisz „link down” — ale czy to wydarzyło się przed czy po zmianie?
+### Bez logów wiesz tylko, co dzieje się teraz
 
-Wracamy do incydentu P1 z prologu. W logu Junos zapisano, że `ge-0/0/1` przestał odpowiadać. Jednak zespół firewall twierdzi, że problem zaczął się 20 minut później. Jeżeli syslog z różnych urządzeń ma różne znaczniki czasu, analiza kolejności zdarzeń może być błędna.
+Widzisz, że port R1 do R2 ma stan `up`. Ale użytkownicy zgłosili przerwę 15 minut temu. Czy port był wtedy `down`? Czy ktoś zmienił konfigurację? Czy urządzenie zostało zrestartowane? Bieżący stan nie daje pełnej odpowiedzi.
 
-Dlatego kolejność greenfield ma sens: **najpierw działający routing management i NTP, potem centralne logowanie**, a następnie archiwizacja i monitoring. Bez tego kolejne systemy dostają niepełny obraz.
+**Syslog** to mechanizm zapisywania zdarzeń. Router może przechowywać logi lokalnie, a także wysyłać je do centralnego serwera, aby ich nie stracić przy poważniejszej awarii.
 
-### 4.10.2. Facility i severity — dwa sposoby klasyfikacji tej samej wiadomości
+Na początek musimy odróżnić **treść zdarzenia**, **czas** i **miejsce przechowywania**. Jeśli zegar routera jest błędny, kolejność zdarzeń będzie trudna do odtworzenia, nawet gdy sam log zawiera poprawną informację. Dlatego NTP pojawia się w tym rozdziale przed syslog.
 
-W Cisco znasz logging facility i severity (emergencies, alerts, critical, errors, warnings, notifications, informational, debugging). Junos używa podobnego modelu **facility + severity**, ale konkretne nazwy facility i sposób kierowania zdarzeń są opisane w jego konfiguracji systemowej.
+### Severity i facility — dwa sposoby opisywania jednej wiadomości
 
-Pomyśl o poczcie:
-- **facility** mówi, *z jakiego działu* przyszedł list (np. authorization, daemon, any);
-- **severity** mówi, *jak pilna* jest wiadomość (np. notice, info, warning).
+W syslog wiadomość może należeć do określonej kategorii, zwanej **facility**, np. związanej z uwierzytelnianiem lub systemem. Ma też poziom ważności, czyli **severity**.
 
-**Haczyk:** `any notice` obejmuje zdarzenia o tym i wyższym priorytecie według zasad logowania, a nie wyłącznie wiersze dosłownie oznaczone NOTICE. `authorization info` pozwala zbierać szczegóły zdarzeń związanych z logowaniem/autoryzacją.
+Nie musisz zapamiętywać wszystkich numerów severity na początku. Wystarczy rozumieć, że `notice` i `info` nie są tym samym co nagły alarm krytyczny. Konfiguracja powinna zapisywać potrzebne zdarzenia bez zasypywania systemu i terminali.
 
-### 4.10.3. Konfigurujemy lokalne logi i zdalny serwer w labie
+### Lokalny log
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], lokalny plik i serwer syslog w segmencie management**
+**R1-vSRX — Configuration Mode [edit private], plik lokalny z systemowymi zdarzeniami**
 
 ~~~junos
 set system syslog file messages any notice
 set system syslog file messages authorization info
-set system syslog host 172.31.240.30 any notice
-set system syslog host 172.31.240.30 authorization info
-set system syslog source-address 172.31.240.10
 show | compare
 ~~~
 
-`LAB-SERVICES` pod `172.31.240.30` musi naprawdę uruchamiać odbiornik syslog, a pomiędzy urządzeniami ruch syslog musi być dozwolony. **Domyślny zdalny syslog UDP nie zapewnia transport encryption i gwarancji dostarczenia**. Wymagania TLS, portów, formatu wiadomości i retencji SIEM należy uzgodnić osobno.
+Pierwsza linia określa, jakie zdarzenia trafią do lokalnego pliku `messages` w odpowiednim zakresie ważności. Druga pozwala uwzględnić informacje o autoryzacji. W rzeczywistej konfiguracji upewnij się, że nie dublujesz niepotrzebnie istniejących reguł ani nie ustawiasz zbyt dużego wolumenu logów.
 
-**Urządzenie: LAB-SRX01 — Operational Mode**
+**R1-vSRX — Operational Mode, odczyt lokalnych zdarzeń**
 
 ~~~junos
-show log messages | last 40
+show log messages | last 30
 show log messages | match "mgd|sshd|UI_COMMIT"
+~~~
+
+Jeśli po commit pojawi się nowa wiadomość, to dobry początek analizy. Nie znaczy to jeszcze, że centralny serwer logowania też ją odebrał.
+
+### Zdalny syslog: drugi koniec musi działać
+
+Załóżmy, że `LAB-SERVICES` rzeczywiście odbiera syslog pod adresem **203.0.113.30** w izolowanej sieci management. Wtedy R1 może wysyłać do niego odpowiednie wiadomości.
+
+**R1-vSRX — Configuration Mode [edit private], zdalny syslog w opcjonalnym OOB**
+
+~~~junos
+set system syslog host 203.0.113.30 any notice
+set system syslog host 203.0.113.30 authorization info
+show | compare
+~~~
+
+To nie uruchamia syslog receiver. Jeśli nie masz serwera, zdalna strona testu pozostaje **NOT TESTED**. Dla produkcyjnego rozwiązania trzeba także rozważyć bezpieczny transport, segmentację management, odporność odbiornika i retencję logów.
+
+### Dlaczego adres źródłowy routera ma znaczenie?
+
+Serwer logów zwykle rozpoznaje urządzenie między innymi po IP, hostname i metadanych zdarzenia. Jeśli R1 wysyła wiadomości z innego źródła niż oczekiwane, alert może zostać źle przypisany albo filtr go odrzuci. Gdy urządzenie ma `mgmt_junos`, trzeba jeszcze sprawdzić właściwą trasę do odbiornika.
+
+Dlatego docelowy projekt zawiera **spójną nazwę urządzenia, poprawny czas, odpowiedni source-address i prawidłową drogę do kolektora**. To cztery oddzielne warunki. Sam `set system syslog host ...` ich nie zapewnia.
+
+### System syslog a logowanie sesji SRX
+
+Na SRX istnieją również mechanizmy związane z **security flow logs**, dokumentujące decyzje i sesje bezpieczeństwa. Nie są one tym samym co zwykły systemowy syslog o błędach interfejsu czy commitach. W zależności od trybu i platformy konfiguracja ruchu flow może być odrębna.
+
+W rozdziale IV uczymy się podstaw zdarzeń systemowych. Nie będziemy konfigurować pełnego SIEM ani szczegółowego eksportu każdej sesji firewall, ponieważ to oddzielny temat.
+
+### Uwaga na zalanie konsoli
+
+Zbyt szerokie wysyłanie wszystkich informacji do wszystkich zalogowanych użytkowników może spowodować **log storm** — lawinę wiadomości, utrudniającą administrację. Nie konfiguruj globalnego wysyłania wszystkiego na terminale jako szybkiego rozwiązania braku monitoringu.
+
+### Jak sprawdzić syslog end-to-end?
+
+Po testowej zmianie nazwy, opisu portu lub logowaniu znajdź zdarzenie lokalnie na R1 i w odpowiednim czasie na `LAB-SERVICES`. Porównaj jego timestamp i identyfikator urządzenia. Zapisane ustawienie docelowego IP nie dowodzi, że pakiet został dostarczony.
+
+**R1-vSRX — Operational Mode, odczyt przed raportem do NOC**
+
+~~~junos
 show configuration system syslog | display set
+show log messages | last 40
 show system uptime
 ~~~
 
-Jeśli nie widać nic na serwerze, pierwsze pytanie brzmi: czy `LAB-SERVICES` odbiera pakiety? Drugie: jaki source IP i routing instance wybrał Junos? Trzecie: czy log jest kierowany do właściwej facility/priorytetu? Nie rozwiązuje się tego przez `set ... any any` na wszystkich urządzeniach bez oszacowania skali danych.
-
-### 4.10.4. Gotcha z prawdziwej społeczności Junipera: „syslog zalał konsolę”
-
-W [wątku technicznym Juniper Community o `set system syslog user * any info`](https://community.juniper.net/discussion/set-system-syslog-user-any-info-creating-log-storms) administrator opisał problem z nadmierną liczbą logów docierających do sesji użytkowników. To dobry przypadek, bo mało kto na egzaminie tłumaczy konsekwencje słowa `user *`.
-
-**Różnica:**
-- `syslog file ...` kieruje zdarzenia do lokalnego pliku;
-- `syslog host ...` do serwera;
-- `syslog user ...` do odpowiednich zalogowanych użytkowników.
-
-Nie włączaj masowo **`user * any info`** w produkcji, jeśli nie chcesz zamienić każdej sesji CLI w niekończący się strumień wiadomości. To może utrudnić nawet wpisanie polecenia ratunkowego podczas incydentu.
-
-**Most z Cisco:** znasz różnicę między `logging console`, `logging buffered` i `logging host`, choć składnia i formaty Junos są inne. Dobór kanału logowania wpływa na **operatora**, nie tylko na archiwum.
-
-### 4.10.5. Source IP i kolekcja w SIEM — po co jeszcze `host-name` i NTP?
-
-SIEM może rozpoznawać urządzenie po nazwie i adresie. Jeśli syslog wychodzi z nieoczekiwanego interfejsu, system może wstawić zdarzenia do niewłaściwego CI. Jeśli godzina jest błędna, incident timeline będzie mylący. Jeśli facility nie obejmuje login events, auditing będzie niepełny.
-
-**Praktyczna checklista:** skonfiguruj stabilną tożsamość urządzenia, sprawdź NTP, source-address/syslog host, przeprowadź test remote collection, zweryfikuj parsowanie i powiązanie z CMDB, ustal retention i zabezpieczenie transportu.
-
-### 4.10.6. Lokalny syslog to nie SRX security flow log
-
-Na SRX istnieją odrębne mechanizmy logowania **ruchu security/flow** (policy session events) i logowania systemowego (procesy, użytkownicy, daemon messages). **Nie zakładaj**, że `set system syslog host` automatycznie wyśle wszystkie szczegółowe wpisy o każdej sesji firewall.
-
-Konfiguracja SRX security logging/stream i polityk należy do osobnego obszaru security. W tym rozdziale skupiamy się na **system logging**, dlatego nie mieszamy obu przestrzeni.
-
-Źródło: [Direct System Log Messages to a Remote Destination](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/directing-system-log-messages-to-a-remote-destination.html), [Logging, SNMP, and Telemetry](https://www.juniper.net/documentation/us/en/software/junos/srx400-series-configuration-essentials/config-essentials-user-guide-srx4xx/topics/concept/logging-snmp.html).
-
-
+**Dokumentacja:** [System Syslog Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/syslog-edit-system.html), [System Logging Source Address](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/security-source-address-edit-system-ntp-radius-syslog-tacacs.html).
 
 ---
 
-## 4.11. Configuration archival — co zrobisz, gdy router nie ma już własnych backupów? [A]
+## 4.11. Configuration archival — dlaczego historia rollback na routerze to jeszcze nie backup? [A]
 
-### 4.11.1. Historia, którą zna każdy administrator zewnętrznego klienta
+### Gdyby jutro trzeba było wymienić R1
 
-Wyobraź sobie pięcioletnie urządzenie, które ma za sobą 150 zmian. Dzisiaj jeden z modułów RE przestaje działać, a w magazynie czeka zamiennik. Pracownik onsite pyta: „Skąd wziąć ostatnią działającą konfigurację?”. Odpowiadasz: „Z lokalnego rollbacku 1”. Ale przecież **lokalny rollback znajduje się na uszkodzonym urządzeniu**.
+Wyobraź sobie, że R1 przestaje działać i nie da się już uruchomić jego systemu operacyjnego. Technicy mają w magazynie nowy vSRX lub fizyczny router zastępczy. Ktoś pyta: „Gdzie jest ostatnia zatwierdzona konfiguracja?”.
 
-Właśnie tutaj kończy się wygodny mechanizm `rollback 0..49` z rozdziału 3, a zaczyna niezależna **configuration archival**. Junos potrafi po zatwierdzeniu konfiguracji wysłać kopię do zewnętrznego miejsca. To nie musi zastępować NCM/HPNA/Ansible/NetBox/Git — ale powinno sprawić, że awaria dysku nie kasuje jedynego egzemplarza danych.
+Z rozdziału III znasz lokalną historię commit oraz `rollback 1`. To bardzo wygodne, kiedy sam router działa. Ale jeśli nie można już odczytać jego pamięci, lokalna historia może być niedostępna razem z urządzeniem.
 
-**Most z Cisco:** `archive`, `copy running-config scp:`, Cisco Catalyst Center/NCM backup i Git. Na Junos **`system archival configuration`** pozwala opisać automatyczne przesyłanie aktualnej konfiguracji po commit, zgodnie z obsługiwanym transportem.
+Dlatego administracja Enterprise potrzebuje **niezależnej kopii konfiguracji**, przechowywanej poza routerem. W Junos jedną z opcji jest **configuration archival**, czyli automatyczne przesyłanie zatwierdzonej konfiguracji na zewnętrzny serwer.
 
-### 4.11.2. Trzy rodzaje kopii — i dlaczego żaden nie zastępuje wszystkich
+### Trzy różne formy zabezpieczenia konfiguracji
 
-**Pierwsza: local rollback history.** Umożliwia szybki powrót do wcześniejszego zatwierdzonego stanu, jeśli urządzenie i storage działają.
+Nie mieszajmy trzech mechanizmów.
 
-**Druga: rescue configuration.** Ręcznie zapisany punkt powrotu, o którym opowiemy w 4.13. Jest wygodny, ale też pozostaje lokalny.
+**Rollback history** pozwala przywrócić wcześniejsze wersje zatwierdzonej konfiguracji na urządzeniu, o ile te wersje są dostępne.
 
-**Trzecia: off-device archival.** Kopia trafia do serwera backupowego poza routerem. Jest bardzo cenna przy RMA/DR, ale wymaga drogi IP, poprawnej autentykacji i sprawdzenia, że transfer **rzeczywiście doszedł**.
+**Rescue configuration**, którą poznamy w 4.13, jest specjalnie zapisaną konfiguracją ratunkową. Administrator decyduje, kiedy jest wystarczająco dobra, aby stać się punktem powrotu.
 
-~~~mermaid
-flowchart LR
-  RE["LAB-SRX01\nActive Config"] -->|"commit"| HIST["Local history 0..49"]
-  RE -->|"manual rescue save"| RESCUE["Local rescue.conf.gz"]
-  RE -->|"transfer-on-commit"| CACHE["Local transfer queue / cache"]
-  CACHE -->|"SCP/SSH"| BAK["Remote archive\naccess-controlled + offsite"]
-~~~
+**Off-device archive** to kopia wysłana poza urządzenie, np. na odpowiednio zabezpieczony serwer. Ten mechanizm pomaga, kiedy lokalna pamięć urządzenia lub sam router zostaną utracone.
 
-**Pytanie:** czy pojawienie się komunikatu `commit complete` dowodzi, że plik dotarł na backup server? **Nie.** Commit, lokalna kolejka transferu i udany zapis w remote archive to oddzielne etapy.
+Dobry projekt często wykorzystuje wszystkie trzy, ponieważ rozwiązują różne problemy.
 
-### 4.11.3. Minimalny szablon archiwizacji bez ujawniania hasła
+### Co oznacza archiwizacja po każdym commit?
 
-Załóżmy, że serwer `LAB-SERVICES` pod `172.31.240.30` ma konto `junos-archive`, przygotowany katalog i wcześniej zaufany host key. Na urządzeniu istnieje dopuszczona metoda bezhasłowego SCP, zgodna z wydaniem Junos i polityką security.
+W Junos można zaplanować przesyłanie konfiguracji do archiwum, np. przy każdej zatwierdzonej zmianie. To nazywa się **`transfer-on-commit`**.
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wariant LAB do zweryfikowania z faktycznym serwerem SCP**
+**R1-vSRX — Configuration Mode [edit private], włączenie samego mechanizmu archival**
 
 ~~~junos
 set system archival configuration transfer-on-commit
-set system archival configuration archive-sites "scp://junos-archive@172.31.240.30/backup/junos/"
 show | compare
 ~~~
 
-**Nie jest to kompletny działający deployment**, dopóki nie skonfigurujesz poprawnego uwierzytelniania SCP, dostępu do katalogu, host key trust i sieci management. Nie wstawiaj `username:password@` do publicznych skryptów i repo.
+Nie mamy jeszcze podanego docelowego serwera i nie powinniśmy zatwierdzać tej części jako kompletnego rozwiązania backupowego. Konfiguracja archiwum potrzebuje rzeczywistego miejsca docelowego, działającej ścieżki sieciowej oraz autoryzacji do zapisu plików.
 
-W przypadku konfigurowania SCP Junos może rozpocząć pobieranie fingerprintu host key. **Nie akceptuj na ślepo nieznanego klucza** tylko dlatego, że adres IP wygląda znajomo — porównaj fingerprint z zaufanym kanałem, tak jak robisz przy SSH do serwerów zarządzających.
+### SCP/SFTP i dlaczego nie podajemy hasła serwera
 
-Źródło: [Back Up Configurations to an Archive Site](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/cli/topics/task/junos-software-system-management-router-configuration-archiving.html).
+W zależności od modelu i release Junos może przekazywać archiwa przez wybrane protokoły, w tym **SCP** lub **SFTP**. Oba korzystają z SSH, ale sposób transferu i wymagania implementacyjne mogą się różnić. W nowym środowisku unikamy nieszyfrowanego przesyłania konfiguracji, ponieważ jej zawartość może ujawniać ważne informacje o sieci.
 
-### 4.11.4. Haczyk: transfer-on-commit kontra transfer-interval
+Dla przykładu załóżmy, że `LAB-SERVICES` ma odpowiednio przygotowany katalog archiwum, konto do przyjmowania backupów i serwer SSH. Wówczas można przygotować **szablon**:
 
-Junos oferuje także archiwizowanie **periodyczne** (według interwału). Dokumentacja szkoleniowa *Day One* wskazuje, że `transfer-interval` i `transfer-on-commit` **nie powinny być konfigurowane jednocześnie w tym samym profilu**.
+**R1-vSRX — Configuration Mode [edit private], szablon kierunku SCP — NIEKOMPLETNY**
 
-Na dużym site pytanie nie brzmi wyłącznie „co 15 minut czy po każdym commit?”. Zastanów się również:
-- czy 1000 urządzeń nie wyśle kopii w tym samym momencie;
-- jak rozwiążesz retencję i wersjonowanie plików;
-- czy system archiwizacji odnotuje błąd transferu;
-- czy backup server jest dostępny, gdy WAN albo OOB nie działa;
-- kto potrafi odtworzyć plik **na innej obudowie**, a nie tylko na starym urządzeniu?
+~~~junos
+set system archival configuration archive-sites "scp://junos-backup@203.0.113.30/backup/junos/"
+show | compare
+~~~
 
-**Na pamięć:** `archive-sites` mówi *dokąd*, a `transfer-on-commit` — *kiedy*. **Do zrozumienia:** archiwizacja poza urządzeniem to proces z własnym monitoringiem i ACL, nie uboczny efekt zapisu konfiguracji.
+W tym przykładzie **nie podajemy ani hasła, ani prywatnego klucza SSH**. Istnienie samego URL nie oznacza, że transfer się uda. Trzeba skonfigurować bezpieczny mechanizm uwierzytelniania, zweryfikować host key/fingerprint odbiornika i upewnić się, że docelowy katalog jest zapisywalny. Dokładny sposób ustawienia kluczy, wymiany danych i obsługi `mgmt_junos` zależy od platformy, wydania i polityki organizacji.
 
-### 4.11.5. Weryfikuj transfer, nie tylko konfigurację
+Nie próbuj „rozwiązać” problemu przez ustawianie hasła w jawnym URL i zapisanie go na GitHub. Tak samo nie akceptuj automatycznie dowolnego host key bez weryfikacji — oznaczałoby to ryzyko przesłania konfiguracji nieautoryzowanemu serwerowi.
 
-**Urządzenie: LAB-SRX01 — Operational Mode, read-only check konfiguracji i kolejki**
+### Czy `transfer-on-commit` gwarantuje, że plik dotarł?
+
+Nie. Mechanizm może próbować wysłać konfigurację po commit, ale serwer może być nieosiągalny, konto zablokowane, katalog pełny albo połączenie odrzucone. Samo `commit complete` nie jest potwierdzeniem backupu.
+
+Prawidłowy test to:
+
+1. Sprawdzenie konfiguracji archiwizacji i routingu do serwera.
+2. Wykonanie kontrolowanego commit na bezpiecznej zmianie.
+3. Weryfikacja logów transferu na urządzeniu.
+4. **Potwierdzenie istnienia właściwego pliku po stronie serwera.**
+5. W bardziej zaawansowanym teście — bezpieczna próba wczytania jego kopii na izolowanym routerze i porównania zawartości.
+
+Na niektórych platformach z odrębną management instance istnieją dodatkowe ograniczenia narzędzi transferowych. Dlatego projekt archiwizacji musi uwzględniać faktyczną wersję Junos, nie tylko adres serwera.
+
+**R1-vSRX — Operational Mode, odczyt konfiguracji i wiadomości**
 
 ~~~junos
 show configuration system archival | display set
-show log messages | match "transfer|archive|scp"
-file list /var/transfer/config/
+show log messages | match "archive|transfer|scp|sftp"
+show system commit
 ~~~
 
-Folder cache może różnić się lub nie występować identycznie na danej platformie i wydaniu. Jeżeli CLI zwraca „directory not found”, nie oznacza to automatycznie awarii backupu — sprawdź dokumentację systemu i logi.
+Gdy na serwerze nie ma pliku, nie ogłaszaj PASS mimo prawidłowej konfiguracji na routerze. Sprawdź po kolei: routing, nazwy/klucze, konto, prawa katalogu, dostępny dysk i logi obu stron.
 
-**Na serwerze LAB-SERVICES** niezależnie potwierdź, czy otrzymał plik z aktualnym czasem i hostname. Zrób test przywrócenia na **zapasowej instancji labowej**, nie na produkcyjnym routerze. Bez testu restore kopia jest tylko nadzieją.
-
-**Ważny gotcha:** jeśli konfiguracja zawiera hashe haseł, dane AAA lub inne wrażliwe statementy, **backup również wymaga ochrony dostępu i retencji**. Nie udostępniaj plików z archive przez zwykły publiczny HTTP.
-
-### 4.11.6. Utrata dostępu do archive server przy mgmt_junos
-
-Jeśli archiwizacja ma używać dedykowanej instancji `mgmt_junos`, sama konfiguracja adresu serwera nie gwarantuje poprawnej trasy. W społeczności Junipera opisywano problemy archiwizacji przy oddzielnej routing instance i różnych wydaniach.
-
-**Pytanie operatorskie:** czy na urządzeniu masz trasę **w tej tabeli routingu, której rzeczywiście używa proces archiwizacji**? Jeśli nie, zmiany sysloga, NTP i backupów mogą wszystkie zepsuć się jednocześnie po „małej” reorganizacji management. Dokumentuj te zależności w HLD.
+**Dokumentacja:** [Back Up Configurations to an Archive Site](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/cli/topics/task/junos-software-system-management-router-configuration-archiving.html), [archival statement](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/archival-edit-system.html).
 
 ---
 
-## 4.12. Logging and tracing — debugujesz proces, nie zalewasz całego CPU [A]
+## 4.12. Logging i tracing — jak znaleźć przyczynę, gdy zwykły syslog nie wystarcza? [A]
 
-### 4.12.1. Dlaczego zwykły syslog czasem nie wystarcza?
+### Syslog mówi, że coś się stało. Tracing pomaga dowiedzieć się dlaczego
 
-Załóżmy, że OSPF adjacency przechodzi między `FULL` i `DOWN`, ale w `show log messages` nie ma dosyć informacji, by stwierdzić, czy problemem jest hello/dead interval, MTU czy błędny adres. Czy w takiej chwili sensownie jest uruchamiać bezgraniczne „debug all” na routerze core?
+W sekcji 4.10 nauczyliśmy się odczytywać zdarzenia systemowe. Wyobraź sobie teraz, że w późniejszym laboratorium OSPF sąsiedztwo R1–R2 co kilka minut zmienia stan. W logu widzisz informację o jego zerwaniu, ale nie znasz przyczyny. Czy routery nie uzgadniają parametrów? Czy zanika interfejs? Czy istnieje błąd komunikacji?
 
-Na Cisco dobrze znasz, jak niewłaściwy `debug ip packet` może obciążyć CPU i zalać konsolę. Na Junos do szczegółowej diagnostyki protokołów wykorzystujesz m.in. **`traceoptions`**. To **świadoma zmiana konfiguracji diagnostycznej**; nie należy jej mylić z biernym odczytem sysloga.
+W tej sytuacji potrzebujesz bardziej szczegółowych danych. Junos udostępnia **traceoptions** — możliwość rejestrowania wybranych zdarzeń związanych z protokołem lub procesem. Nie jest to jednak synonim „zapisz wszystko, co dzieje się w całym systemie”.
 
-### 4.12.2. Trzy kanały obserwacji, trzy różne pytania
+### Trzy pytania, trzy różne rodzaje dowodów
 
-**System syslog:** co system zgłosił o błędzie, logowaniu, interfejsie i daemonach?
+Zwykły `show log messages` odpowiada na pytanie o wybrane **zdarzenia systemowe**.
 
-**Protocol traceoptions:** co określony proces/protokół robił na poziomie szczegółowości ustawionej przez operatora?
+Polecenia `show` dotyczące protokołów, np. `show ospf neighbor`, pokażą **bieżący stan danego mechanizmu**.
 
-**Packet capture/mirroring:** co faktycznie widziano na interfejsie lub dataplane, jeśli platforma pozwala taki ruch obserwować?
+Natomiast `traceoptions` mogą pomóc zrozumieć **szczegółowe zdarzenia procesu** w określonym czasie.
 
-**Haczyk:** zwykłe `monitor traffic` na RE **nie jest automatycznym mirrorem wszystkich pakietów transit na PFE**, o czym uczyliśmy się w rozdziale 2. Traceoptions OSPF też nie jest dowodem na każdy pakiet użytkownika.
+Jeśli zaufasz tylko jednemu źródłu, łatwo wyciągniesz błędny wniosek. Na przykład `show ospf neighbor` może aktualnie pokazywać pełne sąsiedztwo, mimo że w logu kilka minut wcześniej nastąpiła zmiana stanu.
 
-### 4.12.3. Włączamy minimalny trace tylko na czas diagnozy
+### Dlaczego tracing może być niebezpieczny?
 
-Przykład odnosi się do **urządzenia laboratoryjnego, na którym OSPF faktycznie jest uruchomiony**. W labie initial configuration bez OSPF nie ma sensu włączać jego tracingu tylko po to, by zapełniać pliki; potraktuj tę część jako demonstrację do późniejszego rozdziału 9.
+Szerokie zapisywanie wszystkich informacji przez dłuższy czas może obciążać urządzenie i zapełniać pliki. W środowisku produkcyjnym niewłaściwe traceoptions uruchomione na protokole mającym tysiące sąsiedztw mogłyby nawet pogorszyć sytuację, którą próbujesz diagnozować.
 
-**Urządzenie: LAB-R2-vSRX — Configuration Mode [edit], wyłącznie osobny lab z działającym OSPF**
+Dlatego tracing powinien mieć **jasny cel, ograniczony zakres, przewidywany rozmiar logów i procedurę wyłączenia**.
+
+W przyszłym labie OSPF można wykorzystać ograniczony tracing błędów. Nie uruchamiamy tutaj OSPF na pełnym DIAMOND-6R tylko po to, żeby mieć co logować.
+
+**R1-vSRX — Configuration Mode [edit private], osobny wariant OSPF LAB, nieaktywowany w bazowym CH04**
 
 ~~~junos
 set protocols ospf traceoptions file CH04-OSPF size 1m files 3 no-world-readable
 set protocols ospf traceoptions flag error
 show | compare
-commit check
 ~~~
 
-Nie przypisujemy tych komend do **LAB-SRX01**, bo nasze podstawowe ćwiczenie zarządzania nie wymaga OSPF. Dopiero świadomie uruchomiony protokół wygeneruje sensowne zdarzenia.
+Jeśli OSPF w ogóle nie jest uruchomiony w tej wersji laboratorium, nie oczekuj użytecznych komunikatów o sąsiedztwie. To przygotowana składnia do ćwiczeń w rozdziale OSPF, po sprawdzeniu jej obsługi na konkretnym release. Nie wykonuj jej przypadkowo na rzeczywistym routerze core.
 
-**Urządzenie: LAB-R2-vSRX — Operational Mode, jeśli traceoptions zostały zatwierdzone w izolowanym labie**
+**R1-vSRX — Operational Mode, gdy tracing rzeczywiście uruchomiono w wariancie OSPF**
 
 ~~~junos
-show log CH04-OSPF | last 40
+show log CH04-OSPF | last 30
 show configuration protocols ospf traceoptions | display set
 ~~~
 
-**Wyjaśnienie:**
-- `file` — gdzie zapiszesz ślad;
-- `size` — limit wielkości pojedynczego pliku;
-- `files` — liczba plików rotacyjnych;
-- `no-world-readable` — ograniczenie odczytu;
-- `flag error` — ograniczenie kategorii zdarzeń w porównaniu do szerokiego tracingu.
+### Co zrobić po zakończeniu diagnostyki?
 
-W innym protokole nazwy flag mogą być inne. Nie kopiuj „flag all detail” bez sprawdzenia, czy system i storage to wytrzymają.
+Ograniczone traceoptions powinny zostać usunięte albo dezaktywowane zgodnie z planem. Nie zostawiaj ich jako stale włączonego „narzędzia na przyszłość”, jeśli nie mają określonego celu operacyjnego.
 
-### 4.12.4. Gotcha: traceoptions nie wyłączają się magicznie po incydencie
-
-Najgorszy scenariusz: podczas incydentu włączasz bogate logowanie, zapominasz je usunąć, a po tygodniu urządzenie ma wysokie CPU albo storage wypełnione logami.
-
-**Urządzenie: LAB-R2-vSRX — Configuration Mode [edit], cleanup po diagnostyce**
+**R1-vSRX — Configuration Mode [edit private], cleanup tylko własnego eksperymentu**
 
 ~~~junos
 delete protocols ospf traceoptions
 show | compare
-commit check
 ~~~
 
-Następnie wykonaj uzgodniony commit i potwierdź, że tracing został wyłączony. Nie usuwaj cudzych, potrzebnych ustawień globalnych „dla porządku”. Jeśli OSPF ma inne wcześniej skonfigurowane traceoptions, usuń **tylko** własne laboratoryjne elementy.
+Przed commit sprawdź, czy `traceoptions` nie zostały wcześniej świadomie skonfigurowane przez kogoś innego. W takim przypadku usuń tylko **własne zmiany**, zamiast kasować całą gałąź.
 
-### 4.12.5. Zbieranie dowodów do ticketu nie oznacza publikowania sekretów
+### A co z packet capture?
 
-Kiedy wysyłasz snapshot do ServiceNow, wybierz wyłącznie istotny fragment logów, nie całą konfigurację z hasłami. Logowanie może zawierać user names, adresy IP, wrażliwe zdarzenia lub identyfikatory sesji.
+Nie myl rejestrowania zdarzeń protokołu z przechwytywaniem wszystkich pakietów. `monitor traffic` w Junos może pokazywać przede wszystkim ruch widoczny z perspektywy systemu, a nie każdy pakiet przekazywany sprzętowo lub programowo przez PFE.
 
-Dobry fragment worknotes opisuje **czas obserwacji, model/release, interfejs, polecenie, wynik, hipotezę, next action**. Nie trzeba wklejać 3000 linii tylko po to, by pokazać, że wykonałeś `show log messages`.
+Na SRX do diagnozy ruchu użytkowników mogą być potrzebne odpowiednie **security flow session**, dedykowane opcje packet capture albo inne narzędzia zależne od platformy. Nie wyciągaj wniosku „pakiet nie dotarł” tylko dlatego, że nie pojawił się w `monitor traffic`.
 
-**Gotcha:** dopiero po skonfigurowaniu NTP i sprawdzeniu strefy czasowej uzyskujesz sensowną korelację danych między Juniper i Cisco.
-
-Źródła: [Traceoptions for OSPF/IS-IS](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-is-is-ospf.html), [Tracing Global Routing Protocol Operations](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/tracing-global-routing-protocol-operations.html).
+**Dokumentacja:** [OSPF/IS-IS Traceoptions](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-is-is-ospf.html), [monitor traffic](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-traffic.html).
 
 ---
 
-## 4.13. Rescue configuration — „ostatnia dobra wersja” to decyzja człowieka [A]
+## 4.13. Rescue configuration — świadomie zapisany punkt powrotu [A]
 
-### 4.13.1. Dlaczego ostatni commit nie jest automatycznie ostatnią dobrą wersją?
+### Czy „ostatnia zatwierdzona” znaczy „ostatnia dobra”?
 
-Wyobraź sobie, że przez pięć kolejnych zmian wgrywałeś poprawki, które z perspektywy HLD były błędne. Masz lokalne rollbacki, ale **która wersja rzeczywiście działała poprawnie?** Nie wystarczy wskazać najwyższą liczbę albo najnowszą datę.
+Nie zawsze. Możesz zatwierdzić pięć kolejnych zmian, które składniowo są poprawne, ale stopniowo pogarszają bezpieczeństwo lub routing. Lokalna historia commit zawiera zapisane wersje, lecz sama nie wie, która była najlepszym stanem do przywrócenia.
 
-Do tego służy **rescue configuration**: administrator świadomie zapisuje konfigurację, którą uważa za bezpieczny punkt powrotu. To coś jak złota konfiguracja dla urządzenia, ale nazywa się tak dopiero po przeprowadzeniu prawdziwych testów.
+Dlatego Junos posiada **rescue configuration** — specjalnie zapisywaną przez administratora wersję ratunkową. Powinna pochodzić z momentu, w którym urządzenie działa prawidłowo i istnieje udokumentowana możliwość zarządzania nim.
 
-**Most z Cisco:** możesz myśleć o zatwierdzonym golden configuration, lokalnym `startup-config`, zewnętrznym backupie i strategii `configure replace`. Ale pamiętaj: w Junos rescue **nie zastępuje** ostatniej candidate i nie jest tym samym co rollback nr 1.
+Nie powstaje automatycznie po każdym commit. Ktoś musi świadomie ją zapisać.
 
-### 4.13.2. Zapis rescue — nie myl z uruchomieniem rollback
+### Jak zapisać rescue po zakończeniu onboardingu?
 
-**Urządzenie: LAB-SRX01 — Operational Mode, po pełnych testach baseline i uzgodnieniu nadpisania istniejącego rescue**
+Najpierw sprawdź, czy działa dostęp administracyjny, konta, podstawowy routing management i właściwe usługi. Dopiero potem zapisz stan jako rescue.
+
+**R1-vSRX — Operational Mode, zapis rescue tylko po zaakceptowaniu poprawnej konfiguracji**
 
 ~~~junos
 request system configuration rescue save
-show system configuration rescue
-show system alarms
 ~~~
 
-Pierwsza komenda zapisuje **ostatnią zatwierdzoną active configuration** jako rescue. Druga pozwala ją odczytać, trzecia sprawdzić alarmy związane z urządzeniem. **Nie zakładaj**, że sam brak alarmu zawsze dowodzi poprawności rescue — przeprowadź test odczytu i przywrócenia w labie.
+W ten sposób nie wykonujesz rollback; jedynie przechowujesz zatwierdzoną konfigurację jako przyszły punkt ratunkowy.
 
-**Gotcha:** rescue **nie tworzy się automatycznie w każdym nowym urządzeniu**. Na niektórych platformach alarm `Rescue configuration is not set` informuje właśnie o braku zapisu. Ale jeśli zapiszesz rescue **w chwili uszkodzenia konfiguracji**, późniejszy `rollback rescue` przywróci ten sam błąd.
-
-### 4.13.3. Przywrócenie rescue — transakcyjnie, a nie „magicznie”
-
-**Urządzenie: LAB-SRX01 — Operational Mode, najpierw przeczytaj rescue i ustal, czego chcesz**
+**R1-vSRX — Operational Mode, weryfikacja rescue**
 
 ~~~junos
 show system configuration rescue
 show system commit
 ~~~
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], wyłącznie izolowany lab lub uzgodniona procedura awaryjna**
+Nie wystarczy zapisać rescue raz na zawsze. Po istotnym redesignie sieci stary punkt może być już nieadekwatny. Aktualizację rescue wykonuj świadomie jako element procesu przyjęcia nowego baseline.
+
+### Co się dzieje podczas `rollback rescue`?
+
+To bardzo ważny detal z rozdziału III: **`rollback rescue` wczytuje konfigurację ratunkową do candidate**, a nie natychmiast zmienia działające urządzenie. Nadal musisz porównać ją z active, ocenić konsekwencje i zatwierdzić zmianę, jeśli rzeczywiście chcesz ją zastosować.
+
+**R1-vSRX — Configuration Mode [edit private], symulacja odczytu rescue bez aktywacji**
 
 ~~~junos
 rollback rescue
 show | compare
-commit check
-commit confirmed 5
 ~~~
 
-**Krytyczna rzecz:** `rollback rescue` wczytuje zapisany punkt do candidate. To **nie musi od razu zmienić działającej sieci**. Dopiero zatwierdzenie (a wcześniej analiza diffu) uruchamia zmianę. W czasie pending `commit confirmed` sprawdzaj stan operacyjny, **nie wykonuj przypadkiem nowego `commit check`**, bo możesz potwierdzić zmianę.
+Zanim klikniesz commit, sprawdź, czy rescue zawiera poprawną adresację, konta, klucze i wymagane ustawienia. Rescue utworzona zbyt wcześnie może np. nie mieć jeszcze działającego SSH lub konta lokalnego. Przywrócenie jej bez analizy mogłoby ponownie odciąć dostęp.
 
-### 4.13.4. Brak rescue, zła rescue albo uszkodzony filesystem
+### Rescue a `commit confirmed`
 
-Oficjalna dokumentacja mówi: gdy rescue **nie istnieje albo nie jest poprawną, kompletną konfiguracją**, próba `rollback rescue` może się nie powieść. Nie wolno udawać, że odzyskanie jest gwarantowane.
+Te mechanizmy rozwiązują inne problemy. **`commit confirmed`** pozwala warunkowo wprowadzić zmianę i automatycznie ją cofnąć, jeśli nie zostanie potwierdzona. **Rescue configuration** jest statycznym, świadomie zapisanym punktem ratunkowym, który administrator może wybrać do przywrócenia.
 
-W klasycznym Junos rescue bywa zapisana pod `/config/rescue.conf.gz`. To istotne podczas procedur diagnostycznych i RMA, ale **nie edytuj tego pliku ręcznie** jako zwykłego zamiennika `commit`. Na Junos OS Evolved niektóre mechanizmy odzyskiwania mogą mieć inny przebieg — kieruj się odpowiednią instrukcją platformową.
+Nie wykonuj testu rescue w trakcie oczekującego `commit confirmed`. Najpierw zakończ lub pozwól wycofać warunkową zmianę, upewnij się co do stanu active i dopiero potem przeprowadź osobny eksperyment.
 
-**Do zapamiętania:** backup off-device, rollback history i rescue to **trzy różne warstwy odporności**.  
-**Do zrozumienia:** wszystkie zależą od świadomej decyzji, **która konfiguracja rzeczywiście była dobra**.
+Jeśli rescue nie istnieje, nie próbuj zgadywać, że `rollback rescue` załaduje coś sensownego. Brak punktu ratunkowego to wynik **NOT READY**, który trzeba naprawić przed oddaniem urządzenia do produkcji.
 
-Źródła: [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html), [Rescue and Recovery of Configuration File](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/rescue-and-recovery-config-file.html), [show system configuration rescue](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-configuration-rescue.html).
+**Dokumentacja:** [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html), [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html).
 
 ---
 
-## 4.14. Konfiguracja i weryfikacja całego systemu — jedna sieć, wiele usług [A]
+## 4.14. Co oznacza „router gotowy do pracy”? [A]
 
-### 4.14.1. Czym różni się lista komend od gotowego site'u?
+### To nie jest liczba wykonanych poleceń
 
-Załóżmy, że w projekcie zapisano:
+Spróbuj spojrzeć na R1 z perspektywy inżyniera, który jutro ma odebrać telefon o awarii. Czy będzie umiał zalogować się na router? Czy zobaczy, kto wcześniej zmienił konfigurację? Czy odczyta poprawną godzinę zdarzenia? Czy monitoring pokaże stan? Czy istnieje backup poza uszkodzonym urządzeniem?
 
-- `system host-name`;
-- konto `labadmin`;
-- NTP;
-- syslog;
-- SNMPv3;
-- archiwizację SCP;
-- rescue.
+Dopiero kiedy te pytania mają potwierdzone odpowiedzi, można mówić o świadomym **commissioningu**, czyli przygotowaniu urządzenia do użycia i formalnym przekazaniu do utrzymania.
 
-Ktoś robi `commit complete` i zamyka ticket. Czy site jest gotowy? **Nie wiemy.**
+Dobrze zaprojektowana pierwsza konfiguracja łączy kilka niezależnych elementów. Nie zastępują się nawzajem:
 
-Nie przetestowano logowania drugą sesją, nie wiadomo, czy NTP synchronizuje się w odpowiedniej instancji, NMS nie odebrał SNMPv3 GET, a serwer backupów nie otrzymał pliku. **Konfiguracja na papierze ≠ usługa w praktyce**.
+- Poprawna **tożsamość urządzenia**: hostname, oznaczenie roli i dokumentacja.
+- **Dostęp administracyjny**: niezależna konsola, działające konto lokalne i test SSH z właściwego źródła.
+- **Autoryzacja**: uprawnienia właściwe dla poszczególnych ról.
+- **Centralne AAA**, jeżeli jest wymagane, oraz zweryfikowany scenariusz jego niedostępności.
+- **Interfejsy i routing management**: działająca droga do usług administracyjnych.
+- **Czas**: rzeczywista synchronizacja NTP, nie tylko poprawny timezone.
+- **Monitoring i logi**: odpowiedzi SNMPv3 oraz odbiór syslog po drugiej stronie.
+- **Backup i recovery**: zdalne archiwum, rescue i kontrolowany plan rollback.
 
-### 4.14.2. End-to-end mapa zależności
+To nie jest lista komend do wpisania w tej kolejności, lecz mapa zależności. Przykładowo nie przetestujesz NTP, jeśli nie ma działającej drogi do serwera. Nie zabezpieczysz SSH przez wyłączenie root, dopóki nie ma alternatywnego konta. Nie udowodnisz archiwizacji bez pliku po stronie odbiornika.
 
-~~~mermaid
-flowchart TD
-  MGMT["OOB management IP + routing"] --> AAA["AAA: local / TACACS+ / RADIUS"]
-  MGMT --> NTP["NTP + zegar"]
-  MGMT --> SYS["Syslog → SIEM"]
-  MGMT --> SNMP["SNMPv3 → NMS"]
-  MGMT --> ARCH["Archival SCP → backup"]
-  AAA --> SSH["Nowa sesja SSH Admin"]
-  NTP --> SIEM["Wiarygodny timeline"]
-  SYS --> SIEM
-  SSH --> VERIFY["Kryteria handover"]
-  SNMP --> VERIFY
-  ARCH --> VERIFY
-  SIEM --> VERIFY
-  RESCUE["Local rescue + OOB console"] --> VERIFY
-~~~
+### Dlaczego `show configuration` to za mało?
 
-Widzisz wspólny punkt? **Management reachability**. Jeśli ktoś w HLD przeniesie management na `mgmt_junos`, a nie zaktualizuje usług i routingu, pięć pozornie niezależnych systemów może jednocześnie przestać działać. To jedna z najważniejszych rzeczy, jakie warto zrozumieć na poziomie senior engineer.
+Gdy wykonujesz `show configuration system ntp`, dowiadujesz się, jaki serwer został wpisany. Ale nie wiesz jeszcze, czy zegar rzeczywiście jest zsynchronizowany. Podobnie `show configuration snmp` nie dowodzi, że NMS potrafi wykonać authPriv GET.
 
-### 4.14.3. Uniwersalny read-only commissioning checklist — bez wklejania niebezpiecznych zmian
+Dla każdej usługi trzeba zatem rozdzielić **konfigurację**, **stan systemu** i **test wykonany z właściwej strony**.
 
-**Urządzenie: LAB-SRX01 — Operational Mode, zestaw diagnostyczny**
+| Obszar | Dowód lokalny na R1 | Dowód końcowy |
+|---|---|---|
+| Tożsamość i management | `show version`, `show interfaces terse` | Zgodność z dokumentacją i działająca konsola |
+| SSH | `show configuration system services ssh` | Nowe połączenie z LAB-ADMIN |
+| Local accounts i role | `show configuration system login` | Logowanie `labadmin` i ograniczone `nocview` |
+| AAA | `show configuration system authentication-order` | Udane logowanie, reject i timeout, logi serwera |
+| NTP | `show ntp associations`, `show ntp status` | Synchronizacja do poprawnego źródła |
+| SNMPv3 | `show snmp statistics`, `show snmp v3` | Zewnętrzny authPriv GET |
+| Syslog | `show log messages` | To samo zdarzenie na kolektorze |
+| Archival | `show configuration system archival` | Prawidłowy plik w repozytorium backupów |
+| Rescue | `show system configuration rescue` | Punkt ratunkowy nadający się do kontrolowanego odtworzenia |
+
+Jeśli nie masz działającego serwera, którego dotyczy wiersz, odpowiednim wynikiem jest **NOT TESTED**, a nie PASS. To nie odbiera wartości podręcznikowi; daje uczciwy obraz możliwości laboratorium.
+
+### Jeden read-only zestaw na zakończenie
+
+**R1-vSRX — Operational Mode, przegląd gotowości przed handover**
 
 ~~~junos
 show version
-show chassis hardware
-show system alarms
-show chassis alarms
 show system uptime
+show system alarms
 show interfaces terse
 show route table inet.0
 show configuration system | display set
 show configuration interfaces | display set
-show cli authorization
 show system users
 show ntp associations
 show ntp status
 show snmp statistics
-show snmp v3
-show log messages | last 40
+show log messages | last 30
 show system commit
 show system configuration rescue
 ~~~
 
-**Wskazówka operatorska:** na różnych urządzeniach polecenia dotyczące chassis, SNMPv3, NTP lub rescue mogą mieć różną dostępność bądź zwrócić brak danych, gdy funkcja nie jest skonfigurowana. Nie kwalifikuj całego wdrożenia jako FAIL tylko dlatego, że wybrany model nie ma danej komendy; potwierdź **przeznaczenie i wsparcie** konkretnej funkcji.
+Nie uruchamiaj całego zestawu wklejonego bezmyślnie do ticketu. Niektóre wyniki mogą zawierać informacje wrażliwe, a ich zakres może być szeroki. Do dokumentacji przekazuj potrzebne, zanonimizowane potwierdzenia.
 
-### 4.14.4. Dowód na działanie usługi musi pochodzić z dwóch stron
+### Co wpisać w handover?
 
-Dla każdej usługi zbierz **dowód lokalny i zdalny**:
+Dobry dokument odbiorowy zawiera nazwę i rolę urządzenia, model/release, interfejs management i sposób dostępu, znane zależności od AAA/NTP/NMS/SIEM, wyniki testów, lokalizację backupów, sposób uzyskania konsoli, aktualny status rescue, a także ograniczenia i zadania pozostałe do wykonania.
 
-| Usługa | Dowód z Junos | Dowód z systemu współpracującego |
-|---|---|---|
-| SSH | `show system users`, syslog | Nowa sesja z bastiona do właściwego IP |
-| AAA | Log/rola użytkownika | Log accept/reject/accounting z TACACS+/RADIUS |
-| NTP | `show ntp associations`, `status` | NTP server widzi klienta, poprawny czas |
-| Syslog | Konfiguracja i lokalny event | Właściwy event w SIEM z poprawnym host/time |
-| SNMPv3 | `show snmp statistics` i v3 | Udany authPriv GET z NMS |
-| Archival | Config/log transferu | Plik i data na off-device backup server |
-| Rescue | `show system configuration rescue` | Test odtworzenia wykonany w izolowanym labie |
-
-Nie próbuj udowadniać SNMPv3 z samego `show snmp v3`: urządzenie może mieć poprawną konfigurację, ale żaden NMS nie dotarł do niego po UDP/161. Nie próbuj udowadniać archiwizacji z samego `transfer-on-commit`.
-
-### 4.14.5. Post-change / handover: co wpisujesz do dokumentacji?
-
-Dla oddania nowej lokalizacji zachowaj:
-- hostname, model, serial, wersję Junos, lokalizację fizyczną, rack, OOB IP i management routing instance;
-- kontrolowane mapowanie portów i uplinków (z LLDP);
-- wynik testu login class, TACACS+ i konta break-glass (bez hasła);
-- NTP source, offset, strefę czasu i logi SIEM;
-- NMS poll i status SNMPv3, ale bez zapisania sekretów;
-- adres serwera backup i dowód transferu/odtworzenia;
-- wersję rescue i procedurę recovery;
-- link do HLD/LLD, ServiceNow Change, CMDB i plan aktualizacji software.
-
-**Nie publikuj prawdziwych adresów management, credentiali i konfiguracji klienta w publicznym repo GitHub.** Nasze przykłady używają dokumentacyjnych sieci i są celowo odseparowane od produkcji.
-
-### 4.14.6. Czego uczy ta lekcja ponad zwykłe JNCIA?
-
-Na poziomie Associate musisz rozpoznać funkcje Junos i skonfigurować podstawy. W pracy senior engineer liczy się **również to, czy cały system jest możliwy do utrzymania przez zespół przez kolejne lata**. Dlatego wplatamy tutaj:
-- zależności usług zarządzających od OOB/VRF;
-- AAA fallback i role;
-- SNMPv3 authPriv z realnym poll;
-- archiwizację poza urządzeniem;
-- change management i rescue.
-
-To są świadome **praktyczne rozszerzenia głębi**, a nie twierdzenie, że każdy szczegół jest literalnym pytaniem z oficjalnego JNCIA.
-
-
+Warto uwzględnić również informację, czego **nie przetestowano**. Router może zostać przyjęty warunkowo do laboratorium z brakującym serwerem NTP, ale nie powinien zostać ogłoszony kompletnym wdrożeniem Enterprise tylko dlatego, że wszystkie polecenia `set` mają poprawną składnię.
 
 ---
 
-## 4.15. [LAB] Nowy router Junos: konta, SSH, NTP, syslog, monitoring i rescue
+## 4.15. Laboratorium — trzy poziomy od pierwszego vSRX do wdrożenia na DIAMOND-6R [LAB]
 
-### 4.15.1. Czy da się wykonać pełny onboarding w EVE-NG?
+Wszystkie poprzednie sekcje były częściami jednego projektu: uruchomić router, na którym pracować może nie tylko autor konfiguracji, ale również następna zmiana dyżuru. Teraz przejdziemy przez ten proces w laboratorium.
 
-Tak — choć nie wszystkie elementy wymagają trzech routerów i OSPF. W tym rozdziale chcemy wiedzieć, **jak działa pojedyncze urządzenie jako zarządzalny element infrastruktury**. Wystarczy:
+**Status: PLANNED / NOT RUNTIME VALIDATED.** Nie mamy informacji, że maszyny vSRX, serwer NTP, TACACS+, SNMP collector lub archiwum SCP rzeczywiście zostały uruchomione. Poniższe procedury to **projekt wykonania**. Przewidywane wyniki są oznaczone jako oczekiwane; żadna linia nie udaje rzeczywistego outputu z Twojego EVE-NG.
 
-- **1 × vSRX** z niezależną konsolą QEMU/EVE-NG;
-- **LAB-ADMIN** — Linux VM, z której wykonasz nowe połączenia SSH i ewentualnie polecenia SNMPv3;
-- **LAB-SERVICES** — Linux VM pełniąca w miarę dostępnych pakietów NTP/syslog/SCP i opcjonalnie TACACS+/RADIUS;
-- **1 × odizolowany wirtualny switch** management, bez mostowania do korporacyjnego LAN.
+### Zanim zbudujesz laboratorium: czego potrzebujesz, a czego nie?
 
-Poniższe adresy z puli **prywatnej puli RFC1918 `172.31.240.0/24`** służą wyłącznie dokumentacji i odizolowanemu labowi. **Nie routuj ich do Internetu.**
+Dla pierwszego etapu wystarczy **jedna odizolowana maszyna R1-vSRX** i niezależna konsola EVE-NG. Aby przetestować **SSH z sieci**, potrzebujesz osobnej sesji z R5 lub z Linux VM `LAB-ADMIN`. Aby sprawdzić NTP, syslog, SNMPv3 i archiwizację, musisz rzeczywiście uruchomić odpowiednie usługi na Linux VM `LAB-SERVICES` albo dostępnych usługach laboratoryjnych.
+
+W drugim etapie nie zastępujemy R5 nowym komputerem: **R5 nadal jest vSRX**, tak jak w referencyjnym DIAMOND-6R. Dodatkowe Linux VMs pełnią rolę **narzędzi administracyjnych i serwerów**, nie nowych routerów sieci danych.
+
+Połączenia R1–R4 i adresacja rdzenia **pozostają niezmienione**. Jeśli wykorzystujesz osobną wirtualną sieć OOB `203.0.113.0/24`, nie łącz jej do przypadkowego mostu w firmowej sieci i nie nadaj adresu `203.0.113.10` na istniejącym porcie `ge-0/0/0` R1. Najpierw upewnij się, że dany obraz vSRX ma właściwy interfejs management i że jest poprawnie mapowany przez QEMU/EVE.
 
 ~~~mermaid
-flowchart LR
-  ADMIN["LAB-ADMIN\nLinux 172.31.240.20/24"] --- OOB["EVE NET-CH04-MGMT\nizolowany switch"]
-  OOB --- SRX["LAB-SRX01\nfxp0.0 172.31.240.10/24"]
-  OOB --- SERVICES["LAB-SERVICES\nLinux 172.31.240.30/24\nNTP + Syslog + SCP + NMS"]
-  CON["EVE console\nniezależny kanał"] -. "OOB recovery" .-> SRX
+flowchart TB
+   subgraph DATA["Stała sieć DIAMOND-6R (bez modyfikacji)"]
+      R5["R5 CE-A"] --- R1["R1 EDGE-A"]
+      R1 --- R2["R2 CORE-1"]
+      R1 --- R3["R3 CORE-2"]
+      R2 --- R4["R4 EDGE-B"]
+      R3 --- R4
+      R4 --- R6["R6 CE-B"]
+   end
+   subgraph OOB["Opcjonalny, niezależny segment management — wyłącznie izolowany lab"]
+      A["LAB-ADMIN<br/>203.0.113.20"]
+      S["LAB-SERVICES<br/>203.0.113.30<br/>NTP/syslog/SNMP client/SCP"]
+      M["Zweryfikowany OOB NIC R1<br/>adres 203.0.113.10"]
+      A --- M
+      S --- M
+   end
+   M -. "OOB do R1; mapowanie portu potwierdzić" .- R1
+   C["Konsola EVE-NG"] -. "niezależny recovery" .- R1
 ~~~
 
-**Zanim utworzysz topologię:** sprawdź rzeczywistą wersję vSRX, mapowanie NIC na `fxp0`, obecność portu console, ilość RAM i obrazów. Jeśli w konkretnej wersji vSRX `fxp0` jest niedostępny albo mapuje się inaczej, **nie zgaduj i nie usuwaj adresów z istniejących interfejsów**. Dopasuj laboratorium do sprzętu i zapisz zmianę mapowania w `VERIFY.md`.
+*Rysunek 4.2. OOB nie jest dodatkową trasą między R2 i R3 ani nową ścieżką ruchu użytkowników. Dokładny typ NIC i routing management muszą zostać potwierdzone na vSRX.*
 
-Na tym etapie **status = PLANNED**. Samo stworzenie topologii i wygenerowanie komend nie oznacza PASS.
+---
 
-### 4.15.2. Rozdzielmy usługi podstawowe od opcjonalnych
+### Poziom 1 [A] — jeden router: bezpiecznie uzyskaj dostęp i utwórz pierwsze konta
 
-W praktycznym labie bez dodatkowych instalacji możesz przećwiczyć **CLI, konto lokalne, login class, dziedziczenie grupy, SSH i rescue**. Do realnego testu NTP potrzebujesz działającego serwera NTP; do sysloga — odbiornika; do archiwizacji — serwera SCP z kluczem; do SNMPv3 — narzędzia NMS i sekretów. TACACS+/RADIUS wymaga serwera AAA i zgodnej konfiguracji obu stron.
+#### Krok 0. Rozpoznanie bez zmian
 
-Dla każdego punktu wpisujemy jeden z trzech statusów:
+Wyobraź sobie, że logujesz się pierwszy raz do nowego R1. Nawet jeśli plik został opisany „factory-default”, nie wiesz jeszcze, czy poprzedni uczeń go nie modyfikował. Wykonaj pre-checki **read-only**.
 
-- **PASS** — pokazano rzeczywisty, zapisany dowód działania.
-- **FAIL** — wykonywany test nie przeszedł; jest konkretna obserwacja i hipoteza.
-- **NOT TESTED** — usługi lub narzędzia nie były przygotowane; nie udajemy sukcesu.
-
-Nie „zaliczaj” NTP tylko dlatego, że commit config jest poprawny, a `show ntp associations` ma pustą listę.
-
-### 4.15.3. Etap 0 — precheck urządzenia, bez ani jednej zmiany
-
-Zanim wykonasz `set system host-name`, zapisz dowód, co już jest skonfigurowane i gdzie działa dostęp.
-
-**Urządzenie: LAB-SRX01 — Operational Mode, read-only precheck z konsoli**
+**R1-vSRX — Operational Mode, baseline przed zmianą**
 
 ~~~junos
 show version
 show chassis hardware
-show system uptime
-show system alarms
 show interfaces terse
-show route table inet.0
-show configuration | display set
-show system users
+show configuration system | display set
+show configuration interfaces | display set
 show system commit
+show system alarms
 ~~~
 
-Oczekiwane wnioski, nie fikcyjny output: model i obraz; czy urządzenie już ma adres; czy root password istnieje; jakie usługi są włączone; czy ktoś pracuje w shared candidate. Jeśli istnieją **cudze zmiany**, nie uruchamiaj `rollback 0` w shared mode.
+Zapisz odpowiedzi na pytania: jaki jest release Junos, czy R1 ma już hostname, jakie ma interfejsy i czy istnieją lokalne konta? Szczególnie istotne jest, czy `fxp0` lub inny interfejs OOB rzeczywiście istnieje w tym obrazie.
 
-### 4.15.4. Etap 1 — tożsamość, hasło root i interfejs management
+Nie wklejaj pełnego wyniku do publicznego repozytorium. Jeśli zajdzie potrzeba dokumentacji, zanotuj sam wynik weryfikacji bez sekretów i prawdziwych adresów management.
 
-Zakładamy, że `fxp0` jest rzeczywiście wydzielonym interfejsem zarządzania i odpowiada wirtualnemu podłączeniu do izolowanego segmentu management.
+#### Krok 1. Ustaw hostname i bezpieczne uwierzytelnianie root
 
-**Urządzenie: LAB-SRX01 — Operational Mode, konsola**
+W świeżym labie administrator zaczyna od identyfikacji urządzenia. Nie konfigurujemy jeszcze zdalnego AAA — najpierw musimy mieć lokalny dostęp ratunkowy.
+
+**R1-vSRX — Operational Mode, wejście do prywatnej edycji**
 
 ~~~junos
 configure private
 ~~~
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit private], baza**
+**R1-vSRX — Configuration Mode [edit private], pierwsze ustawienia**
 
 ~~~junos
-set system host-name LAB-SRX01
+set system host-name R1-vSRX
 set system domain-name lab.example
 set system time-zone Europe/Warsaw
-set interfaces fxp0 unit 0 family inet address 172.31.240.10/24
-set system services ssh
 set system root-authentication plain-text-password
 show | compare
 ~~~
 
-Przy `plain-text-password` Junos poprosi o podanie sekretu. **Nie wklejaj hasła do historii poleceń ani do repo**. Gdy `fxp0` miał już adres lub DHCP, najpierw rozwiąż konflikt zgodnie ze stanem wyjściowym. Nie stosuj automatycznie całego bloku do używanego już urządzenia.
+Ostatnie polecenie uruchamia **interaktywne wprowadzenie hasła**, jeśli wspiera je Twój wariant CLI; nie jest miejscem do dopisania hasła w pliku. Ustawienie root jest wymaganym elementem pierwszej konfiguracji w wielu wariantach Junos. Nie zapisuj hasła ani jego odpowiednika w publicznym repozytorium.
 
-**Uwaga:** na świeżym vSRX może być wymagane wcześniejsze ustalenie struktury management/zone oraz sposobu logowania. Jeśli platforma nie pozwala `configure private` w danym stanie, rozpocznij konfigurację przez konsolę zgodnie z dokumentacją obrazu i następnie wróć do zwykłego candidate workflow.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit private], przygotowanie zmiany**
+**R1-vSRX — Configuration Mode [edit private], dopiero po sprawdzeniu diffu**
 
 ~~~junos
 commit check
 commit confirmed 5
 ~~~
 
-**Po aktywacji nie wykonuj ponownie `commit check` jako neutralnego testu.** Sprawdź stan przez operational `show` i konsolę. Potwierdzenie commit nastąpi dopiero po sprawdzeniu management reachability. Jeśli nie działa, nie potwierdzaj bez analizy lub przywróć właściwą konfigurację przez konsolę.
+W osobnej sesji konsolowej odczytaj nową nazwę i historię commit. Jeśli wszystko jest poprawne, potwierdź warunkową zmianę w tej samej edycji; nie wykonuj kolejnego `commit check` po aktywacji.
 
-**Urządzenie: LAB-SRX01 — Operational Mode z konsoli, weryfikacja po aktywacji**
+**R1-vSRX — Operational Mode, osobna sesja, post-check**
 
 ~~~junos
-show interfaces terse | match fxp0
-show system commit
 show configuration system host-name
+show configuration system domain-name
+show system commit
 ~~~
 
-Jeśli obserwujesz poprawny adres, ale SSH nie odpowiada, sprawdź `system services ssh`, ACL/host-inbound jeśli dotyczy, warstwę L2 i logi.
-
-### 4.15.5. Etap 2 — dodaj dwa konta, sprawdź ich uprawnienia
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], konta administratora i NOC**
+**R1-vSRX — Configuration Mode [edit private], po PASS**
 
 ~~~junos
+commit
+~~~
+
+Jeżeli coś poszło nie tak, najpierw sprawdź, czy warunkowa zmiana w ogóle została zatwierdzona. Nie przechodź do następnego etapu z niejasnym stanem candidate.
+
+#### Krok 2. Utwórz własne konto administracyjne
+
+Teraz dodajemy `labadmin` i `nocview`. To lepsza praktyka niż codzienne używanie konta root. Nie musimy jeszcze wymagać centralnego AAA.
+
+**R1-vSRX — Configuration Mode [edit private], konta lokalne z hasłami wprowadzanymi interaktywnie**
+
+~~~junos
+set system login user labadmin full-name "Administrator DIAMOND-6R"
 set system login user labadmin class super-user
 set system login user labadmin authentication plain-text-password
-set system login class LAB-NOC permissions view
-set system login class LAB-NOC idle-timeout 15
-set system login user nocview class LAB-NOC
+set system login user nocview full-name "Monitoring Operator"
+set system login user nocview class read-only
 set system login user nocview authentication plain-text-password
 show | compare
+commit check
+commit confirmed 5
 ~~~
 
-Po wpisaniu każdego hasła Junos poprosi o interaktywną wartość. Następnie wykonaj `commit check`, odpowiednio bezpieczny commit i potwierdzenie. **Nie wyłączaj logowania root przez SSH, zanim nowe konto nie zaloguje się z niezależnej sesji.**
+Podczas wpisywania `plain-text-password` Junos poprosi o hasło. Nie kopiuj bloków z prawdziwymi hasłami do logów ani repozytorium. Przed potwierdzeniem zmian zaloguj się jako obaj użytkownicy w **nowych sesjach**.
 
-**Urządzenie: LAB-ADMIN — Linux shell, NOWA sesja przez SSH do LAB-SRX01**
-
-~~~bash
-ssh labadmin@172.31.240.10
-~~~
-
-**Urządzenie: LAB-SRX01 — Operational Mode, sesja labadmin**
+**R1-vSRX — Operational Mode, nowa sesja jako labadmin**
 
 ~~~junos
 show cli authorization
-show system users
-~~~
-
-**Urządzenie: LAB-ADMIN — Linux shell, NOWA sesja z ograniczonym kontem**
-
-~~~bash
-ssh nocview@172.31.240.10
-~~~
-
-**Urządzenie: LAB-SRX01 — Operational Mode, sesja nocview**
-
-~~~junos
-show cli authorization
+show version
 show interfaces terse
 ~~~
 
-Poprawny eksperyment to nie tylko to, że login działa. **Porównaj prawa**, spróbuj odczytać konfig w dopuszczonym zakresie i potwierdź, że konto NOC nie może wykonywać nieautoryzowanych zmian. Dopiero potem wykonuj hardening `root-login deny`.
-
-### 4.15.6. Etap 3 — configuration groups i ich pierwszeństwo
-
-Nie musimy tworzyć 100 portów EX. Wystarczy jeden banner, aby udowodnić, co robi inheritance.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], własna grupa**
+**R1-vSRX — Operational Mode, nowa sesja jako nocview**
 
 ~~~junos
-set groups CH04-STD system login message "CH04 - Standardowy komunikat LAB"
-set apply-groups CH04-STD
-show system login | display inheritance
-show | compare
+show cli authorization
+show system uptime
+show interfaces terse
 ~~~
 
-Teraz sprawdź, czy działa **lokalny override**. Jeśli istnieje już bezpośredni `system login message`, dziedziczony banner może nie być skuteczny. Uczymy się przez kontrast:
+Sprawdź, czy `nocview` nie może wykonać nieprzewidzianych zmian. Samo zalogowanie nie potwierdza prawidłowej autoryzacji. Po PASS wróć do edytora i świadomie potwierdź `commit`.
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], świadomy lokalny override wyłącznie LAB**
+#### Krok 3. SSH — najpierw nowy dostęp, potem ograniczenie root
+
+Włącz SSH, ale nie zakładaj, że usługa będzie dostępna przez dowolny interfejs SRX. Przeanalizuj faktyczną sieć zarządzania i strefy.
+
+**R1-vSRX — Configuration Mode [edit private], usługa SSH**
 
 ~~~junos
-set system login message "CH04 - Local override"
-show system login | display inheritance
-show | compare
-~~~
-
-**Pytanie:** która wartość jest faktycznie używana po commit? Dla tego samego statementu lokalna zwykle ma pierwszeństwo nad odziedziczoną. Zmianę porównaj i zatwierdź zgodnie z trybem labowym. Po eksperymencie usuń tylko własną grupę i lokalny banner lub odtwórz baseline.
-
-### 4.15.7. Etap 4 — uruchom NTP na LAB-SERVICES i sprawdź nie tylko ping
-
-Najpierw **sprawdź z poziomu Linuxa**, czy serwis NTP jest uruchomiony w izolowanej sieci i nasłuchuje na właściwym interfejsie. Nie zakładaj, że każda VM z Linuxem ma chrony/ntpd.
-
-**Urządzenie: LAB-SERVICES — Linux shell, read-only check**
-
-~~~bash
-ip -4 address show
-ss -lunp
-timedatectl status
-~~~
-
-Jeśli brak usługi NTP, doinstalowanie/skonfigurowanie jej musi być osobnym jawnie zatwierdzonym krokiem, zależnym od dystrybucji i wersji. Nie używaj skryptu z Internetu jako „szybkiej poprawki” do management VM. W odciętym od Internetu labie potrzebujesz własnego wiarygodnego źródła czasu i poprawnego poziomu synchronizacji.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], NTP**
-
-~~~junos
-set system ntp server 172.31.240.30
-set system ntp source-address 172.31.240.10
+set system services ssh
 show | compare
 commit check
+commit confirmed 5
 ~~~
 
-**Urządzenie: LAB-SRX01 — Operational Mode, weryfikacja po commit**
+Gdy masz już działającą sieć OOB, spróbuj zalogować się z Linux `LAB-ADMIN` jako `labadmin`, a potem jako `nocview`. Jeżeli chcesz sprawdzić SSH przez link danych LAN-A, jest to **osobny, izolowany wariant**. Na SRX może wymagać dopuszczenia `host-inbound-traffic system-services ssh` na odpowiednim interfejsie/strefie; nie otwieraj SSH globalnie na całym ruchu CE bez potrzeby.
+
+Dopiero po pozytywnym nowym logowaniu i potwierdzeniu konsoli rozważ blokadę root SSH.
+
+**R1-vSRX — Configuration Mode [edit private], ograniczenie root SSH po działającym labadmin**
 
 ~~~junos
-ping 172.31.240.30
-show ntp associations
-show ntp status
+set system services ssh root-login deny
+show | compare
+commit check
+commit confirmed 5
 ~~~
 
-**Dowód PASS:** wybrany serwer synchronizuje czas (zgodnie z `ntp status` i rzeczywistym systemem serwera). **Nie wystarczy** obecność adresu `172.31.240.30` w konfiguracji.
+Z nowej sesji sprawdź, czy `labadmin` nadal działa. Z konsoli potwierdź możliwość odzyskania dostępu. Nie polegaj na starej, już otwartej sesji SSH — mogłaby przetrwać mimo zmiany zasad nowego logowania.
 
-**Fault injection:** wyłącz NTP *na serwerze labowym* i sprawdź, czy Junos straci synchronizację po odpowiednim czasie. **Nie zmieniaj czasu systemowego na Junos podczas oczekującego `commit confirmed`** — timer rollback zależy od zegara systemowego.
+Po pozytywnym teście potwierdź `commit`. Jeśli nie masz klienta SSH lub nie możesz przetestować management, zaznacz **NOT TESTED**, nie PASS. W takim przypadku nie ograniczaj dostępu root wyłącznie na podstawie poprawnego `commit check`.
 
-### 4.15.8. Etap 5 — syslog i wiarygodny timestamp
+#### Krok 4. Uprawnienia do odczytu i lokalne role
 
-Najpierw uruchom/zweryfikuj odbiornik syslog na `LAB-SERVICES` (np. rsyslog/syslog-ng, zależnie od Linuxa), a następnie ustaw wysyłkę z Junos.
+Teraz zmienimy `nocview` na własną klasę i sprawdzimy jej zakres.
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit]**
+**R1-vSRX — Configuration Mode [edit private], rola laboratoryjna NOC**
+
+~~~junos
+set system login class CH04-NOC permissions view
+set system login class CH04-NOC idle-timeout 15
+set system login user nocview class CH04-NOC
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Po warunkowym zatwierdzeniu otwórz nową sesję jako `nocview`. Zobacz, jakie polecenia odczytu są dostępne, a jakie wymagają innej klasy. Jeśli zadanie operatora obejmuje wgląd w konfigurację, rozważ również odpowiednie uprawnienia do jej wyświetlania, ale nie zwiększaj ich przypadkowo.
+
+W tym miejscu powinieneś już rozumieć różnicę między kontem, hasłem i uprawnieniami. Wszystkie trzy elementy muszą się ze sobą zgadzać.
+
+#### Krok 5. Pierwszy punkt ratunkowy
+
+Kiedy logowanie, konto administracyjne i dostęp konsolowy są potwierdzone, możesz zapisać rescue. Nie musisz czekać na wszystkie usługi NMS — rescue zadziała jako **punkt bazowy**, ale po zakończeniu całego onboardingu trzeba ją zaktualizować do docelowego stanu.
+
+**R1-vSRX — Operational Mode, zapis świadomie zaakceptowanego baseline**
+
+~~~junos
+request system configuration rescue save
+show system configuration rescue
+~~~
+
+**Warunek zaliczenia poziomu 1:** R1 ma znaną tożsamość, działa niezależna konsola, poprawne lokalne konto administracyjne i osobne konto z ograniczonymi uprawnieniami. SSH został potwierdzony z nowej sesji, jeśli istnieje poprawna sieć management. Rescue istnieje, ale nie została jeszcze przetestowana przez odtwarzanie.
+
+---
+
+### Poziom 2 [A → S] — usługi zarządzania i serwery zewnętrzne
+
+Drugi poziom opiera się na działającym R1 oraz **izolowanej sieci management** i prawdziwej Linux VM `LAB-SERVICES`. Załóżmy, że po zweryfikowaniu mappingu NIC R1 ma adres 203.0.113.10 w właściwym kontekście zarządzania, `LAB-ADMIN` ma 203.0.113.20, a `LAB-SERVICES` 203.0.113.30.
+
+W tym etapie ważna jest uczciwość testu. Jeżeli żadna Linux VM nie uruchamia NTP, to brak synchronizacji NTP jest spodziewany. Nie twórz zmyślonego outputu z udaną synchronizacją. Usługi oznaczaj jako **PASS, FAIL albo NOT TESTED**.
+
+#### Krok A. Najpierw routing do serwerów
+
+Sprawdź, czy R1 zna trasę do 203.0.113.30. Nie przypisuj adresu mgmt do R1 w ciemno — masz już sprawdzić właściwy port i jego routing instance.
+
+**R1-vSRX — Operational Mode, pre-check management**
+
+~~~junos
+show interfaces terse
+show route 203.0.113.30
+show route table mgmt_junos.inet.0
+show configuration system management-instance
+~~~
+
+Jeśli wyświetlenie `mgmt_junos.inet.0` nie pokazuje danych lub instancja nie jest skonfigurowana, nie zmieniaj modelu routingu ad hoc. Ustal, czy używasz default `inet.0` czy odrębnej instancji management; wpisy `source-address` muszą być zgodne z faktyczną trasą.
+
+#### Krok B. Configuration groups — wspólny szablon dla R1
+
+**R1-vSRX — Configuration Mode [edit private], grupa laboratoryjna**
+
+~~~junos
+set groups CH04-BASE system login message "DIAMOND-6R: Authorised access only"
+set apply-groups CH04-BASE
+show system login | display inheritance
+show | compare
+~~~
+
+Najpierw sprawdź, że dziedziczony tekst rzeczywiście pojawia się w wyniku. Potem ustaw lokalny wyjątek i zobacz, która wartość wygrywa. Nie używamy grup do przepisywania adresów OOB ani sekretów.
+
+**R1-vSRX — Configuration Mode [edit private], lokalny wyjątek od grupy**
+
+~~~junos
+set system login message "R1: Authorised access only"
+show system login | display inheritance
+show | compare
+~~~
+
+Wartością ćwiczenia nie jest sam komunikat logowania, tylko umiejętność rozpoznania pochodzenia ustawienia: czy zostało wpisane lokalnie, czy przyszło z grupy.
+
+#### Krok C. NTP — potwierdzamy czas, nie tylko adres
+
+Na `LAB-SERVICES` musi działać **prawdziwy serwer NTP**. Dopiero potem konfigurujemy jego adres na R1.
+
+**R1-vSRX — Configuration Mode [edit private], serwer czasu**
+
+~~~junos
+set system ntp server 203.0.113.30
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Podczas oczekującego commitu sprawdź status NTP w sesji Operational Mode. Nie wykonuj kolejnego `commit check`. Jeżeli serwer jest osiągalny, może być potrzebny czas, aby uzyskać pełną synchronizację.
+
+**R1-vSRX — Operational Mode, test synchronizacji**
+
+~~~junos
+show ntp associations
+show ntp status
+show route 203.0.113.30
+~~~
+
+Sprawdź, czy właściwy serwer jest wybrany i czy urządzenie rzeczywiście jest zsynchronizowane. Jeśli widzisz tylko skonfigurowany adres bez synchronizacji, nie wpisuj PASS. Potwierdź warunkową zmianę po właściwym teście i osiągnięciu oczekiwanego stanu.
+
+#### Krok D. Syslog — ten sam komunikat na obu końcach
+
+**R1-vSRX — Configuration Mode [edit private], lokalny i zdalny syslog**
 
 ~~~junos
 set system syslog file messages any notice
 set system syslog file messages authorization info
-set system syslog host 172.31.240.30 any notice
-set system syslog host 172.31.240.30 authorization info
-set system syslog source-address 172.31.240.10
+set system syslog host 203.0.113.30 any notice
+set system syslog host 203.0.113.30 authorization info
 show | compare
 commit check
+commit confirmed 5
 ~~~
 
-**Urządzenie: LAB-SRX01 — Operational Mode**
+Teraz potrzebujesz rzeczywistego odbiornika syslog na `LAB-SERVICES`. Wybierz nieszkodliwe zdarzenie, np. kontrolowany commit opisu lub logowanie w labie. Porównaj jego zapis lokalny i zdalny. Jeżeli serwer nie odbiera wiadomości, sprawdź routing, filtr, źródłowy IP i konfigurację kolektora.
+
+**R1-vSRX — Operational Mode, lokalny dowód zdarzenia**
 
 ~~~junos
-show log messages | last 20
 show configuration system syslog | display set
+show log messages | last 30
 ~~~
 
-**Test:** otwórz nową sesję SSH użytkownika `labadmin`, a następnie znajdź zdarzenie zarówno w lokalnym logu, jak i na odbiorniku. Dopasuj **czas, hostname i source IP**. Jeśli dociera z innego IP lub ma inny timestamp, masz niepełną konfigurację.
+Wynik zdalny wymaga odczytu logu na `LAB-SERVICES`. Nie jest zastępowany przez kolejne polecenie `show` na R1.
 
-**Fault injection:** zablokuj tylko UDP syslog między `LAB-SRX01` a serwerem LAB i sprawdź, że lokalne logi nadal powstają, ale centralna kolekcja przestaje je widzieć. Po eksperymencie usuń blokadę na **LAB-SERVICES**, nie na produkcyjnej infrastrukturze.
+#### Krok E. SNMPv3 — najpierw zakres danych, potem prawdziwe authPriv
 
-### 4.15.9. Etap 6 — SNMPv3 authPriv i test ze strony NMS
+**R1-vSRX — Configuration Mode [edit private], widok i grupa SNMPv3 bez sekretów**
 
-Przygotuj **NMS/klienta SNMPv3** po stronie `LAB-SERVICES` lub `LAB-ADMIN` oraz dwa silne, niezależne sekrety przekazane w bezpieczny sposób. Konfigurację z rozdziału 4.9 zastosuj dopiero po odpowiednim uzupełnieniu USM i VACM.
+~~~junos
+set snmp view CH04-RO oid .1 include
+set snmp v3 vacm security-to-group security-model usm security-name CH04-NMS group CH04-MON
+set snmp v3 vacm access group CH04-MON default-context-prefix security-model usm security-level privacy read-view CH04-RO
+show | compare
+~~~
 
-**Urządzenie: LAB-SRX01 — Operational Mode, przed rozpoczęciem polling testu**
+W tej chwili to nadal **nie jest kompletna konfiguracja użytkownika SNMPv3**. Konieczne są jeszcze zgodne z platformą parametry USM: użytkownik, algorytm uwierzytelniania, klucze i szyfrowanie. Wprowadź je bezpiecznie, korzystając z odpowiedniej instrukcji producenta i vault — nie kopiuj prawdziwych sekretów do plików `.set`.
+
+Gdy konfiguracja zostanie uzupełniona, z `LAB-SERVICES` wykonaj rzeczywisty **SNMPv3 authPriv GET**, najlepiej do `sysUpTime.0`. Potwierdź odpowiedź i odczytaj liczniki SNMP na R1.
+
+**R1-vSRX — Operational Mode, lokalna kontrola SNMP**
 
 ~~~junos
 show snmp statistics
@@ -1549,539 +1439,515 @@ show snmp v3
 show configuration snmp | display set
 ~~~
 
-**Urządzenie: LAB-ADMIN — Linux shell z zainstalowanym klientem Net-SNMP, komenda SZABLONOWA — nie uruchamiaj z dosłownymi placeholderami**
+Jeśli NMS nie odpowiada na GET, przeanalizuj nie tylko osiągalność IP, ale także engine ID, USM, VACM, security-level oraz filtrację UDP/161. Trap UDP/162 nie jest tym samym testem.
 
-~~~text
-snmpget -v3 -l authPriv -u NMS-RO -a SHA -A <AUTH_SECRET_Z_VAULT> -x AES -X <PRIV_SECRET_Z_VAULT> 172.31.240.10 1.3.6.1.2.1.1.3.0
-~~~
+#### Krok F. Archiwizacja — backup naprawdę musi dotrzeć
 
-W produkcji nie umieszczaj sekretów jawnie w historii powłoki/argumentach procesu. Użyj bezpiecznej metody dostarczenia credentiali zgodnej z narzędziem i polityką organizacji.
+Teraz `LAB-SERVICES` pełni również rolę serwera archiwizacji. Konto `junos-backup` oraz katalog na serwerze muszą być przygotowane i zabezpieczone. R1 musi znać i ufać właściwemu kluczowi serwera; należy zapewnić bezpieczne uwierzytelnianie transferu.
 
-**Dowód PASS:** NMS otrzymał poprawną wartość standardowego OID `sysUpTime.0`, a Junos pokazuje oczekiwane statystyki; poprawne engine ID i VACM. **Dowód FAIL:** brak odpowiedzi, błąd auth/privacy, niewłaściwe MIB view albo brak pakietów — każdy ma inną przyczynę.
-
-### 4.15.10. Etap 7 — archiwizacja SCP i sprawdzenie pliku
-
-To najbardziej praktyczny test disaster recovery w całym rozdziale. Na `LAB-SERVICES` przygotuj dedykowane konto z ograniczonymi uprawnieniami, katalog o poprawnych ACL, serwer SSH i bezpieczny mechanizm uwierzytelniania klienta Junos. Dopiero wtedy konfigurujesz `archive-sites` po stronie routera.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], szablon archiwizacji**
+**R1-vSRX — Configuration Mode [edit private], szablon niekompletnego SCP archival**
 
 ~~~junos
-set system archival configuration archive-sites "scp://junos-archive@172.31.240.30/backup/junos/"
 set system archival configuration transfer-on-commit
+set system archival configuration archive-sites "scp://junos-backup@203.0.113.30/backup/junos/"
 show | compare
-commit check
 ~~~
 
-Po świadomym commit uruchomiony mechanizm powinien podjąć próbę transferu. **Nie zaliczaj testu na podstawie `commit complete`.**
+Nie zatwierdzaj szablonu jako kompletnego rozwiązania, dopóki nie przygotowano autoryzacji transferu. W rzeczywistym teście po kontrolowanym commit należy znaleźć plik **na serwerze**, sprawdzić jego zawartość i ewentualnie wczytać kopię w izolowanym środowisku do porównania.
 
-**Urządzenie: LAB-SRX01 — Operational Mode**
+**R1-vSRX — Operational Mode, lokalna diagnostyka archival**
 
 ~~~junos
 show configuration system archival | display set
-show log messages | match "transfer|scp|archive"
+show log messages | match "archive|scp|transfer"
 ~~~
 
-**Urządzenie: LAB-SERVICES — Linux shell, przy założeniu przygotowanego katalogu i praw dostępu**
+Jeśli po stronie serwera brak pliku, wynik to FAIL lub NOT TESTED zależnie od tego, czy usługa była uruchomiona, a nie PASS.
 
-~~~bash
-ls -l /backup/junos/
-~~~
+#### Krok G. AAA — osobny, opcjonalny eksperyment za konsolą
 
-**Dowód PASS:** plik istnieje, ma prawidłową datę i nazwę urządzenia, został zapisany do bezpiecznego katalogu, a jego **przywrócenie** zweryfikowano na oddzielnej testowej instancji. Bez testu restore status powinien brzmieć **ARCHIVE RECEIVED / RESTORE NOT TESTED**, nie „backup proven”.
+Ten etap jest opcjonalny, bo wymaga rzeczywistego TACACS+ lub RADIUS na `LAB-SERVICES`. Nie kopiujemy fikcyjnych sekretów ani nie tworzymy konfiguracji `authentication-order`, której skutki nie zostały zrozumiane.
 
-### 4.15.11. Etap 8 — rescue configuration jako kontrolowany punkt odbioru
+Przygotuj trzy kontrolowane przypadki:
 
-Dopiero teraz, kiedy management, konta i logowanie zostały rzeczywiście sprawdzone, zapisujemy rescue. **Nie zapisuj jej na podstawie samego commit check**. Rescue powinna przedstawiać sprawdzony stan bazowy.
+- **Accept:** serwer rozpoznaje testowego użytkownika i zwraca zgodną autoryzację.
+- **Timeout:** serwer lub ścieżka są niedostępne; sprawdzasz możliwość lokalnego dostępu awaryjnego.
+- **Reject:** serwer świadomie odmawia; porównujesz zachowanie `tacplus` i `[ tacplus password ]` zgodnie z dokumentacją Junos.
 
-**Urządzenie: LAB-SRX01 — Operational Mode, po pozytywnym commissioning test**
+Zachowaj konsolę niezależną od AAA i działające konto lokalne. Nie wykonuj globalnego wyłączania interfejsu management na działającym urządzeniu tylko po to, by zasymulować timeout. Ruch testowy blokuj w **izolowanym środowisku**, najlepiej po stronie kontrolowanego serwera lub jego firewall.
+
+**R1-vSRX — Operational Mode, read-only test środowiska AAA**
 
 ~~~junos
-request system configuration rescue save
-show system configuration rescue
-show system alarms
+show configuration system authentication-order
+show configuration system tacplus-server
+show log messages | match "tac|radius|sshd|login"
+show system users
 ~~~
 
-Wykonamy **dwa oddzielne eksperymenty**, żeby nie mieszać ręcznego rescue z automatycznym timerem:
+Bez prawdziwej odpowiedzi serwera i nowej sesji logowania ten scenariusz pozostaje NOT TESTED.
 
-**Eksperyment A — automatyczny powrót po braku potwierdzenia.** Zmień wyłącznie testowy banner, wykonaj `commit confirmed 2`, obejrzyj aktywny banner oraz status pending rollback, **nie wykonuj już żadnego commit ani commit check**, a następnie pozwól, by czas minął. Potwierdź w `show system commit`, że system automatycznie wrócił do poprzedniej konfiguracji.
+**Warunek zaliczenia poziomu 2:** potrafisz rozróżnić skonfigurowanie usługi od jej działania. NTP naprawdę synchronizuje, syslog dociera do kolektora, SNMPv3 odpowiada na authPriv GET, backup jest widoczny na serwerze, a AAA ma przetestowane scenariusze awaryjne. Jeśli nie wdrożono któregoś serwera, status tej usługi pozostaje NOT TESTED.
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], test A, izolowane EVE-NG**
+---
+
+### Poziom 3 [S → P] — DIAMOND-6R: sześć routerów, jedna polityka zarządzania i kontrolowana awaria
+
+Na tym poziomie nie dodamy żadnego nowego protokołu routingu. Wykorzystamy wszystkie sześć routerów, aby przećwiczyć to, co naprawdę bywa trudne w środowisku Enterprise: **spójne wdrożenie standardu na wielu urządzeniach**, weryfikację niezależnych stanów oraz diagnozę awarii usług zarządzania.
+
+Nie zakładaj, że sześć vSRX tworzy jeden system. Każdy ma własną konfigurację, konta, historię commit, procesy i dostęp administracyjny. Jeśli na R1 wykonasz commit, **nie zmienia to automatycznie R2–R6**.
+
+#### Krok 1. Baseline: sześć różnych urządzeń, które musisz poprawnie rozpoznać
+
+Najpierw na wszystkich routerach sprawdź wersję Junos i hostname. Na R1 i R4 zweryfikuj także oba korytarze rdzenia. W tej fazie wykonujemy tylko odczyty.
+
+**R1-vSRX — Operational Mode, EDGE-A i dwa wyjścia do rdzenia**
 
 ~~~junos
-set system login message "CH04 - TEMPORARY CONFIRMED TEST"
+show version
+show configuration system host-name
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+show system commit
+~~~
+
+**R2-vSRX — Operational Mode, górny korytarz**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces terse
+show system commit
+~~~
+
+**R3-vSRX — Operational Mode, dolny korytarz**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces terse
+show system commit
+~~~
+
+**R4-vSRX — Operational Mode, EDGE-B z dwoma uplinkami**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+show system commit
+~~~
+
+**R5-vSRX — Operational Mode, CE-A**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces ge-0/0/0 terse
+show system commit
+~~~
+
+**R6-vSRX — Operational Mode, CE-B**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces ge-0/0/0 terse
+show system commit
+~~~
+
+Dopiero teraz porównaj dokumentację z rzeczywistością. Jeżeli R3 pokazuje inną wersję Junos niż pozostałe urządzenia, odnotuj to. Jeżeli w EVE-NG port R4 do R2 ma inne mapowanie, nie „naprawiaj” tego przez losowe zmiany konfiguracji — najpierw ustal przyczynę.
+
+#### Krok 2. Wspólna polityka systemowego komunikatu logowania
+
+Załóżmy, że organizacja chce wyświetlać identyczny komunikat na każdym routerze. To dobry, nieszkodliwy przykład **standardu**, który możemy wprowadzać etapami.
+
+Nie wykorzystujemy configuration groups jako centralnego mechanizmu dystrybucji. Każdy router ma lokalną grupę o takiej samej nazwie. Nie jest to jeszcze Ansible, NETCONF ani kontroler zarządzania.
+
+**R1-vSRX — Configuration Mode [edit private], standard na pierwszym urządzeniu**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Teraz z osobnej sesji sprawdź, że komunikat i dostęp administracyjny są prawidłowe. Jeśli wszystko działa, zatwierdź zmianę na R1. **Nie zaczynaj równocześnie pięciu kolejnych `commit confirmed`**; podczas nauki łatwiej kontrolować jeden timer naraz.
+
+**R1-vSRX — Operational Mode, osobna sesja: post-check pierwszego routera**
+
+~~~junos
+show configuration system login | display inheritance
+show system users
+show system commit
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], tylko po pozytywnym post-check**
+
+~~~junos
+commit
+~~~
+
+Następnie powtórz wdrożenie na R4. Nie ruszamy jego portów, tras, BGP ani security zones.
+
+**R4-vSRX — Configuration Mode [edit private], ten sam standard na EDGE-B**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R4-vSRX — Operational Mode, osobna sesja: post-check**
+
+~~~junos
+show configuration system login | display inheritance
+show system commit
+~~~
+
+**R4-vSRX — Configuration Mode [edit private], tylko po PASS**
+
+~~~junos
+commit
+~~~
+
+Gdy R1 i R4 działają zgodnie z planem, możesz w ten sam kontrolowany sposób rozszerzyć szablon na R2, R3, R5 i R6. Poniższe bloki przygotowują zmianę — każdy wymaga własnej sesji, `show | compare`, `commit check`, `commit confirmed`, read-only post-check i ostatecznego `commit`. **Nie wykonuj ich równocześnie jako broadcast na sześć routerów.**
+
+**R2-vSRX — Configuration Mode [edit private], dopiero po zakończeniu zmiany na R4**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+~~~
+
+**R3-vSRX — Configuration Mode [edit private], osobna zmiana**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+~~~
+
+**R5-vSRX — Configuration Mode [edit private], osobna zmiana CE-A**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+~~~
+
+**R6-vSRX — Configuration Mode [edit private], osobna zmiana CE-B**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+~~~
+
+Zwróć uwagę: w końcowych czterech blokach **nie wykonałeś jeszcze commit**. To celowe. W praktyce każdy router jest osobnym zadaniem z własnym testem i odpowiedzialnością. Można te czynności potem zautomatyzować, ale najpierw trzeba rozumieć model działania.
+
+### Krok 3. Kontrolowana awaria — NTP działa na R1, ale R4 nie synchronizuje zegara
+
+W DIAMOND-6R mamy sześć osobnych systemów. Samo skopiowanie `set system ntp server 203.0.113.30` na R4 nie oznacza, że R4 ma drogę do serwera. Opcjonalny segment OOB z rysunku był **połączony tylko z R1**; jeżeli R4 nie ma własnego OOB ani świadomego routingu przez sieć danych, zapytania NTP mogą nie docierać.
+
+To bardzo przydatny scenariusz, ponieważ pokazuje, że **jednakowy config tekstowy nie gwarantuje jednakowego rezultatu**.
+
+Najpierw na R4 wykonaj wyłącznie odczyty.
+
+**R4-vSRX — Operational Mode, diagnostyka braku czasu**
+
+~~~junos
+show configuration system ntp | display set
+show ntp associations
+show ntp status
+show route 203.0.113.30
+show interfaces terse
+~~~
+
+Jeżeli nie ma trasy do 203.0.113.30, nie próbuj naprawiać problemu przez losową zmianę adresu źródłowego NTP. Najpierw ustal, **jaka ścieżka management jest właściwa dla R4**. Może to być osobny OOB połączony z rzeczywistą siecią administracyjną. Jeśli nie ma takiego połączenia, R4 nie może „magicznie” korzystać z portu R1 tylko dlatego, że oba należą do DIAMOND-6R.
+
+**Oczekiwany wniosek diagnostyczny:** NTP na R4 może być poprawnie skonfigurowany, ale niedostępny, ponieważ brak drogi IP albo odpowiedniego kontekstu zarządzania. Takiej awarii nie rozwiązujesz zmianą hasła ani restartem `rpd`.
+
+### Krok 4. Kontrolowana awaria — syslog jest lokalnie, ale nie ma go na serwerze
+
+Na R1 istnieje zdarzenie `commit`, które widzisz w `show log messages`. Na `LAB-SERVICES` nie ma odpowiadającego wpisu. Czy znaczy to, że Junos nie wygenerował logu? Nie — lokalny log dowodzi, że zdarzenie zostało zarejestrowane. Problem może leżeć **między R1 a kolektorem**.
+
+**R1-vSRX — Operational Mode, odczyt lokalny i ustawienia zdalnego logowania**
+
+~~~junos
+show log messages | last 30
+show configuration system syslog | display set
+show route 203.0.113.30
+~~~
+
+Sprawdź logi po stronie `LAB-SERVICES`, firewall i odbiornik. Nie wystarczy powiedzieć „UDP/514 jest przecież standardowym syslog”. Transport może być skonfigurowany inaczej; trzeba zweryfikować rzeczywisty wariant obu stron.
+
+### Krok 5. Kontrolowana awaria — SNMPv3 odmawia dostępu mimo dobrego pingu
+
+Załóżmy, że Linux `LAB-SERVICES` potrafi pingować adres management R1, lecz żądanie SNMPv3 authPriv kończy się timeout albo błędem bezpieczeństwa.
+
+Nie zaczynaj od wyłączania całej ochrony SRX. Zidentyfikuj, czy pakiety UDP/161 docierają, a następnie sprawdź:
+- użytkownika USM i jego security-level;
+- zgodność authentication/privacy oraz engine ID;
+- mapowanie VACM security-name → group → read-view;
+- adres źródłowy i filtrowanie management;
+- odpowiedź i szczegóły błędu w logach R1 oraz NMS.
+
+**R1-vSRX — Operational Mode, diagnostyka modelu SNMPv3**
+
+~~~junos
+show snmp statistics
+show snmp v3
+show configuration snmp | display set
+~~~
+
+Nie zapisuj do ticketu jawnych haseł SNMPv3. Jeśli poprawisz konfigurację, powtórz **rzeczywisty GET** i sprawdź, czy zwrócił oczekiwaną wartość. Sam nowy commit nie jest jeszcze rozwiązaniem.
+
+### Krok 6. Kontrolowana awaria — serwer backupu odrzuca połączenie
+
+R1 ma `transfer-on-commit`, ale `LAB-SERVICES` nie otrzymał archiwum. W naszym labie może to wynikać z błędnego klucza serwera, braku autoryzacji SCP, nieistniejącego katalogu albo trasy. Nie kopiuj konfiguracji do przypadkowego publicznego hosta jako „tymczasowego obejścia”.
+
+**R1-vSRX — Operational Mode, pierwsze dowody**
+
+~~~junos
+show configuration system archival | display set
+show log messages | match "archive|transfer|scp|sftp"
+show route 203.0.113.30
+~~~
+
+Sprawdź logi serwera i prawo do katalogu. Dopiero kiedy widać prawidłowy plik po drugiej stronie, możesz oznaczyć test backupu jako PASS.
+
+### Krok 7. Dwie różne metody powrotu — automatic rollback i rescue
+
+Nauczmy się na koniec odróżniać dwa rozwiązania, które początkujący często traktuje jak jedno.
+
+**Eksperyment A:** zmień nieszkodliwy komunikat logowania na R1 i wykonaj `commit confirmed 2`. Nie zatwierdzaj go. Po upływie czasu sprawdź, czy poprzednia aktywna konfiguracja została przywrócona.
+
+**R1-vSRX — Configuration Mode [edit private], próba automatycznego powrotu**
+
+~~~junos
+set system login message "CH04: AUTO-ROLLBACK-TEST"
 show | compare
 commit check
 commit confirmed 2
 ~~~
 
-**Urządzenie: LAB-SRX01 — Operational Mode lub konsola EVE, odczyt podczas oczekiwania**
+W czasie trwania timera **nie wykonuj `commit check` ani `commit`**. Obserwuj wyłącznie read-only z osobnej sesji.
+
+**R1-vSRX — Operational Mode, osobna sesja: obserwacja przed i po timerze**
 
 ~~~junos
 show system commit
 show configuration system login message
 ~~~
 
-Po **zakończeniu pending rollback** i weryfikacji stanu rozpocznij nową zmianę.
+Dopiero po zakończonym teście i powrocie do przewidzianego stanu przejdź dalej.
 
-**Eksperyment B — ręczne odtworzenie rescue.** Najpierw świadomie wykonaj odrębny, nieszkodliwy commit nowego banneru. Zrób to tylko w izolowanym labie, po analizie różnicy. Potwierdź `commit confirmed` dopiero po sprawdzeniu nowej sesji zarządzającej.
+**Eksperyment B:** załaduj zapisaną rescue configuration do prywatnej candidate i porównaj ją z aktualną konfiguracją. Nie aktywuj jej bez sprawdzenia, czy nie wycofałaby potrzebnych zmian.
 
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], test B, izolowane EVE-NG**
-
-~~~junos
-set system login message "CH04 - TEST MANUAL RESCUE"
-show | compare
-commit check
-commit confirmed 5
-~~~
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], test B, dopiero po service verification**
+**R1-vSRX — Operational Mode, upewnij się, że rescue istnieje**
 
 ~~~junos
-commit
+show system configuration rescue
+show system commit
 ~~~
 
-Dopiero kiedy **nie ma już oczekującego confirmed commit**, załaduj wcześniej zapisaną rescue i przeczytaj różnicę.
-
-**Urządzenie: LAB-SRX01 — Configuration Mode [edit], kontrolowane przywrócenie rescue**
+**R1-vSRX — Configuration Mode [edit private], wyłącznie przygotowanie rescue**
 
 ~~~junos
 rollback rescue
 show | compare
-commit check
-commit confirmed 5
 ~~~
 
-Po potwierdzeniu, że SSH, konta i usługi nadal działają, wykonaj świadome `commit`; sprawdź `show system commit` i porównaj z baseline. **Nie wykonuj przypadkowego `commit check` w trakcie pending confirmed commit**, gdyż może potwierdzić zmianę i wyłączyć automatyczny timer.
+Jeżeli rescue różni się od obecnego stanu, nie wprowadzaj jej tylko dla „sprawdzenia, czy działa”. Oceniaj, **które linie mogłyby zostać zastąpione**. To wystarcza do zrozumienia różnicy w mechanizmach.
 
-Konfiguracja rescue ma pozostać **znanym punktem recovery**, a nie zbiorem zmian testowych. Gdyby banner lub inne ustawienia odbiegały od pierwotnej konfiguracji, najpierw wyjaśnij różnicę, zamiast bezmyślnie nadpisywać rescue.
+### Krok 8. Ostateczne przyjęcie sześciu routerów
 
-### 4.15.12. Etap 9 — AAA, a kiedy serwer odpowiada reject zamiast milczeć [LAB opcjonalny]
+Jeżeli wszystkie węzły przeszły lokalne testy, przygotuj tabelę odbiorową, w której każdy router ma własny wiersz, a każda usługa własny wynik. To ważniejsze niż jeden globalny komunikat „lab ready”.
 
-Do ćwiczenia potrzebujesz rzeczywistego serwera TACACS+ lub RADIUS w `LAB-SERVICES`, przetestowanego użytkownika i bezpiecznie wdrożonych shared secrets. Jeżeli nie masz serwera, oznacz to jako **NOT TESTED**, nie udawaj reakcji urządzenia.
+| Urządzenie | Konsola / admin | SSH | NTP | Syslog | SNMPv3 | Archival | Rescue |
+|---|---|---|---|---|---|---|---|
+| R1 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R2 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R3 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R4 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R5 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R6 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
 
-Wykonaj trzy przypadki:
+W tabeli celowo zapisano **NOT TESTED**, ponieważ ten rozdział nie jest zapisem wykonania laboratorium. W trakcie pracy zastąp wartości prawdziwymi **PASS / FAIL / NOT TESTED**, dołączając odpowiednie dowody bez ujawniania sekretów.
 
-1. **AAA ACCEPT** — serwer rozpoznaje konto i nadaje właściwą rolę.
-2. **AAA TIMEOUT** — pakiet do serwera nie dociera, bądź serwer nie odpowiada; sprawdź zachowanie fallback local.
-3. **AAA REJECT** — serwer aktywnie odmawia; porównaj zachowanie przy `authentication-order tacplus` i `[ tacplus password ]`.
+Do zakończenia labu potrzebujesz jeszcze potwierdzić, że nie pozostały przypadkowe traceoptions, niepotrzebne testowe konta ani niezaufane serwery. Ostateczne rescue powinno odpowiadać zaakceptowanemu stanowi urządzenia. Jeśli na którymś urządzeniu działa tylko lokalny dostęp konsolowy, nie opisuj go jako gotowego do zdalnego utrzymania.
 
-**Pamiętaj o osobnym kanale konsoli i lokalnym break-glass**, zanim zaczniesz zmieniać AAA. To ćwiczenie jest przeznaczone dla świadomego testu w izolowanym labie, nie jako skrypt produkcyjnej zmiany.
+---
 
-### 4.15.13. Handover — checklista oddania urządzenia
+## 4.TEST. Sprawdź rozumienie — nie odpowiadaj na pamięć [EXT]
 
-Oznacz każdy etap rzeczywistym statusem:
+Pytania poniżej są autorskimi ćwiczeniami opartymi na opisywanych mechanizmach Junos. Nie pochodzą z rzeczywistej bazy egzaminacyjnej. Spróbuj najpierw **przewidzieć zachowanie R1** i dopiero potem porównaj odpowiedź.
 
-| Krok | PASS wymaga | Status przed labem |
+### Pytania
+
+**1.** Nowy vSRX uruchamia się i odpowiada przez konsolę, ale nie przez SSH. Czy brak SSH dowodzi, że system operacyjny się nie uruchomił? Jakie elementy musisz jeszcze sprawdzić?
+
+**2.** W EVE-NG widzisz kilka wirtualnych kart sieciowych. Czy możesz bez sprawdzenia uznać, że pierwsza to `fxp0`, i skonfigurować na niej IP management?
+
+**3.** Dlaczego `set system host-name R1-vSRX` nie oznacza automatycznie, że router może rozwiązać nazwę `ntp.lab.example`?
+
+**4.** Router ma skonfigurowane `system root-authentication`. Czy to samo w sobie oznacza, że powinno być dozwolone zdalne logowanie jako root przez SSH?
+
+**5.** Dlaczego warto najpierw utworzyć i przetestować `labadmin`, a dopiero potem wykonać `root-login deny`?
+
+**6.** `nocview` poprawnie wpisuje hasło, lecz nie może zmodyfikować konfiguracji interfejsu. Czy uwierzytelnianie było nieudane?
+
+**7.** Która z klas, `operator` czy `read-only`, jest bezpieczniejszym domyślnym punktem startowym dla konta mającego jedynie oglądać urządzenie? Dlaczego nazwa klasy nie wystarczy do ostatecznej decyzji?
+
+**8.** Na R1 ustawiono `authentication-order tacplus`. Serwer TACACS+ nie odpowiada. Czy taki przypadek musi zachowywać się tak samo jak prawidłowa odpowiedź reject?
+
+**9.** Co może zmienić jawne wpisanie `[ tacplus password ]` w porównaniu do samego `tacplus` po odpowiedzi reject serwera?
+
+**10.** R1 ma poprawny shared secret TACACS+, ale nie może się zalogować przez AAA. Dlaczego warto sprawdzić source-address, trasę management i routing instance?
+
+**11.** Na R1 skonfigurowano `ge-0/0/0 unit 0 family inet address 10.12.0.1/30`. Jakie dwie podstawowe informacje o IPv4 mogą dzięki temu pojawić się w tablicy routingu?
+
+**12.** Dlaczego `ge-0/0/0 up` nie dowodzi, że SSH, ping i tranzyt z R5 przez R1 będą działały?
+
+**13.** Dodałeś `groups CH04-BASE`, ale nie wykonałeś `apply-groups`. Czy system musi już używać wartości z grupy?
+
+**14.** Dlaczego `display inheritance` może pokazać ustawienie niewidoczne bezpośrednio w lokalnej gałęzi konfiguracji?
+
+**15.** R1 ma `set system time-zone Europe/Warsaw`, a `show ntp status` nie pokazuje synchronizacji. Czy godzina w logach jest teraz na pewno wiarygodna?
+
+**16.** Ping R1→203.0.113.30 odpowiada. Czy dowodzi to, że NTP UDP/123 działa, a serwer czasu jest wybranym źródłem?
+
+**17.** Router ma SNMPv3 `authPriv`, ale konfiguracja VACM nie dopuszcza odczytu `sysUpTime.0`. Czy poprawne hasła SNMP wystarczą do prawidłowego GET?
+
+**18.** NMS potrafi wykonać SNMPv3 GET, ale nie otrzymuje trapów. Dlaczego nie jest to sprzeczność?
+
+**19.** W lokalnym `show log messages` widzisz błąd interfejsu, lecz zdalny SIEM nie ma tego zdarzenia. Co z tego wynika — czy router nie wygenerował logu?
+
+**20.** Po `commit` na R1 serwer archiwizacji nie ma nowego pliku. Czy możesz oznaczyć configuration archival jako działające?
+
+**21.** Dlaczego szerokie traceoptions pozostawione na aktywnym routerze mogą być problemem, nawet gdy nie wykonujesz już ręcznie żadnego debugowania?
+
+**22.** Co różni `request system configuration rescue save` od `rollback rescue`?
+
+**23.** Wykonałeś `commit confirmed 5`, a następnie `commit check`, bo chciałeś sprawdzić składnię po zmianie. Dlaczego taka kolejność jest niebezpieczna?
+
+**24.** R1 jest poprawnie skonfigurowany do NTP na 203.0.113.30. Kopiujesz tę samą konfigurację na R4, który nie ma żadnej sieci management. Czy poprawna składnia oznacza, że R4 będzie synchronizował zegar?
+
+**25.** W handover widzisz PASS dla lokalnego logu, ale NOT TESTED dla centralnego syslog. Czy można uczciwie napisać, że integracja R1 z SIEM została zweryfikowana?
+
+### Odpowiedzi z wyjaśnieniami
+
+**1.** Nie. Możliwa jest prawidłowa praca systemu z niedostępnym SSH. Sprawdź usługę `system services ssh`, adres IP i trasę management, konto, uwierzytelnianie, host-inbound na SRX i odpowiednią kontrolę filtrowania.
+
+**2.** Nie. Model, release i mapping QEMU/EVE-NG muszą zostać potwierdzone przez `show interfaces terse` i faktyczne połączenia. Na wybranych urządzeniach występują inne nazwy i modele zarządzania.
+
+**3.** Hostname ustawia nazwę lokalną. Rozwiązywanie nazw wymaga sprawnej konfiguracji DNS, dostępnego resolvera i łączności do serwera.
+
+**4.** Nie. Konto root może być używane przez konsolę, ale dostęp root przez SSH powinien podlegać osobnej polityce bezpieczeństwa.
+
+**5.** Bo jeśli zablokujesz root SSH przed zweryfikowaniem alternatywnego loginu, możesz odciąć jedyną działającą ścieżkę administracyjną. Niezależna konsola pozostaje zabezpieczeniem.
+
+**6.** Niekoniecznie. Authentication mogło się udać, a authorization świadomie nie dopuściło edycji. Klasa `read-only` nie powinna mieć nieograniczonego prawa konfiguracji.
+
+**7.** Jako domyślny punkt startowy do samego odczytu wybierz `read-only`. `operator` może mieć uprawnienia operacyjne szersze niż podgląd. Konkretne polecenia należy przetestować na właściwym release.
+
+**8.** Nie. Timeout i reject są różnymi wynikami. Typowy Junos może przejść do local password awaryjnie po niedostępności remote, ale świadoma odmowa z serwera ma znaczenie zależne od jawnej kolejności metod.
+
+**9.** Jawne `password` pozwala próbować lokalnego hasła po metodzie zdalnej w odpowiednich warunkach, również gdy server zwraca reject. Wynik zależy od rzeczywistego lokalnego konta i polityki uwierzytelniania.
+
+**10.** Router może nadawać zapytanie z innego IP albo szukać drogi w niewłaściwej instancji. Serwer AAA może odrzucać nieznanego klienta mimo poprawnych informacji uwierzytelniających.
+
+**11.** Przy aktywnym interfejsie router może mieć trasę `Direct` do 10.12.0.0/30 i trasę `Local` do własnego IP 10.12.0.1/32.
+
+**12.** Stan warstwy fizycznej nie jest testem adresacji, usługi SSH, host-inbound ani security policy dla ruchu tranzytowego.
+
+**13.** Nie. Sama definicja group nie oznacza automatycznego zastosowania. Należy ustalić odpowiedni `apply-groups`.
+
+**14.** Parametr może pochodzić z grupy i być dziedziczony. Weryfikacja wynikowej konfiguracji wymaga uwzględnienia tego mechanizmu.
+
+**15.** Nie. Strefa czasowa dotyczy prezentacji czasu; nie dowodzi synchronizacji zegara. Sprawdź NTP association i status synchronizacji.
+
+**16.** Nie. Ping to ICMP, a NTP wykorzystuje własną komunikację, typowo UDP/123, i mechanizm wyboru źródła czasu.
+
+**17.** Nie. W SNMPv3 USM i VACM mają odrębne zadania. Użytkownik może być poprawnie uwierzytelniony, ale nie mieć uprawnień do konkretnego OID.
+
+**18.** Polling do routera i wysyłanie powiadomień z routera mają inne kierunki i zwykle inne porty UDP (161 i 162), a także inne wymagania konfiguracyjne.
+
+**19.** Nie. Router zarejestrował zdarzenie lokalnie. Problem może dotyczyć wysyłania, trasy, odbiornika albo filtracji. Trzeba sprawdzić oba końce.
+
+**20.** Nie. `transfer-on-commit` może być skonfigurowany, ale archiwizacja jest potwierdzona dopiero po znalezieniu poprawnego pliku na serwerze.
+
+**21.** Tracing może dalej generować dużą liczbę wpisów i obciążać system lub dysk. Po zakończeniu diagnostyki powinien zostać usunięty albo świadomie ograniczony.
+
+**22.** `request ... rescue save` zapisuje aktualnie zatwierdzoną konfigurację jako punkt ratunkowy. `rollback rescue` wczytuje tę konfigurację do candidate i sam nie aktywuje jej w systemie.
+
+**23.** `commit check` wykonany w trakcie oczekującego `commit confirmed` może **potwierdzić warunkową zmianę**, zamiast zachować możliwość automatycznego cofnięcia. Pre-check wykonujemy przed aktywacją.
+
+**24.** Nie. R4 musi mieć własną osiągalną drogę do serwera i poprawne ustawienia źródła oraz routing instance. Skopiowany config nie tworzy sieci OOB.
+
+**25.** Nie. PASS dla logu lokalnego dowodzi tylko, że zdarzenie zostało zapisane na R1. Integracja z SIEM wymaga prawdziwego odbioru po stronie serwera.
+
+---
+
+## 4.REF. Mapa usług administracyjnych — do powtórki po zrozumieniu mechanizmów [EXT]
+
+| Pytanie inżyniera | Gdzie szukam w Junos? | Co jest dowodem sukcesu? |
 |---|---|---|
-| Port management / SSH | Nowa sesja z LAB-ADMIN, zidentyfikowany interfejs i source | NOT TESTED |
-| Local user + class | `show cli authorization` dla dwóch kont | NOT TESTED |
-| AAA | Accept, timeout, reject + log serwera (jeśli przygotowany) | NOT TESTED |
-| Groups | `display inheritance` i dowód precedence | NOT TESTED |
-| NTP | Wybrana association, zsynchronizowany czas | NOT TESTED |
-| Syslog | Event w lokalnym pliku i na LAB-SERVICES | NOT TESTED |
-| SNMPv3 | Udany authPriv GET na standardowym OID | NOT TESTED |
-| SCP archival | Plik dotarł i ma poprawną datę | NOT TESTED |
-| Rescue | Zapis, odczyt, kontrolowany restore | NOT TESTED |
-| Final baseline | Brak testowych bannerów, uprawnienia i monitoring zgodne z HLD | NOT TESTED |
-
-**Wynik ostateczny:** urządzenie może zostać przekazane do eksploatacji, kiedy **te elementy, które są faktycznie wymagane w HLD**, mają udokumentowany PASS. Element niedostępny w laboratorium nie powinien być oznaczony jako PASS ani przedstawiony jako warunek istniejący w produkcji.
-
-### 4.15.14. Cleanup — nie zostawiaj śladów dydaktycznego eksperymentu w normalnej sieci
-
-Po testach:
-- usuń tylko własne **tymczasowe** banery, grupy CH04 oraz laboratoryjne pliki trace;
-- zamknij dodatkowe sesje kont testowych i sprawdź access;
-- nie zmieniaj `root-authentication` i kont bez zachowanej bezpiecznej metody wejścia;
-- porównaj active z udokumentowanym baseline i potwierdź właściwy stan NTP/syslog;
-- upewnij się, że nie ma oczekującego `commit confirmed`;
-- sprawdź, czy archive nie zawiera poufnych testowych informacji;
-- nie publikuj sekretów, całej konfiguracji i adresów produkcyjnych w repo.
-
-**Urządzenie: LAB-SRX01 — Operational Mode, końcowy read-only check**
-
-~~~junos
-show system commit
-show system configuration rescue
-show system alarms
-show interfaces terse
-show ntp status
-show snmp statistics
-show system users
-~~~
-
-**Status całego laboratorium pozostaje PLANNED**, dopóki ktoś faktycznie nie uruchomi go i nie zapisze dowodów w `labs/ch04-initial-config/VERIFY.md`.
-
-
+| Która wersja OS i urządzenia? | `show version`, `show chassis hardware` | Zgodność z inventory i planem |
+| Co było fabryczne, co zmieniono? | `show configuration`, `show system commit` | Znana konfiguracja bazowa |
+| Jak urządzenie się nazywa? | `system host-name` | Właściwy prompt i identyfikacja |
+| Czy działa management? | `show interfaces terse`, `show route` | Nowa sesja z właściwej sieci |
+| Czy działa SSH? | `system services ssh` | Nowe logowanie z LAB-ADMIN |
+| Kto może się logować? | `system login user` | Test indywidualnego konta |
+| Co wolno użytkownikowi? | `system login class` | Test dostępnych i zabronionych poleceń |
+| Gdzie jest centralne AAA? | `authentication-order`, TACACS+/RADIUS | Accept, reject, timeout i logi |
+| Czy działa dziedziczenie? | `groups`, `apply-groups` | `display inheritance` |
+| Czy zegar jest wiarygodny? | `system ntp` | `show ntp status` synchronized |
+| Czy NMS odczytuje router? | `snmp v3` USM/VACM | SNMPv3 authPriv GET |
+| Czy logi docierają do SIEM? | `system syslog` | Ten sam event lokalnie i zdalnie |
+| Czy mamy backup poza routerem? | `system archival configuration` | Plik na serwerze + próba odtworzenia |
+| Czy tracing nadal jest aktywny? | `traceoptions` | Kontrola zakresu i cleanup |
+| Czy mamy znaną dobrą rescue? | `request system configuration rescue save` | Odczyt rescue i plan restore |
+| Czy wdrożenie jest gotowe? | Zestaw odczytów i testy serwerowe | PASS/FAIL/NOT TESTED z dowodami |
 
 ---
 
-## 4.TS. [EXT] Dziesięć rzeczywistych scenariuszy troubleshootingu
-
-W dobrym podręczniku nie wystarczy znać **happy path**. Podczas rozmowy kwalifikacyjnej seniora, maintenance window albo egzaminu ktoś poda Ci symptom i zapyta „co sprawdzisz jako pierwsze?”. Nie chcę listy pięćdziesięciu komend do uruchomienia. Chcę, żebyś **umiał przewidzieć, który etap procesu zawiódł**.
-
-### 4.TS.1. „Mam ping do SRX, ale SSH nie działa”
-
-**Symptom:** LAB-ADMIN pinguje adres zarządzania, lecz TCP/22 kończy się timeoutem.
-
-**Możliwy błąd myślenia z Cisco:** „Skoro IP odpowiada, to chyba problem z hasłem”. Nie. Hasło jest sprawdzane **dopiero po ustanowieniu odpowiedniego transportu SSH**. Timeout może powstać wcześniej.
-
-**Urządzenie: LAB-SRX01 — Operational Mode z konsoli**
-
-~~~junos
-show interfaces terse
-show route table inet.0
-show configuration system services ssh | display set
-show configuration security zones | display set
-show log messages | match "sshd|ssh|login"
-~~~
-
-**Tok diagnozy:** port właściwej platformy → adres i routing powrotny → listener SSH → SRX host-inbound/firewall filter → TCP reachability → dopiero authentication i login class. Jeśli na Cisco używałbyś VTY ACL, w Junos pamiętaj, że SRX może mieć **security zones** oraz odrębne mechanizmy ograniczania dostępu do RE.
-
-**Root cause** nie może być ustalony jedynie z ping. Potwierdź rzeczywisty test TCP/22 z bastiona.
-
-### 4.TS.2. „AAA działa, ale moje lokalne hasło już nie”
-
-**Symptom:** użytkownik `labadmin` loguje się lokalnie, gdy serwer TACACS+ jest wyłączony, ale przy działającym serwerze z błędnym policy login jest odrzucany.
-
-**Przewidywanie:** w systemie ustawiono tylko `authentication-order tacplus`, a serwer jawnie odrzuca login. To nie jest to samo co brak odpowiedzi.
-
-**Urządzenie: LAB-SRX01 — Operational Mode z konsoli / działającej sesji awaryjnej**
-
-~~~junos
-show configuration system authentication-order
-show configuration system tacplus-server | display set
-show log messages | match "tac|login|sshd"
-~~~
-
-**Naprawa:** ustal oczekiwany model fallback i politykę bezpieczeństwa klienta, sprawdź prawdziwą odpowiedź serwera oraz zgodność login template/class; nie włączaj „password” w produkcji bez oceny ryzyka i uzgodnienia z Security Team.
-
-**Most z Cisco:** rozróżnienie AAA `REJECT` vs `TIMEOUT` bywa równie istotne, ale nie zakładaj identycznego przebiegu dla różniących się syntaksów.
-
-### 4.TS.3. „Zalogowałem się, ale nawet `show configuration` jest niedostępne”
-
-**Symptom:** SSH działa, ale polecenie ma błąd autoryzacji.
-
-**Urządzenie: LAB-SRX01 — Operational Mode jako ograniczony użytkownik**
-
-~~~junos
-show cli authorization
-show system users
-~~~
-
-**Hipoteza:** konto dostało login class z flagami niewystarczającymi do przeglądania danej sekcji. Sprawdź centralny VSA/template, nie tylko lokalną `class`. Nie „naprawiaj” wszystkiego przez natychmiastowe przypisanie `super-user`, bo usuniesz kontrolę dostępu.
-
-### 4.TS.4. „NTP server jest skonfigurowany, ale logi mają błędne godziny”
-
-**Symptom:** konfiguracja zawiera `system ntp server`, jednak timeline w SIEM jest rozjechany.
-
-**Urządzenie: LAB-SRX01 — Operational Mode**
-
-~~~junos
-show ntp associations
-show ntp status
-show system uptime
-show configuration system time-zone
-show configuration system ntp | display set
-~~~
-
-**Hipotezy:** źródło jest nieosiągalne, pakiety UDP/123 są blokowane, source-address/VRF jest zły, serwer nie jest synchronizowany albo operator myli time-zone z faktycznym czasem. Ping do serwera nie zastępuje odczytu **selected association + status**.
-
-### 4.TS.5. „NMS pokazuje SNMPv3 Authentication Failure”
-
-**Symptom:** z bastiona SSH działa, ale NMS nie może odczytać `sysUpTime.0`.
-
-**Urządzenie: LAB-SRX01 — Operational Mode**
-
-~~~junos
-show snmp statistics
-show snmp v3
-show configuration snmp | display set
-show log messages | match "snmp|SNMP"
-~~~
-
-**Pytania:** czy problemem jest UDP/161, engine ID, security name, algorytm auth/privacy, błędny sekret, czy VACM view? Jeśli nie ma w ogóle ruchu do urządzenia, nie zaczynaj od podmiany hasła. **SNMPv3 authPriv** to kombinacja wielu parametrów, a nie pojedynczy community string.
-
-### 4.TS.6. „Syslog lokalnie jest, a w SIEM nie ma nic”
-
-**Symptom:** `show log messages` zawiera zdarzenia, lecz serwer `172.31.240.30` nie.
-
-**Urządzenie: LAB-SRX01 — Operational Mode**
-
-~~~junos
-show configuration system syslog | display set
-show route table inet.0
-show log messages | last 30
-show interfaces terse
-~~~
-
-**Hipotezy:** brak routing do hosta, zły source IP, pomylony port/protokół, blokada ACL, brak nasłuchu po stronie serwera, niewłaściwa facility/severity. Zła interpretacja `any notice` może dodatkowo ukryć zdarzenia poziomu informational, których szuka zespół.
-
-**Gotcha:** nawet jeśli centralne logowanie działa, nie należy bez ograniczeń kierować `any info` do wszystkich zalogowanych terminali przez `syslog user *`.
-
-### 4.TS.7. „W `show configuration` nie ma ustawienia, które urządzenie stosuje”
-
-**Symptom:** masz nieoczekiwany banner lub parametr portu, którego nie skonfigurowano bezpośrednio w tej gałęzi.
-
-**Urządzenie: LAB-SRX01 — Operational Mode**
-
-~~~junos
-show configuration | display inheritance
-show configuration groups | display set
-show configuration | display set
-~~~
-
-**Hipoteza:** ustawienie jest odziedziczone przez `apply-groups` albo pochodzi z lokalnego override. Sprawdź precedence: lokalny statement → grupy bardziej szczegółowe → kolejność `apply-groups`. Na Cisco porównałbyś template w Catalyst Center albo profil zastosowany do interfejsu, ale Junos robi to wewnątrz hierarchii.
-
-### 4.TS.8. „Backup ma działać po każdym commit, ale katalog serwera jest pusty”
-
-**Symptom:** `transfer-on-commit` jest w konfiguracji, a plik na backup server nie powstał.
-
-**Urządzenie: LAB-SRX01 — Operational Mode**
-
-~~~junos
-show configuration system archival | display set
-show log messages | match "transfer|scp|archive"
-file list /var/transfer/config/
-~~~
-
-**Hipotezy:** server SSH nie przyjmuje klucza, brak praw zapisu katalogu, fingerprint host key nie został zweryfikowany, serwer jest niedostępny z właściwej instancji routing, albo transfer czeka w kolejce. **Commit complete nie potwierdza SCP delivery.**
-
-Nie zapisuj hasła do URL `scp://user:password@server` dla wygody. Wycofaj ten pomysł i przygotuj bezpieczną autentykację i ograniczone konto.
-
-### 4.TS.9. „Rollback rescue kończy się błędem”
-
-**Symptom:** potrzebujesz ratunku, ale urządzenie zgłasza brak lub niepoprawny rescue config.
-
-**Urządzenie: LAB-SRX01 — Operational Mode**
-
-~~~junos
-show system configuration rescue
-show system commit
-show system alarms
-~~~
-
-**Root cause:** rescue nigdy nie została zapisana albo jest niekompletna/niezgodna. **Nie można odtworzyć punktu, którego nie utworzono.**
-
-Jeśli rescue zawiera błędną konfigurację, również nie pomoże. W takim przypadku planujesz odzyskanie z lokalnej historii lub **zewnętrznego backupu**. Nie zakładaj, że rollback na vSRX jest zawsze odpowiednikiem factory reset.
-
-### 4.TS.10. „Zmieniłem management-instance i nagle padły SSH, AAA, NTP oraz syslog”
-
-**Symptom:** kilka pozornie niezależnych usług przestało działać po małej zmianie OOB routing.
-
-**Urządzenie: LAB-SRX01 — Operational Mode przez niezależną konsolę**
-
-~~~junos
-show configuration system management-instance
-show route table inet.0
-show route table mgmt_junos.inet.0
-show interfaces terse
-show configuration system ntp | display set
-show configuration system tacplus-server | display set
-show configuration system syslog | display set
-~~~
-
-**Hipoteza:** źródła ruchu management i routing context zostały zmienione, ale poszczególne usługi nadal próbują używać niewłaściwej ścieżki. Nie naprawiaj pięciu usług osobno, zanim nie ustalisz **wspólnej przyczyny**.
-
-To jest najbardziej wartościowy nawyk Tier 3: nie szukasz pięciu niezależnych bugów; pytasz, **która wspólna zależność łączy wszystkie objawy**.
-
----
-
-## 4.TEST. Sprawdzian z rozumienia — 18 scenariuszy z odpowiedziami [A / EXT]
-
-*Pytania są autorskie, inspirowane oficjalnymi mechanizmami Junos i praktyką eksploatacyjną. Nie kopiujemy komercyjnych banków pytań, nie nazywamy pytań własnych oficjalnymi pytaniami certyfikacyjnymi.*
-
-**Najpierw sam przewidź wynik**, dopiero potem przeczytaj wyjaśnienie.
-
-### 4.TEST.1. Pytania
-
-1. Nowy EX4400 i SRX300 stoją na tej samej półce. Czy można założyć, że oba mają fabrycznie ten sam IP i ten sam trust zone?
-
-2. Konsola pozwala zalogować się jako root bez hasła. Czy z tego wynika, że root może bezpiecznie logować się przez SSH z dowolnej sieci?
-
-3. vSRX ma adres na `fxp0`. Czy oznacza to automatyczne istnienie odrębnej `mgmt_junos.inet.0`?
-
-4. Dodałeś `set system name-server 172.31.240.53`, ale DNS nie działa. Czy stworzyłeś tym poleceniem serwer DNS?
-
-5. `labadmin` ma poprawne hasło, ale klasa `read-only` i próbuje commit. Co powstrzyma zmianę?
-
-6. Utworzyłeś `system login class LAB-NOC permissions view`, ale `show configuration` może być ograniczone. Dlaczego?
-
-7. TACACS+ nie odpowiada. Co może zrobić Junos, jeśli masz lokalne hasło? A gdy TACACS+ **odsyła reject**, a `password` nie znajduje się jawnie w authentication-order?
-
-8. Dla `authentication-order [ tacplus password ]` serwer odpowiada reject. Czy lokalne konto ma szansę zostać sprawdzone?
-
-9. Dlaczego AAA z `source-address` wskazującym niewłaściwą IP może nie działać mimo poprawnego shared secret?
-
-10. Utworzyłeś `groups LAB-STD`, lecz nie ma `apply-groups`. Czy konfiguracja grupy działa? Co jeśli wartość lokalna przeczy odziedziczonej?
-
-11. Zmieniłeś `system time-zone`. Czy teraz wszystkie zegary w sieci są zsynchronizowane?
-
-12. `show ntp associations` pokazuje serwer, ale `show ntp status` nie potwierdza synchronizacji. Czy można zatwierdzić test NTP jako PASS?
-
-13. NMS potrafi pingować Junos i używa poprawnego użytkownika USM, lecz VACM nie zawiera read-view. Czy polling na pewno zadziała?
-
-14. NMS potrafi pobrać SNMPv3 `sysUpTime.0`, ale nie otrzymuje trapów. Czy polling i trapy są jednym mechanizmem?
-
-15. Na SRX skonfigurowano `system syslog host 172.31.240.30 any notice`. Czy to oznacza, że szczegółowe logi każdej sesji firewall znajdą się w zdalnym SIEM?
-
-16. `transfer-on-commit` jest w konfiguracji, a operator widzi `commit complete`. Czy można wnioskować, że plik backupu dotarł do serwera?
-
-17. Chcesz szybko wrócić do znanej dobrej konfiguracji, ale nikt nigdy nie wykonał `request system configuration rescue save`. Co się stanie przy `rollback rescue`?
-
-18. Po wprowadzeniu `commit confirmed` sprawdzasz konfigurację przez kolejne `commit check`. Czy masz gwarancję, że timer rollback nadal działa?
-
-### 4.TEST.2. Wyjaśnienia odpowiedzi
-
-**1. Nie.** SRX300 z fabrycznym `trust/untrust` i EX4400 z `me0` mają różne profile oraz role. Dokładne defaulty sprawdzamy per model/release.
-
-**2. Nie.** Dostęp console i SSH to odrębne mechanizmy. W nowym site tworzymy osobiste konto, testujemy je i dopiero potem ograniczamy root SSH.
-
-**3. Nie.** Fizyczny port management i dedykowana routing instance są różnymi pojęciami. Bez poprawnej konfiguracji mgmt VRF usługi mogą używać `inet.0`.
-
-**4. Nie.** Podałeś adres resolvera, który nadal musi rzeczywiście działać i być osiągalny.
-
-**5. Authorization/login class.** Samo rozpoznanie użytkownika nie daje prawa do modyfikowania active configuration.
-
-**6. Permission flags.** `view` i szersze uprawnienia konfiguracji nie są tym samym; wymagany zakres weryfikujemy przez `show cli authorization` i dokumentację.
-
-**7. Timeout i reject nie są tożsame.** Gdy serwer jest niedostępny, możliwy jest fallback local; przy jawnym reject i bez password w order zwykle następuje odmowa. To zależy od dokładnego `authentication-order`.
-
-**8. Tak.** Jawne dołączenie `password` przewiduje próbę metody lokalnej po określonym remote reject. Nie gwarantuje sukcesu bez prawidłowego lokalnego konta.
-
-**9.** Serwer AAA może identyfikować klienta po source IP, a routing/filter może nie umożliwiać powrotu. Shared secret nie naprawia niedostępności sieci.
-
-**10.** Sama grupa nie musi działać bez `apply-groups`; lokalna wartość zwykle ma pierwszeństwo. `display inheritance` pokazuje wynik.
-
-**11. Nie.** Strefa czasu reguluje prezentację, a NTP dostarcza synchronizację. To odrębne elementy.
-
-**12. Nie.** Potrzebne jest potwierdzenie stanu synchronizacji, nie tylko zobaczenie adresu serwera.
-
-**13. Nie.** VACM musi nadać dostęp do wybranych MIB OID; poprawne hasło USM nie oznacza dowolnego odczytu.
-
-**14. Nie.** Polling jest inicjowany z NMS, trap przez urządzenie; różne kierunki, konfiguracje i często porty.
-
-**15. Nie.** System log i SRX security session logging nie są automatycznie tym samym strumieniem.
-
-**16. Nie.** Transfer może się nie powieść po commit; sprawdź log i odbiornik, a w DR przetestuj restore.
-
-**17.** Próba może zakończyć się błędem. Nie można automatycznie przywrócić niezapisanej albo wadliwej rescue.
-
-**18. Nie.** Oficjalna dokumentacja dopuszcza, że `commit check` potwierdzi oczekujący `commit confirmed`. Oczekujący timer sprawdzamy operacyjnie.
-
-### 4.TEST.3. Jak sprawdzić, czy rozdział jest naprawdę opanowany?
-
-Nie musisz recytować wszystkich linii SNMPv3 VACM na pamięć. Po przejściu laboratorium powinieneś samodzielnie:
-
-- wybrać poprawny interfejs management dla konkretnego modelu;
-- utworzyć bezpieczne konto i ograniczoną klasę;
-- przewidzieć, kiedy AAA fallback zadziała;
-- skonfigurować NTP i dowieść synchronizacji;
-- wyjaśnić, dlaczego SNMPv3 authPriv wymaga USM i VACM;
-- odróżnić system syslog od SRX security log;
-- otrzymać off-device backup i dowód zapisu;
-- wykonać kontrolowany rescue restore i wiedzieć, że nie jest to automatyczny rollback do produkcji;
-- przeprowadzić cały commissioning bez zapisywania credentiali w repo.
-
-Jeżeli nie potrafisz odpowiedzieć na „**jaki dokładnie dowód potwierdza działanie usługi?**”, wróć do 4.14 i laboratorium, zamiast szukać następnej suchej tabeli.
-
-
-
----
-
-## 4.CLI. Podręczna mapa poleceń — dopiero po przejściu lekcji [EXT]
-
-W tym miejscu tabela jest już uzasadniona: nie zastępuje mechanizmów, tylko przypomina, **jakie pytanie stawiasz urządzeniu** podczas prawdziwego incidentu lub change'u.
-
-| Pytanie | Przykładowe polecenie / obszar Junos | Czego NIE dowodzi |
-|---|---|---|
-| Co naprawdę uruchomiłem? | `show version`, `show chassis hardware` | Że model ma ten sam factory default co inna rodzina |
-| Jaki mam adres OOB? | `show interfaces terse` | Że mam właściwy routing do bastiona |
-| Skąd wziął się ten parametr? | `show configuration ... \| display inheritance` | Że zwykły widok zawsze ujawnia wszystkie groups |
-| Kto może się logować? | `show configuration system login` | Że nowa sesja naprawdę przejdzie AAA |
-| Jaką rolę otrzymałem? | `show cli authorization` | Że inny użytkownik ma identyczną klasę |
-| Dlaczego AAA nie działa? | `show configuration system authentication-order`, log | Czy serwer timeoutował, czy wykonał reject |
-| Gdzie jest management route? | `show route table inet.0`, `mgmt_junos.inet.0` | Że port management automatycznie tworzy VRF |
-| Czy NTP jest w konfiguracji? | `show configuration system ntp` | Że zegar jest zsynchronizowany |
-| Czy NTP naprawdę działa? | `show ntp associations`, `show ntp status` | Że SIEM ma poprawną time-zone |
-| Czy jest SNMP agent i auth? | `show snmp statistics`, `show snmp v3` | Że NMS wykonał udany polling |
-| Czy system tworzy logi? | `show log messages \| last 30` | Że remote SIEM je odebrał |
-| Czy jest zewnętrzna archiwizacja? | `show configuration system archival` | Że serwer SCP ma kopię |
-| Czy jest rescue? | `show system configuration rescue` | Że jest dobra i można odzyskać wszystkie usługi |
-| Jakie ostatnie zmiany? | `show system commit` | Że rollback historii jest off-device backupem |
-
-**Zasada senior engineer:** dowód na działanie usługi zbierasz z **urządzenia i systemu docelowego**. Jedna linijka `set` nie jest dowodem na transport danych.
-
----
-
-## 4.SOURCES. Materiały producenta, bibliografia i ograniczenia
-
-Poniżej są **jawne źródła techniczne** i punkty, które szczególnie przydały się do weryfikacji haczyków. W rozdziale korzystamy z nich jako podstawy do własnego wykładu; nie przedstawiamy scenariuszy własnych jako pytań skopiowanych z egzaminu.
-
-### Start, sprzęt, podstawowa konfiguracja
-
-- [Initial Configuration Overview](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/concept/initial-configuration-overview.html).
-- [Configuring Junos on SRX300](https://www.juniper.net/documentation/us/en/hardware/srx300/topics/topic-map/srx300-configuring-junos.html) — fabryczne trust/untrust, IRB, zmiany NETCONF od 25.2R1.
-- [Configure Junos OS on EX4400](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html) — management `me0`, konsola, zachowanie po `load factory-default`.
-- [Management Interface in a Dedicated Instance](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/topic-map/management-interface-in-non-default-instance.html).
-- [Root Authentication](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/root-authentication-edit-system.html).
-
-### Tożsamość administratora i AAA
-
-- [User Accounts](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-user-accounts.html).
-- [Login Classes Overview](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-login-class-overview.html).
-- [User Access Privileges](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html).
-- [show cli authorization](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-cli-authorization.html).
-- [Authentication Order](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-authentication-order.html) — kluczowe: **AAA timeout ≠ AAA reject**.
-- [TACACS+ Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-tacacs-authentication.html).
-- [RADIUS Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-radius-authentication.html).
-
-### Dziedziczenie, synchronizacja czasu, monitoring
-
-- [Use Configuration Groups](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html).
-- [apply-groups](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/apply-groups.html).
-- [Network Time Protocol](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/ntp-edit-system.html).
-- [Example: Configure NTP](https://www.juniper.net/documentation/us/en/software/junos/time-mgmt/topics/example/example-configure-ntp.html).
-- [Configure SNMPv3](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html) — USM, VACM, engine ID.
-- [Junos SNMP FAQ](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/junos-os-snmp-faqs.html).
-- [Remote Syslog](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/directing-system-log-messages-to-a-remote-destination.html).
-- [Juniper Community: syslog user * any info](https://community.juniper.net/discussion/set-system-syslog-user-any-info-creating-log-storms) — prawdziwy problem operatorski, odpowiedź techniczna skonfrontowana z oficjalną dokumentacją.
-
-### Backup, tracing i odzyskiwanie
-
-- [Back Up Configurations to an Archive Site](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/cli/topics/task/junos-software-system-management-router-configuration-archiving.html).
-- [archival CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/archival-edit-system.html).
-- [Tracing OSPF/IS-IS](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-is-is-ospf.html).
+## Źródła, zakres i ograniczenia
+
+Ten rozdział zachowuje kompletny zakres **4.1–4.14 [A] oraz 4.15 [LAB]** z [Unified Blueprint](../JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md). Materiał opracowano od nowa dla czytelnika z około rocznym doświadczeniem, odchodząc od założenia o wcześniejszej znajomości Cisco. Starszą wersję zachowano w [archiwum](../archive/JUNOS_Rozdzial_04_pre_beginner_rewrite_2026-11-20.md). Laboratorium rozwija [oficjalną dla repozytorium referencję DIAMOND-6R](../../labs/reference-diamond-6vsrx/README.md) oraz [specyfikację CH04](../../labs/ch04-initial-config/README.md). Rejestr punktów weryfikacyjnych: [CH04 research](../research/CH04_GOTCHAS_ZRODLA_I_WERYFIKACJA.md).
+
+**Oficjalne materiały Juniper użyte jako odniesienie:**
+
+- [Initial Configuration on SRX](https://www.juniper.net/documentation/us/en/hardware/srx300/topics/topic-map/srx300-configuring-junos.html).
+- [EX4400 Initial Configuration](https://www.juniper.net/documentation/us/en/hardware/ex4400/topics/topic-map/ex4400-configure-junos-os.html).
+- [Root and SSH Remote Access](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-software-remote-access-overview.html).
+- [User Access Privileges / Login Classes](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-access-privileges.html).
+- [Authentication Order, TACACS+, RADIUS and Local](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/junos-os-authentication-order.html).
+- [Management Interface and Non-default Instance](https://www.juniper.net/documentation/us/en/software/junos/junos-getting-started/topics/topic-map/management-interface-in-non-default-instance.html).
+- [Configuration Groups and Inheritance](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/configuration-groups-usage.html).
+- [NTP Setup and Behavior](https://www.juniper.net/documentation/us/en/software/junos/time-mgmt/topics/example/ntp-configuration.html).
+- [Configure SNMPv3](https://www.juniper.net/documentation/us/en/software/junos/network-mgmt/topics/topic-map/configure-snmpv3.html).
+- [System Syslog](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/syslog-edit-system.html).
+- [Configuration Archival](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/cli/topics/task/junos-software-system-management-router-configuration-archiving.html).
+- [Traceoptions for Routing Protocols](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/traceoptions-edit-protocols-is-is-ospf.html).
 - [Rescue Configuration](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-rescue-configuration.html).
-- [show system configuration rescue](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-configuration-rescue.html).
-- [Rescue and Recovery of Configuration File](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/rescue-and-recovery-config-file.html).
-- [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html) — ostrzeżenie o `commit check` w czasie pending commit confirmed.
+- [Commit Workflow](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html).
 
-### Licencja wykorzystanego obrazu
+**Granice weryfikacji:** dokumentacja potwierdza opisane mechanizmy, ale zachowanie i dostępność poszczególnych funkcji może różnić się zależnie od modelu oraz Junos release. Szczególnie dotyczy to management NIC vSRX, `mgmt_junos`, wersji algorytmów SNMPv3, metody transportu SCP/SFTP i opcji trace. Żadna przykładowa konfiguracja nie została uruchomiona na rzeczywistym obrazie vSRX w EVE-NG, a wszystkie statusy usług pozostają **PLANNED / NOT RUNTIME VALIDATED**, dopóki nie ma dowodów z routera i właściwego serwera.
 
-- W sekcji 4.6 znajduje się oryginalna fotografia przełącznika [Juniper Networks QFX5100 Ethernet switch](https://commons.wikimedia.org/wiki/File:Juniper_Networks_QFX5100_ethernet_switch.jpg), autor: **Juniper Networks**, [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), **bez modyfikacji**, hotlink Wikimedia Commons. Obraz nie jest pobrany do repo. Jego celem jest jedynie pokazanie różnych fizycznych rodzajów portów; **nie przedstawia modelu używanego w naszym labie**.
-- Wszystkie diagramy Mermaid w tym rozdziale są autorskimi uproszczeniami dydaktycznymi.
+**Następny rozdział V:** będziemy obserwować i utrzymywać urządzenie, które już zostało uruchomione — dowiemy się, jak czytać stan interfejsów, logi, liczniki, alarmy, wykonywać pre-checki przed konserwacją i diagnozować awarie bez niepotrzebnego ryzyka.
 
-### Co zostało sprawdzone, a czego nie?
-
-**Zweryfikowano w źródłach:** semantykę factory-default (per model), interfejs `me0` EX4400, root login/keys, role i AAA fallback, precedence groups, NTP, USM/VACM SNMPv3, system syslog, transfer-on-commit, rescue, podstawowy model traceoptions oraz nieoczywiste zachowanie `commit check`.
-
-**Nie zweryfikowano runtime:** mapowania QEMU NIC konkretnego vSRX w EVE-NG, usług LAB-SERVICES, realnych rekordów syslog, authPriv GET, repozytorium backup, AAA ACCEPT/TIMEOUT/REJECT, czy `commit confirmed` automatycznie wycofał zmianę na konkretnym release. Nie oznaczaj tych elementów jako PASS bez wykonania testów.
-
-**Granice platformowe:** EX4400 z `me0`, SRX z `fxp0`, wirtualny vSRX, MX, QFX, Junos OS Evolved, SRX cluster i Virtual Chassis mogą mieć różne formaty interfejsów, ścieżki routingu management, zasady host-inbound, obsługę usług i restrykcje systemowe. Każdy przykład należy dopasować do rzeczywiście wykrytego modelu/release.
-
----
-
-## 4.END. Zakończenie — co znaczy „site gotowy do produkcji”?
-
-O 08:15 instalator pytał, czy może przekazać nowy Juniper do eksploatacji, bo świeci na zielono.
-
-Teraz odpowiedź potrafisz uzasadnić:
-
-*„Nie wystarczy działający link. Potrzebujemy prawidłowej tożsamości urządzenia, przejrzystego management access, kont indywidualnych i awaryjnych, potwierdzonego AAA, zsynchronizowanego czasu, działającego sysloga, monitoringu SNMPv3, zewnętrznej kopii konfiguracji i zweryfikowanej rescue. Dopiero wtedy inny inżynier będzie mógł utrzymać to urządzenie w środku nocy”.*
-
-Gdy nauczysz się tak myśleć, **komendy Junos staną się tylko sposobem wykonania projektu**, a nie listą obcych słów. I właśnie o to chodzi w przejściu z Cisco do Junipera.
-
-**Blueprint:** Rozdział **4. Initial Configuration and System Services [A]**, punkty **4.1–4.14**, dodatkowo **4.15 [LAB]**; uzupełnienia praktyczne [EXT] w sekcjach 4.TS, 4.TEST i 4.CLI.
-
-**Status:** lekcja gotowa do nauki; laboratorium **PLANNED / NOT RUNTIME VALIDATED**.
-
+*Konfiguracja początkowa jest naprawdę zakończona dopiero wtedy, gdy inny administrator potrafi bezpiecznie przejąć urządzenie, zdiagnozować problem i przywrócić dostęp — bez zgadywania, jak autor wdrożenia zamierzał go utrzymywać.*
