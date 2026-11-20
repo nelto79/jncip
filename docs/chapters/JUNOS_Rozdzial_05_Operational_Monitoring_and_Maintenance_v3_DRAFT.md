@@ -673,3 +673,205 @@ Wynik „SSH OK” ma znaczenie, ale nie zastępuje testu end-to-end z R5 do R6.
 
 **Źródła:** [request system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-reboot.html), [request system halt](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-halt.html), [show system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-reboot.html).
 
+
+---
+
+## 5.7. Odzyskiwanie hasła root — kiedy procedura jest dostępna, a kiedy celowo zablokowana? [A]
+
+### Najpierw odróżnij brak hasła od braku dostępu
+
+Załóżmy, że nowo przejęty router R1 nie pozwala zalogować się jako `root`. Czy powinieneś od razu wejść do trybu odzyskiwania hasła?
+
+Nie. Najpierw sprawdź, czy problem dotyczy rzeczywiście **hasła root**, czy może innej ścieżki logowania: konta `labadmin`, polityki SSH, centralnego AAA albo adresu management.
+
+Jeśli SSH działa, lecz `root` jest blokowany, może to być poprawny wynik `set system services ssh root-login deny`. Konto root może nadal działać przez konsolę. Jeżeli nie możesz zalogować się przez SSH żadnym kontem, problemem może być również routing, security zone lub serwer uwierzytelniania.
+
+**Root password recovery** to procedura pozwalająca uprawnionemu administratorowi przywrócić dostęp do własnego urządzenia, gdy nie zna hasła root. Zwykle wymaga odpowiedniego fizycznego lub konsolowego dostępu podczas uruchamiania systemu. Nie jest normalnym sposobem codziennej administracji.
+
+### Dlaczego dostęp do konsoli jest tak ważny?
+
+Przez SSH łączysz się z już działającym systemem, który wymaga uwierzytelnienia. Podczas odzyskiwania hasła trzeba zwykle skorzystać z odpowiedniego etapu **boot**, czyli uruchamiania systemu, zanim normalny mechanizm logowania zostanie w pełni uruchomiony. Dlatego konsola musi być dostępna niezależnie od SSH i samej konfiguracji IP.
+
+Na fizycznym routerze może to wymagać obecności technika onsite, terminala szeregowego i zaplanowanej przerwy. Na własnym vSRX w EVE-NG należy mieć dostęp do jego konsoli i **uprawnienia do tej instancji VM**. Sama znajomość adresu IP routera nie wystarcza.
+
+### Nie istnieje jedna procedura dla każdego Junos
+
+W zależności od platformy i wersji spotkasz różne sposoby odzyskiwania. W klasycznym Junos z odpowiednim FreeBSD można trafić na procedurę uruchomienia w trybie pojedynczego użytkownika, np. z etapem `boot -s` i poleceniem `recovery`. W **Junos OS Evolved** dostępna procedura może korzystać z pozycji odzyskiwania w menu boot. Dodatkowo zabezpieczenia takie jak odpowiednie ustawienia konsoli, tryb FIPS czy polityki platformy mogą proces ograniczać lub blokować.
+
+To oznacza, że sam tekst `boot -s` nie jest uniwersalną komendą do wykonania na każdym Juniperze. Jego znaczenie zależy od konkretnego boot loadera. Nie może też zastąpić formalnej autoryzacji do odzyskiwania.
+
+### Jak zaplanować recovery na własnym vSRX?
+
+W oddzielnym klonie szkoleniowym zacznij od odpowiedzi na pytania:
+
+1. Czy to rzeczywiście właściwa maszyna i czy mam upoważnienie do recovery?
+2. Czy znam dokładny obraz Junos, model oraz dokumentację tego wydania?
+3. Czy mam sprawdzony dostęp konsolowy i mogę obserwować **cały boot**?
+4. Czy mam kopię konfiguracji i snapshot lub inną ścieżkę odtworzenia urządzenia?
+5. Czy restart maszyny jest dozwolony i nie odetnie innych laboratoriów?
+6. Czy ustawienia bezpieczeństwa dopuszczają recovery i czy zespół ma właściwe dane ratunkowe?
+
+Jeżeli odpowiedź na którekolwiek z kluczowych pytań brzmi „nie wiem”, nie rozpoczynaj operacji.
+
+**R1-vSRX — Operational Mode, kontrola stanu na dostępnej autoryzowanej sesji przed planowaną procedurą**
+
+~~~junos
+show version
+show configuration system root-authentication
+show configuration system services ssh
+show system uptime
+show system commit
+~~~
+
+Odczyt `root-authentication` może zawierać informacje wrażliwe o konfiguracji uwierzytelniania, dlatego nie kopiuj jego pełnej treści do publicznego repozytorium. Nie pokaże także prawdziwego hasła w postaci umożliwiającej jego odczytanie.
+
+### Co robisz po przywróceniu dostępu?
+
+Jeżeli zgodna z platformą, autoryzowana procedura recovery zakończyła się sukcesem, skonfiguruj nowe hasło w bezpiecznym interaktywnym dialogu i zweryfikuj dostęp. Nie używaj jawnej wartości w `encrypted-password`, jeśli nie jest ona już poprawnym hashem w formacie obsługiwanym przez Junos.
+
+**R1-vSRX — Configuration Mode [edit private], nowy root password wprowadzany interaktywnie po autoryzowanym recovery**
+
+~~~junos
+set system root-authentication plain-text-password
+show | compare
+~~~
+
+Prawidłowa procedura zatwierdzenia i zakończenia recovery zależy od tego, czy jesteś już w normalnym CLI czy w specjalnym trybie ratunkowym, oraz od konkretnego release. Nie zatwierdzaj ślepo zmian w nieznanym kontekście.
+
+Po odzyskaniu dostępu sprawdź **konta administracyjne, AAA, politykę SSH, logi i przyczynę utraty danych uwierzytelniających**. Jeśli organizacja nie ma kontrolowanego magazynu danych break-glass, problem może się powtórzyć na kolejnym routerze.
+
+### Root recovery a bezpieczeństwo organizacji
+
+Możliwość odzyskiwania root przez konsolę jest przydatna, ale oznacza również, że dostęp do sprzętu i konsoli należy fizycznie chronić. Wysokie wymagania bezpieczeństwa mogą celowo blokować pewne ścieżki recovery. W takim przypadku nie należy obchodzić zabezpieczeń — trzeba skorzystać z zatwierdzonego procesu organizacyjnego lub wsparcia producenta.
+
+Nie przeprowadzamy rzeczywistego resetu hasła w głównym DIAMOND-6R. Jeśli chcesz ćwiczyć ten mechanizm, użyj **oddzielnego, odizolowanego klona R1**, który nie jest potrzebny do pozostałych labów. Status pozostaje NOT TESTED, dopóki nie wykonano prawidłowej procedury dla wskazanej wersji.
+
+**Źródła:** [Recover a Root Password — Junos OS](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/recovering-root-password.html), [Recover a Root Password — Junos OS Evolved](https://www.juniper.net/documentation/us/en/software/junos/user-access-evo/user-access/topics/topic-map/recovering-root-password.html), [Root Authentication](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/user-access-root-password.html).
+
+---
+
+## 5.8. Jak prowadzić diagnostykę i prace utrzymaniowe — od objawu do dowodu naprawy [A → S/P]
+
+### Nie zaczynaj od pytania „jakiej komendy użyć?”
+
+Wracamy do R5 i R6. Załóżmy, że użytkownik zgłasza brak łączności między obiema stronami. Mamy sześć routerów, dwie możliwe drogi przez rdzeń i firewalling SRX na każdym z nich. Gdzie zacząć?
+
+Od dokładnego określenia symptomów. **Nie działa ping z R5 do 198.51.100.10**, czy może nie działa jedna aplikacja TCP za R6? Czy problem pojawił się po zmianie konfiguracji? Czy dotyczy obu kierunków? Czy nadal działa bezpośrednie połączenie R5–R1?
+
+Różne odpowiedzi prowadzą do różnych testów. Jeśli nie możesz pingować sąsiedniego routera na tym samym segmencie, analizowanie BGP na R4 jest przedwczesne. Jeśli bezpośredni ping działa, a ruch przez R1 nie, warto rozważyć **routing, security zones/policies i drogę powrotną**.
+
+### Pierwsza rozmowa podczas incydentu
+
+Dobrze postawione pytania to nie formalność. Poproś o:
+- dokładne **źródło** i **cel** połączenia, a jeśli to aplikacja — także protokół i port;
+- informację, kiedy problem wystąpił po raz pierwszy i czy jest stały czy sporadyczny;
+- liczbę dotkniętych użytkowników lub lokalizacji;
+- wynik **tego samego testu**, który wcześniej działał;
+- wiadomość, czy w ostatnim czasie wykonywano change, restart albo prace fizyczne.
+
+Jeśli masz ServiceNow lub inny system zgłoszeń, zapisz te dane. Nie wystarczy „network down”, bo taki wpis nie odróżnia awarii sieci danych od awarii zarządzania.
+
+### Hipoteza to nie fakt
+
+**Hipoteza** jest możliwym wyjaśnieniem objawu. Jeśli R5 nie pinguje R6, hipotez może być kilka: nieaktywny link R1–R2, brak trasy, złe rozwiązywanie ARP, niedopuszczona nowa sesja w security policy, brak trasy powrotnej albo brak odpowiedzi samego R6.
+
+Każdą hipotezę można sprawdzić konkretną obserwacją.
+
+| Hipoteza | Test rozstrzygający | Co nie wystarczy? |
+|---|---|---|
+| Link R1–R2 jest down | Status i logi na obu interfejsach | Sam opis portu w konfiguracji |
+| Na R1 brakuje drogi do LAN-B | `show route` i forwarding | Ping do własnego adresu R1 |
+| Next-hop nie rozwiązuje się na L2 | ARP oraz stan portu do sąsiada | Sama obecność static route |
+| SRX nie dopuścił nowego flow | Security policy, session i counters | Ping z routera do bezpośredniego sąsiada |
+| R6 nie zna powrotu do R5 | RIB/FIB i test z R6 | Tylko sprawdzenie R1 |
+| Problem jest tylko w aplikacji TCP | Test konkretnego TCP/HTTPS z klienta | Ping ICMP do gateway |
+
+**Nie zmieniaj jednocześnie trzech rzeczy tylko dlatego, że mogą być związane z awarią.** Jeśli poprawisz route, security policy i DNS naraz, nie będziesz wiedział, który mechanizm rzeczywiście spowodował poprawę.
+
+### Odczyt porównujemy z wcześniej dobrym stanem
+
+W rozdziale IV zbieraliśmy baseline po wdrożeniu. To właśnie teraz jest ważne. Jeżeli znasz prawidłowy interfejs, trasę, NTP i stan procesu sprzed awarii, łatwiej rozpoznać zmianę.
+
+Przykład: R1 miał trasę do LAN-B przez R2, a teraz pokazuje next-hop do R3. To może być poprawne przełączenie zapasowe, ale musisz sprawdzić, **dlaczego** nastąpiła zmiana i czy R4 zna poprawną drogę powrotną.
+
+Jedna niezgodność z baseline nie jest zawsze błędem. Dynamiczne protokoły routingu zmieniają tablice, gdy zmienia się topologia. Krytyczne jest ustalenie, czy aktualny stan spełnia wymagania usługi.
+
+### Diagnostyka w warstwach — od sygnału do aplikacji
+
+Przy każdym problemie unikaj mieszania zjawisk z różnych warstw.
+
+Na **warstwie fizycznej** sprawdzasz link, błędy CRC, porty, transceivery i połączenia. Na **warstwie 2** — osiągalność sąsiada we wspólnym segmencie Ethernet, ARP i właściwą domenę przełączania, jeśli występuje. Na **warstwie 3** — adresy, tablice routingu, next-hop, FIB i drogę powrotną. Na poziomie **SRX security** — strefy, polityki, sesje i ewentualne filtry. Na poziomie **usługi** — właściwy protokół aplikacji, port, DNS, odpowiedzi serwera i uprawnienia.
+
+To kolejność rozumowania, a nie sztywny nakaz zaczynania każdego zgłoszenia od sprawdzenia kabla. Jeśli monitoring od razu pokazuje odrzucenie sesji na firewallu, zacznij od tej hipotezy.
+
+~~~mermaid
+flowchart TD
+  A["Zgłoszenie: test R5 → R6 nie działa"] --> B{"Czy wiemy jaki jest source/destination?"}
+  B -->|nie| C["Ustal dokładny test i czas"]
+  B -->|tak| D["Odczyt portów i tras na źródle"]
+  D --> E{"Jest aktywna użyteczna droga?"}
+  E -->|nie| F["RIB/next-hop/ARP, konfiguracja i zdarzenia"]
+  E -->|tak| G["Zbadaj kolejne hop-y i security flow"]
+  G --> H{"Czy odbiorca zna drogę powrotną?"}
+  H -->|nie| I["Napraw świadomie return path"]
+  H -->|tak| J["Test właściwej aplikacji i wynik post-check"]
+~~~
+
+*Rysunek 5.3. Schemat myślowy diagnostyki, nie literalny pipeline pakietu w każdym modelu Junos.*
+
+### Jak zebrać dane na początku P1?
+
+W przypadku dużej awarii potrzebujesz zestawu niewielkich, wiarygodnych odczytów i czasu ich wykonania.
+
+**R1-vSRX — Operational Mode, pre-check bez zmiany stanu**
+
+~~~junos
+show system uptime
+show system alarms
+show interfaces terse
+show route table inet.0
+show log messages | last 50
+show system commit
+~~~
+
+Na R4 i innych hopach powtarzasz odczyty **z odpowiedniego urządzenia**, ale nie wpisujesz ich wszystkich w jednym broadcast. W dokumentacji zawsze zapisuj, z którego routera pochodzi wynik.
+
+Następnie porównaj z prawdziwym testem źródło→cel. Nie wykonuj przypadkowego `clear`, restartu procesu ani globalnego rollback, dopóki nie masz dowodów, że naprawi to konkretną przyczynę.
+
+### Pre-check, post-check i rollback: trzy elementy jednego change
+
+W poprzednich rozdziałach poznaliśmy `commit confirmed`. To zabezpieczenie jest użyteczne również podczas naprawy. Ale trzeba je rozumieć dokładnie: `commit check` wykonany **po** `commit confirmed` może potwierdzić warunkową zmianę, dlatego nie używamy go jako testu w czasie trwania timera.
+
+Poprawny przebieg bezpiecznej zmiany w labie jest następujący:
+
+1. Sprawdź stan **przed** zmianą, zapisz wyniki i znane objawy.
+2. Pracuj na właściwym routerze i w odpowiedniej candidate.
+3. Zobacz `show | compare` i wykonaj `commit check` **przed aktywacją**.
+4. Wykonaj `commit confirmed` z czasem wystarczającym na konkretne testy.
+5. Podczas oczekiwania wykonaj **read-only post-check i test usługi**, najlepiej z właściwego źródła.
+6. Jeśli wynik jest dobry, świadomie zatwierdź `commit`. Jeśli zły — nie potwierdzaj; wykorzystaj zaplanowany rollback.
+7. Porównaj wynik z baseline, odnotuj wpływ, nowe ryzyka i to, co trzeba jeszcze sprawdzić.
+
+Jeśli problem występuje na kilku urządzeniach, nie uruchamiaj sześciu timerów równocześnie tylko dlatego, że w topologii są sześć vSRX. Każda zmiana powinna mieć własny cel i kontrolę skutku.
+
+### Co napisać w worknotes?
+
+Dobre worknotes nie są zbiorem wszystkich wklejonych outputów. Powinny zawierać:
+- od kogo i kiedy pochodził symptom;
+- jaki source/destination, protokół i kierunek sprawdzono;
+- jaki był stan interfejsów, tras i sesji przed zmianą;
+- jaka hipoteza została potwierdzona lub odrzucona i na podstawie czego;
+- co dokładnie zmieniono oraz jak zabezpieczono rollback;
+- jaki test wykazał poprawę i czy usługa działa z perspektywy użytkownika;
+- co pozostało nierozwiązane lub wymaga działań innego zespołu.
+
+Nie pisz „root cause: firewall” tylko dlatego, że na SRX pojawia się ruch. Jeśli nie udowodniono konkretnej przyczyny, poprawne jest „suspected” albo „further verification required”.
+
+### Proaktywne utrzymanie: po co, skoro jeszcze nie ma awarii?
+
+Monitoring, właściwe progi i przeglądy pozwalają wykryć narastające problemy, zanim użytkownik je zgłosi. Na fizycznym switchu może to być wzrost CRC albo pogarszający się poziom Rx. Na routerze — spadek miejsca na dysku, częste alarmy procesów, niestabilne sąsiedztwa albo nieskuteczne backupy.
+
+Nie sprowadzaj proaktywnego monitoringu do „wszystkie hosty odpowiadają na ping”. Sprawdza on również **jakość, trendy i możliwość odzyskania usługi**.
+
+---
+
