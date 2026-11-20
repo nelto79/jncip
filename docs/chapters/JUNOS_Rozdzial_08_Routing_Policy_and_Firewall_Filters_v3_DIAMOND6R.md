@@ -399,3 +399,139 @@ show configuration protocols bgp group CORE | display set
 To ćwiczenie daje dobrą zasadę pracy: **najpierw odczytaj politykę, potem znajdź jej punkt przyłożenia, a na końcu sprawdź wynik na trasach**. Konfiguracja, która nie jest podpięta, nie może być przyczyną filtrowania peera. Konfiguracja podpięta na niewłaściwym poziomie może natomiast działać na inną grupę sąsiadów, niż zakładasz.
 
 *Dokumentacja: [Policy Match Conditions](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-match-conditions-in-routing-policy-terms.html), [Routing Policy Structure](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-overview.html).*
+
+---
+
+## 8.6. Route filters, prefix lists, AS_PATH i community — co dokładnie dopasowujemy? [A → S]
+
+Skoro policy wykonuje decyzję na podstawie \`from\`, jej jakość zależy przede wszystkim od **precyzji warunku**. Można mieć bardzo czytelny \`then reject\` i mimo to dopuścić złą trasę, jeżeli użyliśmy zbyt szerokiego dopasowania.
+
+Na R1 chcemy akceptować dwie sieci R6: 172.16.60.0/24 i 172.16.61.0/24. Niedozwolona jest 172.16.62.0/24. Dlaczego więc nie wpisać po prostu \`172.16.0.0/16 orlonger\`? Bo wówczas zaakceptowalibyśmy znacznie więcej niż potrzeba — każdy bardziej szczegółowy prefix należący do tego /16, włącznie z testowym /62.
+
+### Sześć modyfikatorów \`route-filter\`
+
+W Cisco używałeś \`ip prefix-list\` z operatorami \`ge\` oraz \`le\`. Junos ma własny, bardzo czytelny zestaw modyfikatorów. Najlepiej nauczyć się ich na jednym prefiksie bazowym, np. **172.16.0.0/16**.
+
+| Modyfikator | Co dopasuje | Czego nie dopasuje |
+|---|---|---|
+| \`exact\` | Wyłącznie \`172.16.0.0/16\` | \`172.16.60.0/24\` |
+| \`longer\` | Wszystkie bardziej szczegółowe prefiksy zawarte w /16 | Samego \`172.16.0.0/16\` |
+| \`orlonger\` | Bazowe /16 i jego bardziej szczegółowe podsieci | Niespokrewnionych zakresów |
+| \`upto /24\` | /16, /17 … /24 w zakresie bazowym | /25, /26 itd. |
+| \`prefix-length-range /24-/28\` | Tylko /24–/28 należące do bazowego /16 | /16–/23 i /29–/32 |
+| \`through\` | Prefiksy na określonej ścieżce od pierwszego prefiksu do wskazanego bardziej szczegółowego | Innych gałęzi drzewa prefiksów |
+
+Nie jest to dopasowanie **adresu źródłowego pakietu**, lecz **prefiksu wpisu routingu**. Jeśli PC albo router wysyła ping do 172.16.60.1, BGP nie ocenia jego source/destination portów ani długości maski komputera. Ocenia ogłaszany route \`172.16.60.0/24\`.
+
+### Szczególny przypadek: Longest Match wewnątrz jednego termu
+
+To jeden z ważniejszych niuansów Junos. Wyobraź sobie pojedynczy term, który mówi:
+
+- akceptuj **172.16.0.0/16 orlonger**;
+- ale dla konkretnego **172.16.62.0/24 exact** wykonaj lokalną akcję \`reject\`.
+
+**R1-vSRX — Configuration Mode, osobny wariant ilustrujący akcję przy \`route-filter\`**
+
+~~~junos
+set policy-options policy-statement PREFIX-EXAMPLE term TEN from route-filter 172.16.0.0/16 orlonger
+set policy-options policy-statement PREFIX-EXAMPLE term TEN from route-filter 172.16.62.0/24 exact reject
+set policy-options policy-statement PREFIX-EXAMPLE term TEN then accept
+set policy-options policy-statement PREFIX-EXAMPLE term REST then reject
+~~~
+
+Co zrobi term dla **172.16.62.0/24**? W obrębie jednego termu Junos wyszukuje **najbardziej szczegółowy wzorzec prefiksu**. Wygra dopasowanie \`172.16.62.0/24 exact\` i jego lokalna akcja \`reject\`, nie wcześniejszy, szeroki \`172.16.0.0/16 orlonger\`. Kolejność dwóch wierszy wewnątrz termu nie jest kolejnością wykonywania jak w zwykłej ACL.
+
+Jest jednak druga, subtelniejsza sytuacja. Załóżmy, że drugi wpis to \`172.16.60.0/24 exact\`, bez lokalnej akcji \`reject\`, a oceniana trasa to **172.16.60.0/25**. W domyślnej semantyce Junos najpierw może zostać wybrany bardziej szczegółowy wzorzec /24, a późniejszy test \`exact\` dla kandydata /25 zakończy się niepowodzeniem. Mimo że szersze /16 \`orlonger\` wygląda na pasujące, silnik nie musi automatycznie do niego wracać. Taką możliwość zmienia funkcja \`walkup\`, której dostępność i zakres należy sprawdzić na swoim release.
+
+Dlatego w konfiguracji przeznaczonej dla zespołu operacyjnego często wolę **osobne, nazwane termy**. Nie dlatego, że Junos działa źle, ale dlatego, że w nocy łatwiej zrozumieć \`BLOCK-TEST\` nad \`ALLOW-BUSINESS\` niż analizować działania lokalne przy najbardziej szczegółowym wzorcu radix tree.
+
+~~~mermaid
+flowchart TD
+  P["Kandydat: 172.16.62.0/24"] --> W["Wzorce w tym samym termie"]
+  W --> A["172.16.0.0/16 orlonger"]
+  W --> B["172.16.62.0/24 exact reject"]
+  A --> C{"Najbardziej szczegółowy?"}
+  B --> C
+  C --> D["/24 exact → lokalny reject"]
+~~~
+
+*Rysunek 8.5. \`route-filter\` porównuje wzorce prefiksów, a nie przegląda ich jako wierszy ACL. Na egzaminie i w analizie produkcyjnej ma to znaczenie, gdy nakładają się zakresy.*
+
+### \`prefix-list\` — lista nazwanych sieci używana w wielu miejscach
+
+Zamiast wpisywać dwie sieci R6 osobno w każdej polityce, możemy stworzyć jedną listę.
+
+**R1-vSRX — Configuration Mode, lista zaakceptowanych prefiksów CE-B**
+
+~~~junos
+set policy-options prefix-list CE-B-ALLOWED 172.16.60.0/24
+set policy-options prefix-list CE-B-ALLOWED 172.16.61.0/24
+set policy-options policy-statement ALLOW-CE-B term MATCH from prefix-list CE-B-ALLOWED
+set policy-options policy-statement ALLOW-CE-B term MATCH then accept
+set policy-options policy-statement ALLOW-CE-B term REST then reject
+~~~
+
+Zwykłe \`from prefix-list CE-B-ALLOWED\` dopasowuje wpisane prefiksy **dokładnie**. Jeśli potrzebujesz zezwalać na bardziej szczegółowe sieci w ramach tych bloków, użyj odpowiedniej składni \`prefix-list-filter CE-B-ALLOWED orlonger\`. Ale nie traktuj jej jak niegroźnej kosmetyki: przypadkowe \`orlonger\` może dopuścić deagregację /25–/32, której nie planowałeś.
+
+Nazwa \`prefix-list\` jest również użyteczna w bezstanowych firewall filters, np. przy \`source-prefix-list\`. Trzeba jednak pamiętać o różnicy: w routing policy sprawdzasz **wpis routingowy**, a w firewall filter **adres IP pojedynczego pakietu**.
+
+### \`protocol\` — ten sam prefix, inne źródło
+
+Jeżeli R1 ma do 172.16.60.0/24 trasę \`BGP\` oraz z jakiegoś powodu trasę \`Static\`, sama zgodność prefixu nie wystarczy do wybrania zamierzonego wariantu. Możemy dopisać \`from protocol bgp\` albo \`from protocol static\`.
+
+**R1-vSRX — Configuration Mode, oba warunki muszą być spełnione**
+
+~~~junos
+set policy-options policy-statement BGP-ONLY term SERVICE from protocol bgp
+set policy-options policy-statement BGP-ONLY term SERVICE from route-filter 172.16.60.0/24 exact
+set policy-options policy-statement BGP-ONLY term SERVICE then accept
+set policy-options policy-statement BGP-ONLY term REST then reject
+~~~
+
+To przykład operatora **AND**: trasa musi pochodzić z BGP **i** mieć dokładnie wskazany prefix. Gdy w jednej kategorii wpiszemy kilka wartości \`protocol [ static direct ]\`, akceptujemy jedną **lub** drugą kategorię pochodzenia.
+
+### BGP AS_PATH — skąd naprawdę przyszła trasa?
+
+W naszym diamencie na R1 droga do R6 przez R2 może mieć AS_PATH **65002 65004 65106**, a przez R3 — **65003 65004 65106**. Obie pochodzą ostatecznie od R6, ale mają inny pierwszy AS. Właśnie dlatego atrybut AS_PATH nadaje się do rozpoznawania sąsiadujących domen i do polityk międzyoperatorskich.
+
+W Junos regular expressions dla AS_PATH **nie są wprost składnią Cisco**, w której \`_\` często oznacza granicę numeru AS. Junos interpretuje sekwencje **tokenów AS**. Nie przepisuj wzorca Cisco z podkreślnikami bez zrozumienia różnicy.
+
+**R1-vSRX — Configuration Mode, przykład dopasowania ścieżek przez R2**
+
+~~~junos
+set policy-options as-path THROUGH-R2 "65002 .*"
+set policy-options policy-statement AS-PATH-EXAMPLE term UPPER from as-path THROUGH-R2
+set policy-options policy-statement AS-PATH-EXAMPLE term UPPER then accept
+set policy-options policy-statement AS-PATH-EXAMPLE term REST then reject
+~~~
+
+To jest przykład do czytania i testowania składni dla konkretnej wersji, **nie** kompletna ochrona antyloop. Bez kontroli prefiksów, sąsiada i pozostałych atrybutów zgoda oparta wyłącznie na AS_PATH byłaby zbyt szeroka. W produkcji używaj polityk adresowych i AS-path jednocześnie, jeśli wymagają tego reguły między AS.
+
+### Communities — etykieta, a nie samoistne zezwolenie
+
+Oprócz AS_PATH do BGP możemy dodawać **communities**, czyli znaczniki opisujące klasę trasy. Załóżmy, że wszystkie prefiksy usług R6 powinny otrzymać \`65106:100\`. R1 może potem dopasować tę community i przypisać LOCAL_PREF. To pomaga oddzielić **identyfikację rodzaju trasy** od **decyzji o jej preferowaniu**.
+
+**R6-vSRX — Configuration Mode, community dla usług CE-B**
+
+~~~junos
+set policy-options community CE-B-SERVICES members 65106:100
+set policy-options policy-statement TAG-CE-B term SERVICE from route-filter 172.16.61.0/24 exact
+set policy-options policy-statement TAG-CE-B term SERVICE then community add CE-B-SERVICES
+set policy-options policy-statement TAG-CE-B term SERVICE then next policy
+~~~
+
+W łańcuchu \`export [ TAG-CE-B CE-B-OUT ]\` pierwsza polityka **oznacza**, druga wykonuje ostateczną whitelistę. Samo \`community add\` nie powinno być traktowane jak końcowe „zaakceptuj wszystkie trasy”. Użyliśmy jawnego \`next policy\`, bo właśnie taki przebieg zamierzamy.
+
+Rozróżnij trzy działania:
+
+| Akcja | Znaczenie |
+|---|---|
+| \`community add NAME\` | Dodaj znaczniki, zachowując dotychczasowe |
+| \`community set NAME\` | Zastąp zestaw community zdefiniowanym zbiorem |
+| \`community delete NAME\` | Usuń wskazane znaczniki |
+
+Jest to niezmiernie ważne przy pracy z operatorem. Przypadkowe \`community set\` może usunąć znaczniki, które inny router wykorzystuje do \`no-export\`, blackholingu lub sterowania trasami. Nie zakładaj też, że sama obecność community „uwierzytelnia” prefix: sąsiad może przesłać zarówno NLRI, jak i community; właściwa import whitelist pozostaje potrzebna.
+
+Dla dużych organizacji istnieją również **Large Communities** z formatem \`large:global-admin:local-data1:local-data2\`, przydatne m.in. przy 4-bajtowych numerach AS. Zasada jest ta sama: znacznik nabiera znaczenia dopiero wtedy, gdy jakaś polityka go interpretuje.
+
+*Dokumentacja: [Routing Policy Match Conditions](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-match-conditions-in-routing-policy-terms.html), [Walkup Route Filter](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/walkup-route-filter-policy-option-overview.html), [AS Path Regular Expressions](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-as-path-regular-expressions-to-use-as-routing-policy-match-conditions.html).*
