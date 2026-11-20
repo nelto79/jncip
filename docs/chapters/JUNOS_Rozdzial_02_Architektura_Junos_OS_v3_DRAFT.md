@@ -501,3 +501,130 @@ flowchart TD
 
 **Źródła Juniper:** [Traffic Processing on SRX Series](https://www.juniper.net/documentation/us/en/software/junos/flow-packet-processing/topics/topic-map/security-srx-devices-processing-overview.html), [Packet-Based Forwarding](https://www.juniper.net/documentation/us/en/software/junos/flow-packet-processing/topics/topic-map/security-packet-based-forwarding.html), [SRX Security Policies Overview](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html).
 
+
+---
+
+## 2.6. Exception traffic — kiedy pakiet wymaga uwagi samego routera? [A]
+
+### Nie każdy pakiet przechodzący przez port jest pakietem tranzytowym
+
+Poznaliśmy ruch R5→R2, który na R1 był tranzytem. Teraz zmieńmy tylko **adres docelowy** pakietu. R5 nadal jest źródłem, nadal korzysta z tej samej sieci 192.0.2.0/24, a ramka nadal trafia do R1. Tym razem jednak destination IP to **192.0.2.1**, czyli własny adres R1.
+
+R1 nie powinien wysyłać tego pakietu dalej do R2. Pakiet jest skierowany **do samego R1**. Junos musi przekazać go do odpowiedniego mechanizmu lokalnej obsługi, jeśli bezpieczeństwo i konfiguracja zezwalają na taki ruch.
+
+Taki ruch często nazywamy **host-bound** lub **local traffic** — w odróżnieniu od pakietów tranzytowych. W architekturze spotkasz również termin **exception traffic**: obejmuje ruch wymagający szczególnego przetwarzania zamiast zwykłego szybkiego forwardingu. W zależności od platformy może być to komunikacja do RE, pakiet wymagający specjalnej obsługi, zdarzenie kontrolne lub inny wyjątek w dataplane.
+
+Dla początkującego najważniejsze jest rozpoznanie, że **nie każdy pakiet ma być przekazany dalej**, a część ruchu jest skierowana do usług samego routera.
+
+### Trzy rodzaje ruchu, których nie warto mylić
+
+Załóżmy, że obserwujesz R1.
+
+**Transit traffic:** R5 wysyła do 10.12.0.2. R1 ma przekazać pakiet do R2.
+
+**Host-bound traffic:** R5 wysyła do 192.0.2.1. R1 sam jest odbiorcą i ma zdecydować, czy lokalnie obsłużyć ping.
+
+**Locally originated traffic:** Administrator wykonuje na R1 \`ping 10.12.0.2\`. To R1 sam generuje pakiet. Nie przeszedł on najpierw przez interfejs LAN-A jako ruch z R5.
+
+Takie rozróżnienie bardzo pomaga w awariach. Możesz mieć poprawnie działający **locally originated ping** z routera, a jednocześnie zablokowany **transit** z klienta. Możesz też mieć sprawny transit, a zablokowaną odpowiedź na **host-bound ping** do interfejsu routera.
+
+| Co obserwujemy na R1? | Kto jest źródłem? | Kto jest odbiorcą? | Kategoria na R1 |
+|---|---|---|---|
+| ICMP R5 → R2 | R5 | R2 | Transit |
+| ICMP R5 → R1 | R5 | R1 | Host-bound |
+| ICMP R1 → R2 | R1 | R2 | Locally originated |
+| SSH administratora do R1 | Administrator | R1 | Host-bound |
+| BGP UPDATE od R2 do R1, gdy działa peering | R2 | R1 | Local/control-plane |
+| Pakiet TTL expired wymagający obsługi wyjątkowej | Zależnie od scenariusza | Zależnie od scenariusza | Exception handling |
+
+Zwróć uwagę na ostatni wiersz. Pakiet, którego TTL się wyczerpał, **nie musi mieć jako destination IP adresu routera**. Może mimo to wymagać szczególnego przetwarzania, na przykład wygenerowania ICMP Time Exceeded. Sposób realizacji zależy od platformy; nie każde takie zdarzenie jest pełnym przetwarzaniem w RE.
+
+### Dlaczego na SRX nie wystarczy „interfejs ma adres, więc ping musi działać”?
+
+vSRX jest nie tylko routerem, ale również firewallem. Junos SRX używa pojęcia **security zone**. Strefa grupuje interfejsy pod względem zasad bezpieczeństwa. Ruch przechodzący między strefami może wymagać odpowiedniej **security policy**, ale ruch do samego urządzenia ma jeszcze osobne reguły **host-inbound-traffic**.
+
+Zostańmy przy R1. Interfejs \`ge-0/0/2.0\` prowadzi do R5. Załóżmy, że przypisaliśmy go do strefy \`CE\`. Chcemy pozwolić R5 pingować własny adres R1 **192.0.2.1**. Na SRX możemy zezwolić na odpowiednią usługę host-inbound dla tego interfejsu.
+
+**R1-vSRX — Configuration Mode, przykład wyłącznie dla izolowanego laboratorium**
+
+~~~junos
+set security zones security-zone CE interfaces ge-0/0/2.0 host-inbound-traffic system-services ping
+~~~
+
+To polecenie nie jest równoważne „zezwól wszystkim komputerom CE na cały ruch przez R1”. Dopuszcza określony rodzaj komunikacji **do samego urządzenia**, zgodnie z innymi warunkami konkretnej platformy i konfiguracji.
+
+Natomiast jeżeli R5 wysyła pakiet **przez** R1 do R2, potrzebujemy analizy odpowiednich security policies związanych z ruchem między strefami, np. \`CE → CORE\`. Samo host-inbound \`ping\` na R1 nie pozwala automatycznie na transit.
+
+To jeden z najważniejszych praktycznych wniosków całego rozdziału: **te same pakiety ICMP mogą podlegać innym zasadom w zależności od tego, czy ich odbiorcą jest router, czy odległe urządzenie.**
+
+### Co z SSH, BGP i innymi usługami routera?
+
+Przy SSH mamy połączenie administracyjne. Jeśli administrator łączy się z R1, próbuje dotrzeć do konkretnej usługi uruchomionej na R1. Nie jest to tranzyt, nawet jeśli pakiety przeszły wcześniej przez inne routery.
+
+Przy BGP i OSPF sytuacja jest podobna pod względem odbiorcy wiadomości sterujących. Wiadomość protokołu routingu dociera do routera, który ma ją przetworzyć w swoim systemie sterującym. To nie jest zwykły pakiet użytkownika, który zawsze ma przejść dalej bez lokalnej obsługi.
+
+W laboratorium DIAMOND-6R, gdy później uruchomimy BGP pomiędzy R1 i R2, do zestawienia sesji może być potrzebne odpowiednie \`host-inbound-traffic protocols bgp\` na właściwych interfejsach/strefach SRX. Samo ustawienie adresów IP i wpisanie konfiguracji protokołu nie zawsze wystarczy.
+
+Nie konfiguruj jednak w ciemno \`host-inbound-traffic system-services all\` na wszystkich strefach. To wygodne w niektórych krótkich ćwiczeniach, ale nie powinno być nawykiem inżyniera: lepiej świadomie dopuścić tylko usługi potrzebne do danego testu.
+
+### Dlaczego traceroute może pokazywać gwiazdki, choć aplikacja działa?
+
+Traceroute wysyła pakiety tak, aby po kolejnych routerach stopniowo wyczerpywał się ich TTL. Dzięki temu może uzyskać odpowiedzi ICMP informujące o routerach po drodze.
+
+Jeżeli router nie generuje takiej odpowiedzi albo filtruje ją jego konfiguracja, traceroute może pokazać \`*\`. Nie znaczy to automatycznie, że router przestał przekazywać ruch użytkownika. Może poprawnie obsługiwać transit, a nie odpowiadać na pewien rodzaj ruchu kontrolnego.
+
+Ta obserwacja ma znaczenie w diagnostyce Enterprise. Ostatni hop traceroute jest widoczny, aplikacja działa, ale jeden środkowy router pokazuje gwiazdki. Zamiast natychmiast ogłaszać awarię rdzenia, weryfikujesz rzeczywisty ruch aplikacyjny, stan interfejsów i odpowiednie trasy.
+
+### Czy \`monitor traffic\` widzi wszystko, co przechodzi przez router?
+
+Nie. W Junos polecenie \`monitor traffic\` jest przydatne przy obserwacji ruchu dostępnego z perspektywy systemu, zwłaszcza ruchu przychodzącego do lub wychodzącego z RE. Na wielu urządzeniach **zwykły ruch tranzytowy jest obsługiwany w PFE i nie musi pojawić się w tym widoku**.
+
+To częsty błąd początkującego administratora. Próbuje wykonać capture na interfejsie routera, nie widzi pakietów użytkownika i uznaje, że pakiet nigdy nie dotarł. Tymczasem wybrane narzędzie może w ogóle nie służyć do obserwowania całego ruchu transit w danym modelu.
+
+**R1-vSRX — Operational Mode, ostrożny przykład obserwacji pakietów do routera**
+
+~~~junos
+monitor traffic interface ge-0/0/2 no-resolve matching "icmp"
+~~~
+
+Takie polecenie stosuj tylko na izolowanym labie z niewielkim ruchem i po sprawdzeniu składni konkretnego wydania. Przerwij monitorowanie po zebraniu potrzebnych danych. Wynik może zależeć od tego, które pakiety są kierowane do systemu i jaki mechanizm monitoringu wspiera platforma.
+
+W rzeczywistej diagnostyce dataplane mogą być potrzebne narzędzia platformowe, port mirroring, dedykowany packet capture lub odczyt liczników, a na SRX także **\`show security flow session\`**. Nie zakładaj, że \`monitor traffic\` na vSRX zachowuje się identycznie jak capture na fizycznym MX.
+
+### Ochrona control plane: dlaczego router nie powinien odpowiadać na wszystko?
+
+R1 obsługuje routing i konfigurację. Jego zasoby sterujące nie są nieograniczone. Jeśli ktoś wysyła ogromną liczbę pakietów do własnych adresów routera, może obciążyć lokalne procesy lub mechanizmy obsługi wyjątków.
+
+Dlatego w Junos stosujemy kontrolę dostępu do usług systemowych, filtry, policery i rozwiązania ochrony Routing Engine. W wielu fizycznych urządzeniach ważną rolę odgrywa **stateless firewall filter na \`lo0\`**, ale jego wpływ i interakcja z zarządzaniem oraz SRX security zależą od platformy. Nie jest to to samo co zwykła security policy dla ruchu tranzytowego.
+
+Nie konfigurujemy jeszcze filtra ochrony RE na sześciu routerach. Wymaga to znajomości potrzebnych protokołów i odpowiedniego planu awaryjnego, bo błędny filtr może odciąć SSH, monitoring lub sąsiedztwa routingu. W rozdziale 8 zajmiemy się tym krok po kroku, korzystając z \`commit confirmed\` i niezależnej konsoli.
+
+### Management przez \`fxp0\` nie oznacza automatycznie oddzielnej sieci routingu
+
+Na wielu urządzeniach Juniper spotkasz interfejs zarządzający, często oznaczony \`fxp0\`. Może służyć do niezależnego dostępu administracyjnego, ale jego obecność nie oznacza automatycznie, że każde urządzenie ma dedykowaną, izolowaną instancję routingu management.
+
+Nie wszystkie obrazy vSRX mapują management w ten sam sposób. Zanim wpiszesz komendy albo spróbujesz wykorzystać OOB do bezpiecznego rollback, sprawdź \`show interfaces terse\`, dokumentację template EVE-NG i aktualną konfigurację. Nie wolno zgadywać, który wirtualny NIC jest managementem.
+
+**R1-vSRX — Operational Mode, rozpoznanie dostępu i interfejsów**
+
+~~~junos
+show interfaces terse
+show configuration interfaces | display set
+show configuration security zones | display set
+show system services
+~~~
+
+Jeżeli ostatnia komenda nie jest dostępna w Twoim release, sięgnij do zwykłego \`show configuration system services\`. Ważniejsza od zapamiętania jednego widoku jest umiejętność powiązania adresu zarządzania z rzeczywistym interfejsem i ochroną dostępu.
+
+### Wracamy do trzech pytań z początku rozdziału
+
+Kto poznaje trasy? **RE i jego procesy**, które utrzymują control plane.
+
+Kto przekazuje zwykły pakiet tranzytowy? **Forwarding plane/PFE**, korzystając z przygotowanych informacji i właściwego przetwarzania bezpieczeństwa.
+
+Kto obsługuje pakiet skierowany do samego routera? **Lokalne mechanizmy systemu**, z udziałem odpowiednich procesów i zabezpieczeń. Nie jest to zwykły tranzyt, nawet jeśli pakiet fizycznie przychodzi tym samym portem.
+
+Teraz możesz zrozumieć dwie pozorne sprzeczności: „ping do bramy działa, aplikacja nie działa” oraz „aplikacja działa, ping do bramy nie działa”. Nie są to sprzeczności — testują inne ścieżki w architekturze.
+
+**Źródła Juniper:** [Router Data Flow Overview](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-router-data-flow-overview.html), [monitor traffic CLI](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-traffic.html), [Day One: Beginner's Guide to Learning Junos](https://www.juniper.net/documentation/en_US/day-one-books/junos-beginners-guide.pdf), [SRX Packet Processing](https://www.juniper.net/documentation/us/en/software/junos/flow-packet-processing/topics/topic-map/security-srx-devices-processing-overview.html).
+
