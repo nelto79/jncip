@@ -1249,3 +1249,281 @@ Nie są one jednak zamiennikiem dobrze zaprojektowanego łańcucha \`[ FILTER TA
 W praktyce na R1 najprostszy i najbardziej czytelny model dla naszych trzech prefiksów to nadal **jawna whitelist + lokalne preferencje + końcowy reject**. Nie stosujemy wielopoziomowej logiki tylko dlatego, że Junos ją umożliwia.
 
 *Dokumentacja: [Policy Chain Evaluation](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-chain-evaluation-method.html), [Policy Expressions](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-applying-policy-expressions-to-routes-exported-from-routing-tables.html), [Actions in Routing Policy Terms](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-actions-in-routing-policy-terms.html).*
+
+---
+
+## 8.14. Laboratorium DIAMOND-6R — sześć vSRX, dwie drogi BGP, import/export i filtrowanie [LAB]
+
+To ćwiczenie łączy mechanizmy z całego rozdziału w jednym środowisku. Nie zamierzamy uruchamiać wszystkiego naraz: najpierw musi działać bazowa sieć, potem będziemy dodawać polityki, a dopiero na końcu kontrolowane awarie.
+
+**Status: PLANNED / NOT RUNTIME VALIDATED.** Poniższe konfiguracje zostały opracowane jako procedura dydaktyczna. Nie mam rzeczywistych outputów z Twojego obrazu vSRX, EVE-NG ani potwierdzenia mapowania NIC. Jeśli w danym release polecenie jest niewspierane albo security flow zachowuje się inaczej, nie traktuj przewidywanego wyniku jako faktu. Zbierz odpowiedni wynik CLI i zweryfikuj dokumentację platformy.
+
+### 8.14.1. Co dokładnie budujemy?
+
+Pracujemy na **6 × vSRX**. R1–R4 tworzą ten sam czterowęzłowy diament co w poprzednich rozdziałach. **R5 zastępuje PC-A**, a **R6 zastępuje PC-B**. Oba CE są pełnoprawnymi routerami z własnymi AS, loopbackami i prefiksami klientów. Nie używamy VPCS w tym wariancie.
+
+| Router | Rola | AS | Podstawowe połączenia |
+|---|---|---:|---|
+| **R5** | CE-A | 65105 | 192.0.2.10/24 do R1 |
+| **R1** | EDGE-A | 65001 | R5, R2, R3 |
+| **R2** | CORE-1 | 65002 | R1, R4 |
+| **R3** | CORE-2 | 65003 | R1, R4 |
+| **R4** | EDGE-B | 65004 | R2, R3, R6 |
+| **R6** | CE-B | 65106 | 198.51.100.10/24 do R4 |
+
+Górny korytarz: **R5 → R1 → R2 → R4 → R6**. Dolny: **R5 → R1 → R3 → R4 → R6**.
+
+Pełne interfejsy, adresacja i diagram znajdują się w [referencji DIAMOND-6R](../../labs/reference-diamond-6vsrx/README.md). W całym ćwiczeniu przyjmujemy niezmienione prefiksy 10.12/30, 10.13/30, 10.24/30 i 10.34/30. Nie ma łącza R2–R3 ani R1–R4.
+
+Dwie dodatkowe sieci R5 i trzy R6 pozwalają przetestować wybór tras bez wprowadzania fikcyjnych hostów na końcu łącza:
+
+| Węzeł | Prefix | Rola |
+|---|---|---|
+| R5 | 172.16.50.0/24 | Business-A — test z source 172.16.50.1 |
+| R5 | 172.16.51.0/24 | Services-A — test z source 172.16.51.1 |
+| R6 | 172.16.60.0/24 | Business-B — preferowana góra R2 |
+| R6 | 172.16.61.0/24 | Services-B — preferowany dół R3 |
+| R6 | 172.16.62.0/24 | Testowa trasa static discard — odrzucana na R1 |
+
+Nie testuj \`172.16.62.0/24\` jak działającego serwera. Jest to **NLRI do ćwiczenia polityk**, a nie sieć z rzeczywistymi hostami.
+
+### 8.14.2. Faza 0 — preflight: nie mieszamy starego static labu z nowym eBGP
+
+Poprzednie rozdziały korzystały z tras statycznych w diamencie. Jeśli pozostawisz je bez przeglądu, BGP może zostać zestawiony poprawnie, ale część tras i tak nie będzie aktywna z powodu niższej preference tras static. W Junos **Static/5** może wygrać z **BGP/170** dla tego samego prefiksu. To zjawisko potrafi zepsuć wszystkie kolejne wnioski.
+
+Dlatego rekomenduję **nowy, odseparowany plik EVE-NG** z sześcioma vSRX, a nie przebudowę uruchomionego labu z rozdziału 6 albo 7. R1–R4 zachowują adresację, ale nie dziedziczą przypadkowych dynamicznych protokołów, tras discard, filtrów lo0 czy eksperymentów FBF z innych ćwiczeń.
+
+**R1-vSRX, R2-vSRX, R3-vSRX, R4-vSRX, R5-vSRX, R6-vSRX — Operational Mode, uruchom oddzielnie na każdym routerze**
+
+~~~junos
+show version
+show interfaces terse
+show chassis hardware
+show configuration interfaces | display set
+show configuration routing-options | display set
+show configuration protocols | display set
+show configuration security zones | display set
+show configuration security policies | display set
+show configuration security nat | display set
+show configuration firewall | display set
+show system commit
+~~~
+
+Przed zmianą ustal na każdym routerze:
+
+- rzeczywiste mapowanie interfejsów vSRX w QEMU/EVE-NG, szczególnie \`ge-0/0/2.0\` na R1/R4 i \`ge-0/0/0.0\` na R5/R6;
+- osobną konsolę albo OOB, która pozostanie dostępna po zmianie security;
+- brak niezamierzonych static routes do testowanych prefiksów 172.16.50/51/60/61/62;
+- brak istniejącej konfiguracji BGP/OSPF/IS-IS, która zakłóciłaby test;
+- brak wspólnych obiektów security/firewall o nazwach używanych niżej.
+
+Po przydzieleniu loopbacków sprawdź, że R1–R4 nadal mają \`10.255.255.1/32\`–\`.4/32\` i identyczne router ID, a nowe R5/R6 używają \`.5/32\` i \`.6/32\`. Gdy masz różny obraz vSRX i inną numerację NIC, **popraw mapowanie w całej konfiguracji**, nie tylko w pierwszej linii.
+
+### 8.14.3. Faza 1 — konfiguracja nowych CE, bez ruszania czterech łączy rdzenia
+
+Najpierw uruchamiamy R5 i R6. Oba używają tych samych adresów LAN, które wcześniej należały do PC-A/PC-B, ale teraz są pełnoprawnymi routerami.
+
+**R5-vSRX — Configuration Mode, CE-A i dwa lokalne prefiksy**
+
+~~~junos
+set system host-name R5
+set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.10/24
+set interfaces lo0 unit 0 family inet address 10.255.255.5/32
+set interfaces lo0 unit 0 family inet address 172.16.50.1/24
+set interfaces lo0 unit 0 family inet address 172.16.51.1/24
+set routing-options router-id 10.255.255.5
+set routing-options autonomous-system 65105
+~~~
+
+**R6-vSRX — Configuration Mode, CE-B z sieciami biznesowymi i trasą testową**
+
+~~~junos
+set system host-name R6
+set interfaces ge-0/0/0 unit 0 family inet address 198.51.100.10/24
+set interfaces lo0 unit 0 family inet address 10.255.255.6/32
+set interfaces lo0 unit 0 family inet address 172.16.60.1/24
+set interfaces lo0 unit 0 family inet address 172.16.61.1/24
+set routing-options static route 172.16.62.0/24 discard
+set routing-options router-id 10.255.255.6
+set routing-options autonomous-system 65106
+~~~
+
+Dla R1–R4 użyj istniejących adresów z [mapy DIAMOND-6R](../../labs/reference-diamond-6vsrx/README.md), bez przepisywania innych VLAN, loopbacków ani prefiksów. Sprawdź \`ping\` po każdym bezpośrednim łączu, zanim przejdziesz do BGP.
+
+**R5-vSRX — Operational Mode, do pierwszego bezpośredniego testu**
+
+~~~junos
+show interfaces terse
+show route 192.0.2.0/24 exact
+ping 192.0.2.1 source 192.0.2.10 count 3
+~~~
+
+**R6-vSRX — Operational Mode, drugi bezpośredni test**
+
+~~~junos
+show interfaces terse
+show route 198.51.100.0/24 exact
+ping 198.51.100.1 source 198.51.100.10 count 3
+~~~
+
+Te pingi do bram wymagają na R1/R4 odpowiedniego **host-inbound ping**. Na vSRX brak odpowiedzi od lokalnego adresu routera **nie oznacza automatycznie** braku connected route ani niesprawnego portu.
+
+### 8.14.4. Faza 2 — przygotowujemy security flow, żeby nie pomylić go z routingiem
+
+Na sześciu vSRX chcemy najpierw zestawić BGP, a później testować ICMP end-to-end. Do tego w odizolowanym labie wykorzystamy wspólną strefę **LAB** i jawne reguły dopuszczające ICMP. Takie uproszczenie jest akceptowalne jako **ćwiczenie laboratoryjne**, ale nie jest projektem security dla środowiska produkcyjnego.
+
+Na R1 i R4 trzy interfejsy danych należą do LAB; na R2/R3 po dwa; na R5/R6 po jednym. Ponadto na R5 i R6 lokalne adresy loopback przeznaczone do testowych pingów host-bound wymagają odpowiedniego przypisania/host-inbound w realnym SRX.
+
+**R1-vSRX — Configuration Mode, interfejsy strefy LAB**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces ge-0/0/1.0
+set security zones security-zone LAB interfaces ge-0/0/2.0
+~~~
+
+**R2-vSRX — Configuration Mode, interfejsy strefy LAB**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces ge-0/0/1.0
+~~~
+
+**R3-vSRX — Configuration Mode, interfejsy strefy LAB**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces ge-0/0/1.0
+~~~
+
+**R4-vSRX — Configuration Mode, interfejsy strefy LAB**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces ge-0/0/1.0
+set security zones security-zone LAB interfaces ge-0/0/2.0
+~~~
+
+**R5-vSRX — Configuration Mode, strefy CE-A**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces lo0.0
+~~~
+
+**R6-vSRX — Configuration Mode, strefy CE-B**
+
+~~~junos
+set security zones security-zone LAB interfaces ge-0/0/0.0
+set security zones security-zone LAB interfaces lo0.0
+~~~
+
+Teraz na **każdym** z sześciu routerów ustawiamy host-inbound dla BGP i ICMP, a także jawne dopuszczenie laboratoryjnych testów ICMP w obrębie LAB. Jeśli urządzenie ma już inne security zones lub polityki, **nie wklejaj tego bloku bez review**. Jedna instancja interfejsu nie może należeć jednocześnie do sprzecznych stref.
+
+**R1-vSRX, R2-vSRX, R3-vSRX, R4-vSRX, R5-vSRX, R6-vSRX — Configuration Mode, wykonaj osobno na każdym routerze**
+
+~~~junos
+set security zones security-zone LAB host-inbound-traffic protocols bgp
+set security zones security-zone LAB host-inbound-traffic system-services ping
+set security policies from-zone LAB to-zone LAB policy LAB-ICMP match source-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ICMP match destination-address any
+set security policies from-zone LAB to-zone LAB policy LAB-ICMP match application junos-ping
+set security policies from-zone LAB to-zone LAB policy LAB-ICMP then permit
+show | compare
+commit check
+commit confirmed 10
+~~~
+
+Ten blok zakłada, że na konkretnej wersji Junos/vSRX istnieje aplikacja \`junos-ping\` i że inter-zone/intra-zone behavior odpowiada konfiguracji. Dla pingów do loopbacków CE trzeba również sprawdzić, czy ruch jest traktowany jako host-bound i czy właściwy \`host-inbound-traffic\` działa na \`lo0.0\`.
+
+Podczas oczekującego \`commit confirmed\` wykonuj tylko odczyty i testy. **Nie używaj kolejnego \`commit check\`**. Po PASS zatwierdź zmiany osobno na każdym urządzeniu.
+
+**R1-vSRX, R2-vSRX, R3-vSRX, R4-vSRX, R5-vSRX, R6-vSRX — Operational Mode, weryfikacja na każdym urządzeniu**
+
+~~~junos
+show security zones
+show security policies
+show interfaces terse
+show system commit
+~~~
+
+**R1-vSRX, R2-vSRX, R3-vSRX, R4-vSRX, R5-vSRX, R6-vSRX — Configuration Mode, dopiero po PASS danego urządzenia**
+
+~~~junos
+commit
+~~~
+
+**Ważne:** nie wyłączamy całego security flow i nie włączamy globalnego packet-mode tylko po to, by ping w laboratorium przeszedł. Właśnie działanie sesji vSRX jest jednym z elementów lekcji.
+
+### 8.14.5. Faza 3 — sześć relacji eBGP
+
+Dopiero teraz konfigurujemy BGP. Zachowujemy osobne AS dla R1–R6, aby widzieć AS_PATH i odróżniać ścieżkę górną od dolnej.
+
+Nie wszystkie routery pełnią tę samą rolę. R5/R6 są **źródłami własnych prefiksów**. R1/R4 są granicami CE↔CORE, gdzie nakładamy polityki import/export. R2/R3 są tranzytem między brzegami.
+
+**R5-vSRX — Configuration Mode, eBGP do R1**
+
+~~~junos
+set protocols bgp group TO-R1 type external
+set protocols bgp group TO-R1 neighbor 192.0.2.1 peer-as 65001
+~~~
+
+**R1-vSRX — Configuration Mode, oddzielne grupy CORE i CE-A**
+
+~~~junos
+set routing-options autonomous-system 65001
+set protocols bgp group CE-A type external
+set protocols bgp group CE-A neighbor 192.0.2.10 peer-as 65105
+set protocols bgp group CORE type external
+set protocols bgp group CORE neighbor 10.12.0.2 peer-as 65002
+set protocols bgp group CORE neighbor 10.13.0.2 peer-as 65003
+~~~
+
+**R2-vSRX — Configuration Mode, górny tranzyt**
+
+~~~junos
+set routing-options autonomous-system 65002
+set protocols bgp group CORE type external
+set protocols bgp group CORE neighbor 10.12.0.1 peer-as 65001
+set protocols bgp group CORE neighbor 10.24.0.2 peer-as 65004
+~~~
+
+**R3-vSRX — Configuration Mode, dolny tranzyt**
+
+~~~junos
+set routing-options autonomous-system 65003
+set protocols bgp group CORE type external
+set protocols bgp group CORE neighbor 10.13.0.1 peer-as 65001
+set protocols bgp group CORE neighbor 10.34.0.2 peer-as 65004
+~~~
+
+**R4-vSRX — Configuration Mode, oddzielne grupy CORE i CE-B**
+
+~~~junos
+set routing-options autonomous-system 65004
+set protocols bgp group CORE type external
+set protocols bgp group CORE neighbor 10.24.0.1 peer-as 65002
+set protocols bgp group CORE neighbor 10.34.0.1 peer-as 65003
+set protocols bgp group CE-B type external
+set protocols bgp group CE-B neighbor 198.51.100.10 peer-as 65106
+~~~
+
+**R6-vSRX — Configuration Mode, eBGP do R4**
+
+~~~junos
+set protocols bgp group TO-R4 type external
+set protocols bgp group TO-R4 neighbor 198.51.100.1 peer-as 65004
+~~~
+
+Na tym etapie odpowiedni \`commit check\` oraz \`commit confirmed\` przeprowadź kolejno na każdym węźle, zgodnie z planem zmian. Gdy sześć peerings jest Established, nie oznacza to jeszcze, że którykolwiek router reklamuje własne sieci \`Direct\` i \`Static\`. To zadanie następnej fazy.
+
+**R1-vSRX, R2-vSRX, R3-vSRX, R4-vSRX, R5-vSRX, R6-vSRX — Operational Mode, weryfikacja po uruchomieniu BGP**
+
+~~~junos
+show bgp summary
+show bgp neighbor
+show configuration protocols bgp | display set
+~~~
+
+**Kryterium PASS fazy 3:** R5 i R6 mają po jednym Established, R2 i R3 po dwa, a R1 i R4 po trzy. Każdy peer ma oczekiwany numer AS oraz prawidłowy interfejs źródłowy. Nie kontynuuj, jeśli sesja jest w \`Active\`, \`Connect\` lub niestabilna.
+
