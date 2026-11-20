@@ -890,6 +890,8 @@ Najpierw upewnij się, że pracujesz na **nowej kopii laboratorium**, bez wpływ
 
 Konfiguracje w tej sekcji są przeznaczone dla **świeżego labu**, w którym nie istnieją już kolidujące strefy, polityki, trasy i adresy. Jeśli rozwijasz gotowy DIAMOND-6R z wcześniejszego rozdziału, najpierw porównaj go z bazą. **Nie wklejaj dwóch konkurencyjnych konfiguracji na ten sam interfejs.** Nie wykonuj `load override`, `zeroize` ani globalnego `delete security`, żeby „dopasować” istniejące urządzenie do przykładu.
 
+**Przed pierwszym commitem:** świeży vSRX musi mieć ważną bazową konfigurację dostępu i `system root-authentication` (rozdział IV). Jeżeli klon tego nie ma, najpierw przeprowadź bezpieczny onboarding — nie próbuj uruchamiać labu diagnostycznego na koncie z nieznanymi uprawnieniami. Od Junos OS 24.2R1 na wspieranych platformach komentarz do commitu może być wymagany; poniższe przykłady używają więc jawnego `comment` zarówno przy `commit confirmed`, jak i przy końcowym `commit`. Przy innym release sprawdź `commit ?` i lokalną politykę commit. Nie dodawaj komentarza do `commit check`. [Dokumentacja Juniper: commit and comment](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-configuration-commit.html).
+
 Każde zadanie ma następujący porządek:
 
 - **Baseline:** przed zmianą zapisujemy stan interfejsów, tras, ARP, security i testu ICMP.
@@ -955,7 +957,7 @@ configure private
 set interfaces ge-0/0/0 description "CH05-TEST-TEMPORARY"
 show | compare
 commit check
-commit confirmed 2
+commit confirmed 2 comment "CH05 controlled lab change"
 ~~~
 
 W osobnej sesji sprawdź, czy opis się pojawił i czy historia commit wskazuje warunkowe zatwierdzenie.
@@ -1025,7 +1027,7 @@ set security policies from-zone CE to-zone CORE policy CH05-ALLOW-ICMP match app
 set security policies from-zone CE to-zone CORE policy CH05-ALLOW-ICMP then permit
 show | compare
 commit check
-commit confirmed 5
+commit confirmed 5 comment "CH05 controlled lab change"
 ~~~
 
 Co robią te linie? Pierwsze nadają adresy IP. Następne przypisują logiczne interfejsy do **security zones**. Ostatnie cztery linie tworzą jedną policy, która pozwala na **nowe sesje ICMP w kierunku CE→CORE**. Bez niej routing mógłby wyglądać poprawnie, ale firewall mógłby odrzucać tranzyt.
@@ -1045,7 +1047,7 @@ Jeżeli adresy, interfejsy i policy są zgodne z planem, **potwierdź tylko ten 
 **R1-vSRX — Configuration Mode [edit private], po PASS**
 
 ~~~junos
-commit
+commit comment "CH05 post-check verified"
 ~~~
 
 #### Etap B. Konfiguracja R2 — odbiorca pingu i droga powrotna
@@ -1065,7 +1067,7 @@ set security zones security-zone CORE interfaces ge-0/0/0.0 host-inbound-traffic
 set routing-options static route 192.0.2.0/24 next-hop 10.12.0.1
 show | compare
 commit check
-commit confirmed 5
+commit confirmed 5 comment "CH05 controlled lab change"
 ~~~
 
 R2 zna bezpośrednio 10.12.0.0/30, ale **nie zna automatycznie 192.0.2.0/24**, ponieważ to sieć za R1. Dlatego dodajemy trasę powrotną. Jeśli jej zabraknie, pakiet ICMP może dotrzeć do R2, lecz odpowiedź może nie mieć drogi do R5.
@@ -1083,7 +1085,7 @@ Jeśli PASS, potwierdź konfigurację R2.
 **R2-vSRX — Configuration Mode [edit private], po PASS**
 
 ~~~junos
-commit
+commit comment "CH05 post-check verified"
 ~~~
 
 #### Etap C. Konfiguracja R5 — nadawca testu
@@ -1103,7 +1105,7 @@ set security zones security-zone CE interfaces ge-0/0/0.0 host-inbound-traffic s
 set routing-options static route 10.12.0.0/30 next-hop 192.0.2.1
 show | compare
 commit check
-commit confirmed 5
+commit confirmed 5 comment "CH05 controlled lab change"
 ~~~
 
 Nie potrzebujemy na razie BGP ani OSPF. Chcemy po prostu, aby R5 wiedział, że sieć 10.12.0.0/30 leży za R1. R1 jest bezpośrednio osiągalnym next-hopem 192.0.2.1.
@@ -1131,7 +1133,7 @@ Potwierdź R5 dopiero po rzeczywistym PASS. Jeśli nie działa, diagnozuj etapam
 **R5-vSRX — Configuration Mode [edit private], po PASS**
 
 ~~~junos
-commit
+commit comment "CH05 post-check verified"
 ~~~
 
 ### Trzy kontrolowane awarie, każda z osobną przyczyną
@@ -1148,7 +1150,7 @@ Zdezaktywujemy na R1 port prowadzący do R2. Nie wyciągamy „wirtualnego kabla
 set interfaces ge-0/0/0 disable
 show | compare
 commit check
-commit confirmed 2
+commit confirmed 2 comment "CH05 controlled lab change"
 ~~~
 
 **R5-vSRX — Operational Mode, obserwacja dwóch różnych testów**
@@ -1180,7 +1182,7 @@ Tym razem nie zmieniamy żadnego portu. Usuniemy tylko statyczną trasę na R5 d
 delete routing-options static route 10.12.0.0/30
 show | compare
 commit check
-commit confirmed 2
+commit confirmed 2 comment "CH05 controlled lab change"
 ~~~
 
 **R5-vSRX — Operational Mode, trasa nadawcy i wynik testów**
@@ -1206,7 +1208,7 @@ Na R1 mamy policy `CH05-ALLOW-ICMP` dopuszczającą ICMP CE→CORE. Gdy ją wył
 deactivate security policies from-zone CE to-zone CORE policy CH05-ALLOW-ICMP
 show | compare
 commit check
-commit confirmed 2
+commit confirmed 2 comment "CH05 controlled lab change"
 ~~~
 
 **R1-vSRX — Operational Mode, kontrola podczas awarii**
@@ -1295,7 +1297,7 @@ set routing-options static route 192.0.2.0/24 next-hop 10.13.0.1
 set routing-options static route 198.51.100.0/24 next-hop 10.34.0.2
 show | compare
 commit check
-commit confirmed 5
+commit confirmed 5 comment "CH05 controlled lab change"
 ~~~
 
 Na R3 obie strony połączenia są w tej samej strefie CORE. Tworzymy jawne, ograniczone laboratoryjne zezwolenie **CORE→CORE dla nowych sesji ICMP**. Dzięki temu późniejsza diagnostyka nie będzie oparta na przypadkowych domyślnych regułach intrazone danego obrazu SRX.
@@ -1314,7 +1316,7 @@ show system commit
 **R3-vSRX — Configuration Mode [edit private], po zatwierdzeniu poprawnego stanu lokalnego**
 
 ~~~junos
-commit
+commit comment "CH05 post-check verified"
 ~~~
 
 Teraz przygotuj R4, który będzie miał dwa interfejsy do rdzenia i jeden do R6.
@@ -1347,7 +1349,7 @@ set routing-options static route 192.0.2.0/24 next-hop 10.24.0.1
 set routing-options static route 192.0.2.0/24 qualified-next-hop 10.34.0.1 preference 10
 show | compare
 commit check
-commit confirmed 5
+commit confirmed 5 comment "CH05 controlled lab change"
 ~~~
 
 Na R4 konfigurujemy polityki **w obu kierunkach**, bo w dalszych testach R6 ma móc również inicjować nowy ping do R5. Sesja powrotna dla wcześniej dozwolonego flow jest mechanizmem stateful, ale osobno inicjowana sesja w przeciwnym kierunku może wymagać własnej policy.
@@ -1366,7 +1368,7 @@ show system commit
 **R4-vSRX — Configuration Mode [edit private], po pozytywnym lokalnym post-check**
 
 ~~~junos
-commit
+commit comment "CH05 post-check verified"
 ~~~
 
 R2 ma już interfejs do R1. Dodajemy mu port do R4 i trasę do LAN-B. Na dwóch portach CORE dopuszczamy nowy ICMP między interfejsami w tej samej strefie.
@@ -1389,7 +1391,7 @@ set security policies from-zone CORE to-zone CORE policy CH05-CORE-ICMP then per
 set routing-options static route 198.51.100.0/24 next-hop 10.24.0.2
 show | compare
 commit check
-commit confirmed 5
+commit confirmed 5 comment "CH05 controlled lab change"
 ~~~
 
 **R2-vSRX — Operational Mode, osobna sesja, port i trasa**
@@ -1403,7 +1405,7 @@ ping 10.24.0.2 source 10.24.0.1 count 3
 **R2-vSRX — Configuration Mode [edit private], po PASS**
 
 ~~~junos
-commit
+commit comment "CH05 post-check verified"
 ~~~
 
 Na R1 dodamy drugą drogę, do R3, oraz trasę do LAN-B. R1 zachowuje swoją istniejącą konfigurację z poziomu 2.
@@ -1427,7 +1429,7 @@ set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE match app
 set security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE then permit
 show | compare
 commit check
-commit confirmed 5
+commit confirmed 5 comment "CH05 controlled lab change"
 ~~~
 
 Zwróć uwagę: nie zmieniliśmy numerów portów istniejącego rdzenia. `ge-0/0/0` nadal prowadzi do R2, `ge-0/0/1` do R3, a `ge-0/0/2` do R5. W laboratorium czytelnik ma nauczyć się **zachowywać spójną adresację podczas diagnostyki**, a nie zmieniać topologię z każdą nową lekcją.
@@ -1444,7 +1446,7 @@ show security policies
 **R1-vSRX — Configuration Mode [edit private], po pozytywnym post-check**
 
 ~~~junos
-commit
+commit comment "CH05 post-check verified"
 ~~~
 
 Ostatni router zdalny to R6. Ma on własny adres 198.51.100.10/24 i będzie odbiorcą pingu z R5.
@@ -1464,7 +1466,7 @@ set security zones security-zone CE interfaces ge-0/0/0.0 host-inbound-traffic s
 set routing-options static route 192.0.2.0/24 next-hop 198.51.100.1
 show | compare
 commit check
-commit confirmed 5
+commit confirmed 5 comment "CH05 controlled lab change"
 ~~~
 
 **R6-vSRX — Operational Mode, osobna sesja, reachability R4**
@@ -1478,7 +1480,7 @@ ping 198.51.100.1 source 198.51.100.10 count 3
 **R6-vSRX — Configuration Mode [edit private], po PASS**
 
 ~~~junos
-commit
+commit comment "CH05 post-check verified"
 ~~~
 
 Na końcu R5 musi poznać sieć LAN-B przez R1. Jego trasa do 10.12.0.0/30 z poziomu 2 nie wystarcza do osiągnięcia 198.51.100.10.
@@ -1495,7 +1497,7 @@ configure private
 set routing-options static route 198.51.100.0/24 next-hop 192.0.2.1
 show | compare
 commit check
-commit confirmed 5
+commit confirmed 5 comment "CH05 controlled lab change"
 ~~~
 
 **R5-vSRX — Operational Mode, osobna sesja, test docelowy**
@@ -1508,7 +1510,7 @@ ping 198.51.100.10 source 192.0.2.10 count 5
 **R5-vSRX — Configuration Mode [edit private], po rzeczywistym PASS**
 
 ~~~junos
-commit
+commit comment "CH05 post-check verified"
 ~~~
 
 W tym momencie **może** działać ping R5→R6 przez górny korytarz, jeśli wszystkie interfejsy, strefy, polityki i drogi powrotne są poprawne. Nie ogłaszamy automatycznego PASS; wynik trzeba potwierdzić na działającym labie. W niektórych wydaniach vSRX może być konieczne dopasowanie szczegółów konfiguracji lokalnie inicjowanego ruchu lub sesji do konkretnej platformy.
@@ -1554,7 +1556,7 @@ Wyłączymy **tylko** interfejs R1→R2. Nie ruszamy R4 ani R3. To zaawansowane 
 set interfaces ge-0/0/0 disable
 show | compare
 commit check
-commit confirmed 3
+commit confirmed 3 comment "CH05 controlled lab change"
 ~~~
 
 Teraz wykonaj odczyty bez dalszej zmiany konfiguracji.
@@ -1605,7 +1607,7 @@ W pełnym DIAMOND-6R wyłącz zezwolenie CORE→CE na **R4**, pozostawiając wsz
 deactivate security policies from-zone CORE to-zone CE policy CH05-CORE-TO-CE
 show | compare
 commit check
-commit confirmed 3
+commit confirmed 3 comment "CH05 controlled lab change"
 ~~~
 
 **R4-vSRX — Operational Mode, obserwacja policy i sesji**
@@ -1637,7 +1639,7 @@ Możemy również usunąć na R6 jedyną trasę do LAN-A. Na R5, R1 i R4 nie zmi
 delete routing-options static route 192.0.2.0/24
 show | compare
 commit check
-commit confirmed 3
+commit confirmed 3 comment "CH05 controlled lab change"
 ~~~
 
 **R6-vSRX — Operational Mode, obserwacja drogi powrotnej**
