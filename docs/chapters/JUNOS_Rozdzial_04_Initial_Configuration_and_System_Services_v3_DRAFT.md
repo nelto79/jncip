@@ -1491,3 +1491,304 @@ Bez prawdziwej odpowiedzi serwera i nowej sesji logowania ten scenariusz pozosta
 
 ---
 
+### Poziom 3 [S → P] — DIAMOND-6R: sześć routerów, jedna polityka zarządzania i kontrolowana awaria
+
+Na tym poziomie nie dodamy żadnego nowego protokołu routingu. Wykorzystamy wszystkie sześć routerów, aby przećwiczyć to, co naprawdę bywa trudne w środowisku Enterprise: **spójne wdrożenie standardu na wielu urządzeniach**, weryfikację niezależnych stanów oraz diagnozę awarii usług zarządzania.
+
+Nie zakładaj, że sześć vSRX tworzy jeden system. Każdy ma własną konfigurację, konta, historię commit, procesy i dostęp administracyjny. Jeśli na R1 wykonasz commit, **nie zmienia to automatycznie R2–R6**.
+
+#### Krok 1. Baseline: sześć różnych urządzeń, które musisz poprawnie rozpoznać
+
+Najpierw na wszystkich routerach sprawdź wersję Junos i hostname. Na R1 i R4 zweryfikuj także oba korytarze rdzenia. W tej fazie wykonujemy tylko odczyty.
+
+**R1-vSRX — Operational Mode, EDGE-A i dwa wyjścia do rdzenia**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+show system commit
+~~~
+
+**R2-vSRX — Operational Mode, górny korytarz**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces terse
+show system commit
+~~~
+
+**R3-vSRX — Operational Mode, dolny korytarz**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces terse
+show system commit
+~~~
+
+**R4-vSRX — Operational Mode, EDGE-B z dwoma uplinkami**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces ge-0/0/0 terse
+show interfaces ge-0/0/1 terse
+show system commit
+~~~
+
+**R5-vSRX — Operational Mode, CE-A**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces ge-0/0/0 terse
+show system commit
+~~~
+
+**R6-vSRX — Operational Mode, CE-B**
+
+~~~junos
+show version
+show configuration system host-name
+show interfaces ge-0/0/0 terse
+show system commit
+~~~
+
+Dopiero teraz porównaj dokumentację z rzeczywistością. Jeżeli R3 pokazuje inną wersję Junos niż pozostałe urządzenia, odnotuj to. Jeżeli w EVE-NG port R4 do R2 ma inne mapowanie, nie „naprawiaj” tego przez losowe zmiany konfiguracji — najpierw ustal przyczynę.
+
+#### Krok 2. Wspólna polityka systemowego komunikatu logowania
+
+Załóżmy, że organizacja chce wyświetlać identyczny komunikat na każdym routerze. To dobry, nieszkodliwy przykład **standardu**, który możemy wprowadzać etapami.
+
+Nie wykorzystujemy configuration groups jako centralnego mechanizmu dystrybucji. Każdy router ma lokalną grupę o takiej samej nazwie. Nie jest to jeszcze Ansible, NETCONF ani kontroler zarządzania.
+
+**R1-vSRX — Configuration Mode [edit private], standard na pierwszym urządzeniu**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+Teraz z osobnej sesji sprawdź, że komunikat i dostęp administracyjny są prawidłowe. Jeśli wszystko działa, zatwierdź zmianę na R1. **Nie zaczynaj równocześnie pięciu kolejnych \`commit confirmed\`**; podczas nauki łatwiej kontrolować jeden timer naraz.
+
+**R1-vSRX — Operational Mode, osobna sesja: post-check pierwszego routera**
+
+~~~junos
+show configuration system login | display inheritance
+show system users
+show system commit
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], tylko po pozytywnym post-check**
+
+~~~junos
+commit
+~~~
+
+Następnie powtórz wdrożenie na R4. Nie ruszamy jego portów, tras, BGP ani security zones.
+
+**R4-vSRX — Configuration Mode [edit private], ten sam standard na EDGE-B**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+commit check
+commit confirmed 5
+~~~
+
+**R4-vSRX — Operational Mode, osobna sesja: post-check**
+
+~~~junos
+show configuration system login | display inheritance
+show system commit
+~~~
+
+**R4-vSRX — Configuration Mode [edit private], tylko po PASS**
+
+~~~junos
+commit
+~~~
+
+Gdy R1 i R4 działają zgodnie z planem, możesz w ten sam kontrolowany sposób rozszerzyć szablon na R2, R3, R5 i R6. Poniższe bloki przygotowują zmianę — każdy wymaga własnej sesji, \`show | compare\`, \`commit check\`, \`commit confirmed\`, read-only post-check i ostatecznego \`commit\`. **Nie wykonuj ich równocześnie jako broadcast na sześć routerów.**
+
+**R2-vSRX — Configuration Mode [edit private], dopiero po zakończeniu zmiany na R4**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+~~~
+
+**R3-vSRX — Configuration Mode [edit private], osobna zmiana**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+~~~
+
+**R5-vSRX — Configuration Mode [edit private], osobna zmiana CE-A**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+~~~
+
+**R6-vSRX — Configuration Mode [edit private], osobna zmiana CE-B**
+
+~~~junos
+set groups CH04-CAMPUS system login message "DIAMOND-6R: Managed lab"
+set apply-groups CH04-CAMPUS
+show system login | display inheritance
+show | compare
+~~~
+
+Zwróć uwagę: w końcowych czterech blokach **nie wykonałeś jeszcze commit**. To celowe. W praktyce każdy router jest osobnym zadaniem z własnym testem i odpowiedzialnością. Można te czynności potem zautomatyzować, ale najpierw trzeba rozumieć model działania.
+
+### Krok 3. Kontrolowana awaria — NTP działa na R1, ale R4 nie synchronizuje zegara
+
+W DIAMOND-6R mamy sześć osobnych systemów. Samo skopiowanie \`set system ntp server 203.0.113.30\` na R4 nie oznacza, że R4 ma drogę do serwera. Opcjonalny segment OOB z rysunku był **połączony tylko z R1**; jeżeli R4 nie ma własnego OOB ani świadomego routingu przez sieć danych, zapytania NTP mogą nie docierać.
+
+To bardzo przydatny scenariusz, ponieważ pokazuje, że **jednakowy config tekstowy nie gwarantuje jednakowego rezultatu**.
+
+Najpierw na R4 wykonaj wyłącznie odczyty.
+
+**R4-vSRX — Operational Mode, diagnostyka braku czasu**
+
+~~~junos
+show configuration system ntp | display set
+show ntp associations
+show ntp status
+show route 203.0.113.30
+show interfaces terse
+~~~
+
+Jeżeli nie ma trasy do 203.0.113.30, nie próbuj naprawiać problemu przez losową zmianę adresu źródłowego NTP. Najpierw ustal, **jaka ścieżka management jest właściwa dla R4**. Może to być osobny OOB połączony z rzeczywistą siecią administracyjną. Jeśli nie ma takiego połączenia, R4 nie może „magicznie” korzystać z portu R1 tylko dlatego, że oba należą do DIAMOND-6R.
+
+**Oczekiwany wniosek diagnostyczny:** NTP na R4 może być poprawnie skonfigurowany, ale niedostępny, ponieważ brak drogi IP albo odpowiedniego kontekstu zarządzania. Takiej awarii nie rozwiązujesz zmianą hasła ani restartem \`rpd\`.
+
+### Krok 4. Kontrolowana awaria — syslog jest lokalnie, ale nie ma go na serwerze
+
+Na R1 istnieje zdarzenie \`commit\`, które widzisz w \`show log messages\`. Na \`LAB-SERVICES\` nie ma odpowiadającego wpisu. Czy znaczy to, że Junos nie wygenerował logu? Nie — lokalny log dowodzi, że zdarzenie zostało zarejestrowane. Problem może leżeć **między R1 a kolektorem**.
+
+**R1-vSRX — Operational Mode, odczyt lokalny i ustawienia zdalnego logowania**
+
+~~~junos
+show log messages | last 30
+show configuration system syslog | display set
+show route 203.0.113.30
+~~~
+
+Sprawdź logi po stronie \`LAB-SERVICES\`, firewall i odbiornik. Nie wystarczy powiedzieć „UDP/514 jest przecież standardowym syslog”. Transport może być skonfigurowany inaczej; trzeba zweryfikować rzeczywisty wariant obu stron.
+
+### Krok 5. Kontrolowana awaria — SNMPv3 odmawia dostępu mimo dobrego pingu
+
+Załóżmy, że Linux \`LAB-SERVICES\` potrafi pingować adres management R1, lecz żądanie SNMPv3 authPriv kończy się timeout albo błędem bezpieczeństwa.
+
+Nie zaczynaj od wyłączania całej ochrony SRX. Zidentyfikuj, czy pakiety UDP/161 docierają, a następnie sprawdź:
+- użytkownika USM i jego security-level;
+- zgodność authentication/privacy oraz engine ID;
+- mapowanie VACM security-name → group → read-view;
+- adres źródłowy i filtrowanie management;
+- odpowiedź i szczegóły błędu w logach R1 oraz NMS.
+
+**R1-vSRX — Operational Mode, diagnostyka modelu SNMPv3**
+
+~~~junos
+show snmp statistics
+show snmp v3
+show configuration snmp | display set
+~~~
+
+Nie zapisuj do ticketu jawnych haseł SNMPv3. Jeśli poprawisz konfigurację, powtórz **rzeczywisty GET** i sprawdź, czy zwrócił oczekiwaną wartość. Sam nowy commit nie jest jeszcze rozwiązaniem.
+
+### Krok 6. Kontrolowana awaria — serwer backupu odrzuca połączenie
+
+R1 ma \`transfer-on-commit\`, ale \`LAB-SERVICES\` nie otrzymał archiwum. W naszym labie może to wynikać z błędnego klucza serwera, braku autoryzacji SCP, nieistniejącego katalogu albo trasy. Nie kopiuj konfiguracji do przypadkowego publicznego hosta jako „tymczasowego obejścia”.
+
+**R1-vSRX — Operational Mode, pierwsze dowody**
+
+~~~junos
+show configuration system archival | display set
+show log messages | match "archive|transfer|scp|sftp"
+show route 203.0.113.30
+~~~
+
+Sprawdź logi serwera i prawo do katalogu. Dopiero kiedy widać prawidłowy plik po drugiej stronie, możesz oznaczyć test backupu jako PASS.
+
+### Krok 7. Dwie różne metody powrotu — automatic rollback i rescue
+
+Nauczmy się na koniec odróżniać dwa rozwiązania, które początkujący często traktuje jak jedno.
+
+**Eksperyment A:** zmień nieszkodliwy komunikat logowania na R1 i wykonaj \`commit confirmed 2\`. Nie zatwierdzaj go. Po upływie czasu sprawdź, czy poprzednia aktywna konfiguracja została przywrócona.
+
+**R1-vSRX — Configuration Mode [edit private], próba automatycznego powrotu**
+
+~~~junos
+set system login message "CH04: AUTO-ROLLBACK-TEST"
+show | compare
+commit check
+commit confirmed 2
+~~~
+
+W czasie trwania timera **nie wykonuj \`commit check\` ani \`commit\`**. Obserwuj wyłącznie read-only z osobnej sesji.
+
+**R1-vSRX — Operational Mode, osobna sesja: obserwacja przed i po timerze**
+
+~~~junos
+show system commit
+show configuration system login message
+~~~
+
+Dopiero po zakończonym teście i powrocie do przewidzianego stanu przejdź dalej.
+
+**Eksperyment B:** załaduj zapisaną rescue configuration do prywatnej candidate i porównaj ją z aktualną konfiguracją. Nie aktywuj jej bez sprawdzenia, czy nie wycofałaby potrzebnych zmian.
+
+**R1-vSRX — Operational Mode, upewnij się, że rescue istnieje**
+
+~~~junos
+show system configuration rescue
+show system commit
+~~~
+
+**R1-vSRX — Configuration Mode [edit private], wyłącznie przygotowanie rescue**
+
+~~~junos
+rollback rescue
+show | compare
+~~~
+
+Jeżeli rescue różni się od obecnego stanu, nie wprowadzaj jej tylko dla „sprawdzenia, czy działa”. Oceniaj, **które linie mogłyby zostać zastąpione**. To wystarcza do zrozumienia różnicy w mechanizmach.
+
+### Krok 8. Ostateczne przyjęcie sześciu routerów
+
+Jeżeli wszystkie węzły przeszły lokalne testy, przygotuj tabelę odbiorową, w której każdy router ma własny wiersz, a każda usługa własny wynik. To ważniejsze niż jeden globalny komunikat „lab ready”.
+
+| Urządzenie | Konsola / admin | SSH | NTP | Syslog | SNMPv3 | Archival | Rescue |
+|---|---|---|---|---|---|---|---|
+| R1 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R2 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R3 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R4 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R5 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+| R6 | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED | NOT TESTED |
+
+W tabeli celowo zapisano **NOT TESTED**, ponieważ ten rozdział nie jest zapisem wykonania laboratorium. W trakcie pracy zastąp wartości prawdziwymi **PASS / FAIL / NOT TESTED**, dołączając odpowiednie dowody bez ujawniania sekretów.
+
+Do zakończenia labu potrzebujesz jeszcze potwierdzić, że nie pozostały przypadkowe traceoptions, niepotrzebne testowe konta ani niezaufane serwery. Ostateczne rescue powinno odpowiadać zaakceptowanemu stanowi urządzenia. Jeśli na którymś urządzeniu działa tylko lokalny dostęp konsolowy, nie opisuj go jako gotowego do zdalnego utrzymania.
+
+---
+
