@@ -928,6 +928,8 @@ Ważna różnica względem dwóch poprzednich poziomów: **R5 i R6 to routery, n
 
 Dla pełnego obrazu wróćmy do stałej mapy interfejsów DIAMOND-6R. Pierwsze dwa łącza po stronie R5/R1/R2 zostały skonfigurowane w poprzednich poziomach.
 
+**Ważna uwaga dotycząca `lo0`:** ogólna dokumentacja Junos opisuje również subnetwork routes na loopbackach, natomiast dokumentacja dla niektórych platform SRX zaleca adresy hostowe `/32`. Referencja DIAMOND-6R świadomie używa `/24` do reprezentowania wirtualnych sieci użytkowników. **Przed wykonaniem sprawdź `commit check` na konkretnym obrazie vSRX.** Jeżeli Twój release nie obsługuje tego wariantu, zamiast automatycznie zmieniać wszystkie rozdziały zastosuj jawnie opisany wariant zgodności: hostowe adresy `172.16.50.1/32`, `172.16.51.1/32`, `172.16.60.1/32`, `172.16.61.1/32` na `lo0.0`, a pełne prefiksy `/24` reprezentuj osobnymi testowymi trasami `static discard` (bardziej szczegółowe lokalne `/32` zachowują osiągalność samych adresów loopback). **Nie wdrażaj discard do sieci z prawdziwymi klientami** — to wyłącznie wariant izolowanego labu. Zmianę odnotuj w laboratorium i sprawdź wpływ na wyniki `show route`, import/export oraz ping. [Junos Loopback Interfaces](https://www.juniper.net/documentation/us/en/software/junos/interfaces-fundamentals/topics/topic-map/loopback-interfaces.html), [SRX Loopback Interfaces](https://www.juniper.net/documentation/us/en/software/junos/interfaces-security-devices/topics/topic-map/security-interface-config-loopback-interfaces.html).
+
 | Połączenie | Pierwszy koniec | Drugi koniec |
 |---|---|---|
 | R5–R1 | R5 `ge-0/0/0.0` 192.0.2.10/24 | R1 `ge-0/0/2.0` 192.0.2.1/24 |
@@ -1019,6 +1021,7 @@ set interfaces lo0 unit 0 family inet address 10.255.255.6/32
 set interfaces lo0 unit 0 family inet address 172.16.60.1/24
 set interfaces lo0 unit 0 family inet address 172.16.61.1/24
 set security zones security-zone CE interfaces ge-0/0/0.0 host-inbound-traffic system-services ping
+set security zones security-zone CE interfaces lo0.0 host-inbound-traffic system-services ping
 show | compare
 commit check
 commit confirmed 5
@@ -1029,6 +1032,7 @@ commit confirmed 5
 ~~~junos
 set interfaces lo0 unit 0 family inet address 172.16.50.1/24
 set interfaces lo0 unit 0 family inet address 172.16.51.1/24
+set security zones security-zone CE interfaces lo0.0 host-inbound-traffic system-services ping
 show | compare
 commit check
 commit confirmed 5
