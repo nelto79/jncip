@@ -639,7 +639,7 @@ W tym rozdziale **nie egzaminujemy Cię ze znajomości BGP ani OSPF**. Chcemy zo
 
 ### Zanim wystartujesz — bezpieczne przygotowanie
 
-Pracujemy na **osobnych, izolowanych wirtualnych maszynach vSRX**, bez łączenia interfejsów danych z firmową siecią, Internetem, istniejącymi labami Cisco czy managementem hypervisora. Każdy router musi mieć dostęp konsolowy, a wirtualne karty trzeba rzeczywiście zmapować do portów Junos. Domyślne interfejsy EVE-NG nie zawsze mają taki numer jak na diagramie.
+Pracujemy na **osobnych, izolowanych wirtualnych maszynach vSRX**, bez łączenia interfejsów danych z firmową siecią, Internetem, istniejącymi labami Cisco czy managementem hypervisora. Każdy router musi mieć dostęp konsolowy, a wirtualne karty trzeba rzeczywiście zmapować do portów Junos. Domyślne interfejsy EVE-NG nie zawsze mają taki numer jak na diagramie. **Ważne przy `commit confirmed`: konfiguruj po jednym routerze, natychmiast sprawdź jego lokalny stan i potwierdź zmianę przed przejściem do kolejnego.** Nie zostawiaj sześciu oczekujących commitów naraz, licząc, że zdążysz przetestować cały diament przed upływem ich indywidualnych timerów.
 
 Ten rozdział zakłada **nowe instancje vSRX przeznaczone wyłącznie do naszego kursu**. Jeśli masz już konfigurację stref, NAT, static routes lub host-name, nie doklejaj kolejnych linii bez review — możesz stworzyć konflikty. Zamiast tego użyj świeżej maszyny albo świadomie dostosuj procedurę do stanu istniejącego labu. Nie wykonuj `load override`, `zeroize` ani zbiorczego `delete security` tylko po to, by dopasować urządzenie do ćwiczenia.
 
@@ -1034,7 +1034,7 @@ commit check
 commit confirmed 5
 ~~~
 
-W tym momencie powinny działać bezpośrednie połączenia między sąsiadami, o ile porty, strefy i mapowanie są prawidłowe. Nie powinieneś jeszcze oczekiwać pingu pomiędzy zdalnymi loopbackami R5 i R6, ponieważ brakuje tras przez cały diament.
+W tym momencie powinny działać bezpośrednie połączenia między sąsiadami, o ile porty, strefy i mapowanie są prawidłowe. **Po każdej konfiguracji urządzenia wykonaj na nim lokalne `show interfaces terse` i `show configuration ...`, potwierdź oczekujący commit, a dopiero potem konfiguruj następny router.** Na tym etapie link do nieuruchomionego sąsiada może jeszcze nie być `up/up`, więc sprawdź jego działanie po przygotowaniu obu końców. Nie powinieneś jeszcze oczekiwać pingu pomiędzy zdalnymi loopbackami R5 i R6, ponieważ brakuje tras przez cały diament.
 
 **R3-vSRX — Operational Mode, kontrola dolnej ścieżki**
 
@@ -1135,7 +1135,7 @@ commit check
 commit confirmed 5
 ~~~
 
-Gdy już połączysz routing z security policies w odpowiednich strefach, rozpocznij pierwszy test.
+Konfiguruj i potwierdzaj zmianę na każdym routerze po kolei. Przygotowane statyczne trasy na części urządzeń mogą być początkowo nieaktywne, dopóki odpowiednie interfejsy i następne hopy nie są gotowe — to spodziewane. Po przygotowaniu wszystkich pięciu urządzeń sprawdź całą drogę. Gdy już połączysz routing z security policies w odpowiednich strefach, rozpocznij pierwszy test.
 
 **R5-vSRX — Operational Mode, test górną ścieżką**
 
@@ -1236,6 +1236,8 @@ show | compare
 commit check
 commit confirmed 5
 ~~~
+
+Po dodaniu każdej statycznej trasy sprawdź konfigurację, potwierdź jej tymczasowy commit i przejdź do następnego routera. Dopiero po zbudowaniu obu kierunków dolnego korytarza oceń łączność end-to-end. **Nie deklaruj sukcesu tylko na podstawie polecenia `commit`.**
 
 **R5-vSRX — Operational Mode, porównanie obu dróg**
 
