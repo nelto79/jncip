@@ -1668,3 +1668,166 @@ Nie wyczyść z rozpędu całego DIAMOND-6R po jednym ćwiczeniu. Użyj oddzieln
 
 **Źródła do interpretacji:** [Static Route Preferences and Qualified Next Hops](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html), [SRX Security Policies](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html), [commit confirmed](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html).
 
+
+---
+
+## 5.TS. Sześć przypadków z pracy inżyniera — jak odróżnić przyczynę od objawu? [EXT]
+
+Po laboratorium warto sprawdzić, czy potrafisz przenieść sposób rozumowania na inne urządzenia, także fizyczne. Poniższe sytuacje są **autorskimi scenariuszami szkoleniowymi**. Nie przedstawiamy ich jako prawdziwych ticketów klienta ani jako pytań z egzaminu.
+
+### Przypadek 1. Switch access jest `up/up`, ale wideokonferencje się zacinają
+
+Na fizycznym EX uplink pracuje z prędkością 1 Gb/s. Zespół monitoringu pokazuje momenty bardzo dużego ruchu, a użytkownicy skarżą się na krótkie przerwy w dźwięku. Liczniki CRC nie rosną, ale przybywa odrzuceń w kolejce wyjściowej.
+
+Nie masz na razie dowodu na wadliwy światłowód. Bardziej prawdopodobna jest hipoteza przeciążenia interfejsu lub konkretnej klasy ruchu. Sprawdź **przyrost liczników z czasem**, obciążenie, parametry kolejek i zasady CoS. Jeśli ruch pojawia się krótkimi seriami, średnie pięciominutowe może nie pokazywać skali chwilowych skoków.
+
+Nie rozwiązuje się takiego problemu automatycznie zwiększeniem MTU. To inny parametr. Nie wyłączaj też funkcji bezpieczeństwa tylko dlatego, że przepływność jest duża.
+
+### Przypadek 2. R1 pokazuje trasę do R6, ale pakiet nie dociera
+
+Na R1 w `show route` widać poprawną sieć 198.51.100.0/24, a operator mówi „routing jest OK”. W rzeczywistości route może wskazywać next-hop, którego warstwa 2 nie rozwiązuje prawidłowo. Może też brakować drogi powrotnej na R6 albo security policy może odrzucać nową sesję.
+
+Właściwa diagnoza to porównanie RIB z forwarding, ARP, stanem interfejsów, rzeczywistą próbą źródło→cel i polityką SRX. Nie każda trasa obecna w tablicy gwarantuje dostarczenie pakietu.
+
+W przypadku połączeń R1–R2 lub R1–R3 warto dodatkowo sprawdzić, **czy w EVE-NG właściwy vNIC jest połączony z właściwym segmentem**. Zgodny adres w konfiguracji nie dowodzi poprawnego wiring.
+
+### Przypadek 3. `monitor traffic` nie pokazuje pakietów, które widzi system bezpieczeństwa
+
+Administrator uruchamia `monitor traffic` na porcie core i nie widzi strumienia, który NMS mierzy jako setki Mb/s. Wnioskuje, że NMS się myli. Ale `monitor traffic` może nie być źródłem pełnego obrazu ruchu PFE transit.
+
+Należy sprawdzić **dokumentowany punkt obserwacji** dla danej platformy, a na SRX wykorzystać security flow, liczniki i test aplikacyjny. Jeśli potrzebny jest pełny packet capture ruchu tranzytowego, dobiera się dedykowaną metodę dla platformy, np. port mirroring w obsługiwanym sprzęcie lub właściwy tryb capture. Nie należy włączać szerokiego debugowania w ciemno.
+
+### Przypadek 4. Po upgrade router odpowiada na SSH, ale monitoring zgłasza go jako niedostępny
+
+System wrócił po planowanej aktualizacji, `show version` wskazuje oczekiwane wydanie, a NMS nadal nie otrzymuje SNMPv3. Nie oznacza to, że cały upgrade zakończył się sukcesem i problem należy do zespołu monitoringu.
+
+Sprawdź na routerze stan usługi, konfigurację SNMPv3, engine ID, dostępność serwera, właściwy source address i routing instance oraz ewentualne zmiany w zachowaniu nowej wersji. W szczególności jeśli zarządzanie ma wydzieloną instancję, działanie SSH z konsoli administracyjnej może nie oznaczać, że router prawidłowo wysyła albo odbiera polling SNMP przez tę samą sieć.
+
+Dobry post-check po upgrade zawiera wynik z **systemu monitoringu**, nie tylko listę komend na routerze.
+
+### Przypadek 5. Po restarcie jeden członek Virtual Chassis nie wrócił
+
+Na fizycznym stacku EX lub Virtual Chassis część portów działa, ale monitoring wykazuje zanik urządzeń przyłączonych do jednego członka. Możliwe, że logiczny system działa na pozostałych elementach, a jeden członek nie dołączył.
+
+Nie wystarczy wykonanie `show version` na masterze. Potrzeba właściwych komend dotyczących **Virtual Chassis**, stanu członków, interfejsów między nimi, kompatybilności software i alarmów. To osobny rodzaj urządzenia niż nasze sześć niezależnych vSRX; nie myl VC ze zwykłymi routerami połączonymi kablami.
+
+Nie restartuj kolejnego członka w celu „wyrównania” stanu, dopóki nie rozpoznasz, które usługi na nim zależą.
+
+### Przypadek 6. Administrator chce ominąć walidację instalacji
+
+Podczas patchowania instalator odrzuca nowy pakiet. Ktoś proponuje użyć `no-validate`. Zanim się zgodzisz, ustal, jaki to dokładnie model, jaki release jest obecnie zainstalowany, na jaki release wykonujesz upgrade i **co mówią release notes oraz CLI reference dla tej pary**.
+
+Niektóre wyjątkowe ścieżki wymagają `no-validate`, ale nie jest to uniwersalne obejście. Jeśli zgodność obrazu jest nieznana, trzeba przerwać operację i zebrać dokumentację. Celem utrzymania nie jest doprowadzenie instalatora do wyświetlenia „complete” za wszelką cenę, lecz utrzymanie wymaganej usługi.
+
+---
+
+## 5.TEST. Sprawdzenie wiedzy — 24 pytania, z wyjaśnieniami [EXT]
+
+Pytania są autorskie i służą powtórce. Ich celem nie jest pamięciowe wyliczenie komend, ale umiejętność wyciągania wniosków z obserwacji.
+
+### Pytania
+
+**1.** R1 ma skonfigurowany adres 10.12.0.1/30. Czy samo `show configuration interfaces` dowodzi, że R1 może przesyłać pakiety do R2?
+
+**2.** Na `show interfaces terse` port jest `up/up`. Czy można wykluczyć problemy z CRC, drops i kolejkami?
+
+**3.** Dlaczego na R1 warto porównać `show route` i `show route forwarding-table`?
+
+**4.** Na routerze widzisz 100 destinations i 145 routes. Czy to wewnętrzna sprzeczność?
+
+**5.** Co oznacza `show route | count` i dlaczego nie powinno być jedynym sposobem liczenia prefiksów?
+
+**6.** `show system processes extensive` pokazuje wysokie CPU jednego procesu przez chwilę. Czy należy od razu restartować `rpd`?
+
+**7.** Dlaczego jedno uruchomienie `show interfaces extensive` nie wystarcza, żeby stwierdzić, że błędy CRC wciąż przyrastają?
+
+**8.** O 12:00 licznik CRC wynosi 240. O 12:05 wynosi 340. Ile błędów przybyło i jakie dodatkowe informacje powinieneś zebrać?
+
+**9.** Na fizycznym switchu Rx optical power wskazuje `-18 dBm`. Czy sama ta wartość oznacza, że światłowód jest uszkodzony?
+
+**10.** Dlaczego Rx na switchu A może być niski, mimo że Tx na switchu A wygląda dobrze?
+
+**11.** Jakie ryzyko wiąże się z wyzerowaniem liczników podczas aktywnego incydentu?
+
+**12.** Dlaczego ping z R1 do 10.12.0.2 nie dowodzi, że pakiet z R5 przejdzie przez R1 do R2?
+
+**13.** R1→R2 ping z source 10.12.0.1 działa, ale z source 10.255.255.1 nie działa. Jaki element musisz sprawdzić na R2?
+
+**14.** Traceroute pokazuje gwiazdkę na R3, lecz aplikacja działa przez ten router. Czy R3 musi odrzucać wszystkie pakiety?
+
+**15.** Dlaczego `monitor traffic` nie zawsze pokaże cały strumień pakietów transmitowany przez PFE?
+
+**16.** Czym `monitor start messages` różni się od włączenia traceoptions konkretnego protokołu?
+
+**17.** Czy jedna paczka instalacyjna Junos pasuje do EX, QFX, MX, SRX i vSRX?
+
+**18.** W której sytuacji `no-validate` jest uzasadnione: gdy instalator zgłosi jakikolwiek błąd czy gdy producent wyraźnie dokumentuje wyjątek dla konkretnej ścieżki?
+
+**19.** Co różni konfigurację rollback `rollback 1` od rollback oprogramowania?
+
+**20.** Dlaczego zrobienie snapshotu po upgrade może zmniejszyć możliwość prostego powrotu do wcześniejszej wersji?
+
+**21.** Co powinieneś ustalić, zanim wykonasz reboot routera obsługującego ruch użytkowników?
+
+**22.** Czy recovery hasła root jest identyczne dla klasycznego Junos FreeBSD, Junos OS Evolved i każdego obrazu vSRX?
+
+**23.** R1 ma zapasową trasę przez R3, a R4 nadal używa R2 do powrotu. Czy możesz zagwarantować łączność R5→R6 po awarii R1–R2?
+
+**24.** Po `commit confirmed` wykonałeś `commit check`. Co może się stać z planowanym automatycznym rollbackiem?
+
+### Odpowiedzi i sposób rozumowania
+
+**1.** Nie. `show configuration` pokazuje ustawienia. Potrzeba odczytu statusu interfejsu, trasy, ARP i odpowiedniego testu z R1, a przy tranzycie również security.
+
+**2.** Nie. `up/up` jest tylko informacją o stanie portu. Szczegółowe błędy i odrzucenia wymagają dodatkowych odczytów, najlepiej porównanych w czasie.
+
+**3.** `show route` pokazuje informacje routingu, a forwarding-table widok decyzji do przekazywania pakietów. Samo istnienie route nie dowodzi dostarczenia pakietu.
+
+**4.** Nie. Jeden prefiks może mieć więcej niż jedną znaną trasę. Destinations i routes nie muszą być równe.
+
+**5.** Liczy linie wyświetlonego wyniku tekstowego, a nie automatycznie prefiksy czy aktywne wpisy RIB. Użyj świadomie właściwych pól statystyk tablic.
+
+**6.** Nie. Najpierw ustal czas trwania, konkretny proces, związane zdarzenia i rzeczywisty wpływ na control/forwarding. Restart procesu może być operacją z impaktem.
+
+**7.** Licznik zwykle pokazuje wartość skumulowaną. Potrzeba drugiego pomiaru w określonym odstępie, aby rozpoznać przyrost.
+
+**8.** Przybyło 100 błędów w pięć minut, średnio 20/min. Sprawdź też ruch, uptime, czy licznik nie był resetowany, port po drugiej stronie i typ medium.
+
+**9.** Nie. Prawidłowy zakres zależy od konkretnego modułu, typu włókna i progów alarmowych. Samo ujemne dBm nie jest awarią.
+
+**10.** Rx na A mierzy sygnał z Tx na **B**, a nie z Tx na A. Trzeba sprawdzić oba końce i odpowiednie włókno.
+
+**11.** Może zniszczyć punkt odniesienia i utrudnić analizę trendów przez innego administratora lub system NMS.
+
+**12.** Ping z R1 jest locally originated, podczas gdy R5→R2 przechodzi przez R1 i może podlegać innej security policy. Potrzeba też poprawnej drogi powrotnej do R5.
+
+**13.** R2 może nie mieć poprawnej trasy powrotnej do loopback R1 10.255.255.1; sprawdź routing oraz ewentualne host-inbound/security.
+
+**14.** Nie. Traceroute może nie dostać oczekiwanej odpowiedzi ICMP od R3, mimo że forwarding innych pakietów działa.
+
+**15.** Ruch transit może być przetwarzany w PFE bez pełnego przekazania jego kopii do ścieżki monitorowanej przez RE.
+
+**16.** `monitor start messages` pokazuje nowo dopisywane linie do istniejącego pliku logu. Traceoptions włączają bardziej szczegółowe rejestrowanie wybranych zdarzeń protokołu/procesu.
+
+**17.** Nie. Wybór obrazu, ścieżki upgrade i procedury zależy od konkretnej rodziny, modelu i release.
+
+**18.** W drugim przypadku, czyli gdy oficjalna dokumentacja dla tej platformy i wersji wymaga wyjątku. `no-validate` nie jest uniwersalnym lekarstwem na nieznane błędy.
+
+**19.** Pierwsze dotyczy starszej konfiguracji Junos, drugie instalacji systemu operacyjnego. Cofnięcie konfiguracji nie cofa wersji Junos.
+
+**20.** Na wybranych urządzeniach snapshot może nadpisać zapasową instalację, przez co poprzedni obraz nie jest już zachowany jako łatwa ścieżka powrotu.
+
+**21.** Znaczenie urządzenia w topologii, możliwy wpływ na usługi, zależności HA, dostęp konsolowy, backup, stan przed zmianą, okno, procedurę restartu i testy powrotu.
+
+**22.** Nie. Mechanizm boot i ograniczenia bezpieczeństwa zależą od platformy, release i polityk. Recovery wymaga autoryzacji i właściwej konsoli.
+
+**23.** Nie. Powrót przez R2 może przestać działać, mimo że R1 wyśle pakiet przez R3. Oba kierunki oraz stanowe sesje SRX wymagają sprawdzenia.
+
+**24.** `commit check` uruchomione podczas oczekiwania może potwierdzić warunkowy commit, wyłączając automatyczny rollback. Dlatego walidacja składni powinna odbyć się **przed** `commit confirmed`, a po aktywacji testujemy read-only.
+
+### Czy po tym teście jesteś gotów do kolejnego rozdziału?
+
+Powinieneś umieć wyjaśnić, jakie dane z R1, R2 i R4 trzeba zebrać, gdy R5 nie może komunikować się z R6; jak wyciągnąć wniosek z licznika błędów oraz dlaczego sam wynik `commit complete`, SSH czy ping nie dowodzi działania całej sieci.
+
+Nie musisz jeszcze znać wszystkich szczegółów OSPF ani BGP. W kolejnych rozdziałach zbudujemy na tym fundamencie statyczne i dynamiczne mechanizmy routingu, wykorzystując te same narzędzia diagnostyczne.
+
