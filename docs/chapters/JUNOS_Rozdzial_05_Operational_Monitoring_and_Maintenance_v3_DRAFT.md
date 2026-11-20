@@ -1831,3 +1831,84 @@ Powinieneś umieć wyjaśnić, jakie dane z R1, R2 i R4 trzeba zebrać, gdy R5 n
 
 Nie musisz jeszcze znać wszystkich szczegółów OSPF ani BGP. W kolejnych rozdziałach zbudujemy na tym fundamencie statyczne i dynamiczne mechanizmy routingu, wykorzystując te same narzędzia diagnostyczne.
 
+
+---
+
+## 5.REF. Skrócony przewodnik operacyjny — od pytania do właściwego odczytu [EXT]
+
+Poniższa mapa pomaga wrócić do polecenia po zrozumieniu mechanizmu. Nie jest zastępstwem dla wykładu ani uniwersalnym scenariuszem do wklejenia w każdej awarii.
+
+| Pytanie inżynierskie | Polecenie / mechanizm | Ograniczenie, o którym trzeba pamiętać |
+|---|---|---|
+| Jaki model i wydanie? | `show version`, `show chassis hardware` | Obraz i funkcje są zależne od modelu |
+| Czy urządzenie niedawno restartowano? | `show system uptime`, logi | Niski uptime nie wyjaśnia automatycznie przyczyny |
+| Czy system zgłasza alarmy? | `show system alarms` | Brak alarmu nie dowodzi zdrowia usługi |
+| Czy port jest obecnie aktywny? | `show interfaces terse` | `up/up` nie wyklucza błędów ani blokad security |
+| Czy błędy rosną? | Dwa odczyty `show interfaces ... extensive` | Sprawdź przedział czasu i możliwość resetu liczników |
+| Czy fizyczna optyka jest zdrowa? | `show interfaces diagnostics optics` | Wymaga rzeczywistego i wspieranego transceivera |
+| Czy router zna trasę? | `show route`, `show route ... exact` | Trasa może być nieaktywna lub hidden |
+| Jaki jest next-hop forwarding? | `show route forwarding-table` | Odczyt widoku forwarding ≠ dostarczenie pakietu |
+| Czy działa ARP? | `show arp` | Bez poprawnego L2 next-hop może nie być użyteczny |
+| Czy SRX dopuścił nową sesję? | `show security policies`, `show security flow session` | Starsze sesje mogą przetrwać zmianę policy |
+| Czy proces jest przeciążony? | `show system processes extensive` | Pomiar chwilowy ≠ trwała awaria |
+| Czy port zmienia stan w czasie? | `monitor interface`, logi | Platforma i terminal wpływają na dostępność |
+| Czy pojawiają się nowe wiadomości? | `monitor start messages` | Nie włącza traceoptions protokołu |
+| Czy widzę pakiet do RE? | Ograniczone `monitor traffic` | Nie jest pełnym capture PFE transit |
+| Czy bezpośredni sąsiad odpowiada? | `ping ... source ...` | Nie dowodzi komunikacji komputer-komputer |
+| Czy znam kolejne hopy? | `traceroute ... source ...` | Gwiazdki nie dowodzą utraty wszystkich pakietów |
+| Czy management jest w odrębnym VRF? | `show route table mgmt_junos.inet.0` | Tabela może nie istnieć lub nie być aktywna |
+| Czy mamy miejsce na software? | `show system storage` | Nie kasuj plików bez przeglądu |
+| Co można usunąć z dysku? | `request system storage cleanup dry-run` | Faktyczny cleanup jest operacją zmieniającą stan |
+| Które zmiany ostatnio wykonano? | `show system commit` | Związek czasowy nie zawsze oznacza przyczynę |
+| Czy czeka zaplanowany restart? | `show system reboot` | Obecność/wynik zależy od platformy |
+| Czy można bezpiecznie cofnąć zmianę? | `show | compare`, `commit confirmed`, rollback plan | `commit check` podczas oczekiwania może potwierdzić commit |
+| Czy został zrobiony software upgrade? | `show version`, release notes, porównanie pre/post | Sam nowy numer nie dowodzi zdrowia sieci |
+
+### Jeden operacyjny nawyk wart zachowania
+
+Przed wydaniem polecenia odpowiedz sobie: „**Jaki wynik zmieni moją hipotezę?**”. Jeśli każdy możliwy wynik prowadzi Cię do tej samej przypadkowej naprawy, test prawdopodobnie nie został właściwie zaprojektowany.
+
+---
+
+## Źródła, mapowanie blueprintu i granice walidacji
+
+Rozdział przygotowano na podstawie [unified blueprintu JNCIA-JNCIS-JNCIP](../JUNOS_JNCIA_JNCIS_JNCIP_unified_blueprint.md), wcześniejszej wersji CH05 [zachowanej w archiwum](../archive/JUNOS_Rozdzial_05_pre_beginner_rewrite_2026-11-20.md), [referencyjnej topologii DIAMOND-6R](../../labs/reference-diamond-6vsrx/README.md) oraz [rejestru źródeł i gotchas CH05](../research/CH05_MONITORING_MAINTENANCE_GOTCHAS_I_ZRODLA_2026-11-17.md). Zachowano pełną kolejność punktów 5.1–5.9 i wyjaśniono je bez wymagania wcześniejszej wiedzy o Cisco.
+
+**Mapa pokrycia:**
+
+| Wymaganie blueprintu | Sekcja |
+|---|---|
+| 5.1 `show` — stan, konfiguracja, routing i interfejsy | §5.1 |
+| 5.2 `monitor` — obserwacja w czasie | §5.2 |
+| 5.3 Statystyki i błędy interfejsów | §5.3 |
+| 5.4 Ping, traceroute, telnet, SSH i inne testy | §5.4 |
+| 5.5 Instalacja i aktualizacja Junos | §5.5 |
+| 5.6 Boot, reboot, halt i utrzymanie | §5.6 |
+| 5.7 Root password recovery | §5.7 |
+| 5.8 Monitoring, maintenance, troubleshooting | §5.8 |
+| 5.9 [LAB] Interfejs, trasa, konfiguracja | §5.9 — 1 vSRX → 3 vSRX → 6 vSRX |
+| Rozszerzenie dydaktyczne | §5.TS, §5.TEST, §5.REF |
+
+**Najważniejsze oficjalne źródła Juniper/HPE:**
+
+1. [Operational Monitoring in Junos CLI](https://www.juniper.net/documentation/us/en/software/junos/cli/topics/topic-map/junos-operational-mode-commands-monitoring.html).
+2. [show route](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route.html), [show route forwarding-table](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-route-forwarding-table.html).
+3. [monitor interface](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-interface.html), [monitor start](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-start.html), [monitor traffic](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/monitor-traffic.html).
+4. [show interfaces extensive](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-interfaces-extensive.html), [Understanding Packet Drops](https://www.juniper.net/documentation/us/en/software/junos/junos-overview/topics/concept/using-show-commands-for-packet-drops.html), [Digital Optical Monitoring](https://www.juniper.net/documentation/us/en/software/junos/chassis/topics/concept/digital-optical-monitoring.html).
+5. [clear interfaces statistics](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/clear-interfaces-statistics.html).
+6. [ping](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/ping.html), [traceroute](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/traceroute.html).
+7. [Junos Software Installation and Upgrade](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/software-install-and-upgrade-overview.html), [request system software add](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-add.html), [Storage Cleanup](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-storage-cleanup.html).
+8. [Snapshot and Backup Installation](https://www.juniper.net/documentation/us/en/software/junos/junos-install-upgrade/topics/topic-map/backing-up-install-using-snapshot.html), [Software rollback](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-software-rollback.html).
+9. [request system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-reboot.html), [request system halt](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/request-system-halt.html), [show system reboot](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-system-reboot.html).
+10. [Recover root password on Junos OS](https://www.juniper.net/documentation/us/en/software/junos/user-access/topics/topic-map/recovering-root-password.html), [Recover root password on Junos OS Evolved](https://www.juniper.net/documentation/us/en/software/junos/user-access-evo/user-access/topics/topic-map/recovering-root-password.html).
+11. [SRX Security Policies](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html), [Static Route Preferences and Qualified Next Hops](https://www.juniper.net/documentation/us/en/software/junos/static-routing/topics/topic-map/static-route-prefer-qualified-next-hop.html).
+12. [commit CLI Reference](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/commit.html).
+
+**Granice walidacji technicznej:** w tym opracowaniu nie uruchomiono EVE-NG, nie wykonano rzeczywistych pingów ani commitów, nie przetestowano portów, sesji SRX i tras ani nie instalowano Junos. Każda przykładowa konfiguracja pozostaje **PLANNED / NOT RUNTIME VALIDATED** i wymaga dostosowania do realnej wersji obrazu vSRX, mapowania kart, istniejących stref i polityk. Scenariusze fizycznej optyki, Virtual Chassis, upgrade i recovery wymagają odrębnych wspieranych platform lub izolowanych klonów. Nie publikuj produkcyjnych adresów zarządzania, haseł, kluczy prywatnych, obrazów QCOW2 ani niezredagowanych konfiguracji klienta.
+
+### Zakończenie rozdziału
+
+Dobre utrzymanie sieci polega na odróżnianiu **zaobserwowanego objawu** od **udowodnionej przyczyny**. Po przejściu tego materiału potrafisz już zacząć incydent od właściwego pytania, dobrać polecenie, które rzeczywiście coś rozstrzyga, bezpiecznie wprowadzić zmianę i wykazać, czy usługa powróciła.
+
+W rozdziale VI przejdziemy do routingu: poznasz od podstaw, w jaki sposób router wybiera drogę dla pakietu. Narzędzia z obecnego rozdziału będą nam stale towarzyszyć, ale tym razem wykorzystamy je do obserwowania decyzji routingu i ich konsekwencji.
+
