@@ -2225,3 +2225,88 @@ W pliku evidence dla laboratorium przechowuj wyniki realnych komend \`show versi
 
 Pamiętaj, że brak aktywnego prefiksu 172.16.62/24 na R1 nie dowodzi jeszcze, *dlaczego* go nie ma. Musimy pokazać, że **R6 go ogłosił, R4/R2/R3 przekazały, R1 otrzymał i jego import policy odrzuciła**. Taki łańcuch dowodów jest dużo bardziej wartościowy od samego zielonego pingu.
 
+
+---
+
+## Finał — pięć pytań, które pozwalają rozpoznać prawdziwą przyczynę
+
+Rozdział 8 kończy się w tym samym miejscu, od którego zaczął: R5 ma dotrzeć do sieci R6. Tyle że teraz wiemy, iż „R5 nie może pingować R6” opisuje jedynie objaw — nie przyczynę. Zamiast traktować routing, filtering i security jako jedną wielką konfigurację, potrafimy rozdzielić je na konkretne decyzje.
+
+Przeanalizuj poniższe sytuacje, zanim spojrzysz na odpowiedzi.
+
+### Sytuacja 1: BGP jest Established, ale R5 nie ma 172.16.60.0/24
+
+Najpierw sprawdź, czy R6 ma aktywną \`Direct 172.16.60.0/24\` i reklamuje ją do R4. Następnie sprawdź R4 → R2/R3, odbiór na R1, jego import oraz export do R5. Sam stan Established na R1↔R2 i R1↔R3 **nie mówi**, czy właściwy prefix przeszedł wszystkie polityki.
+
+**Rozpoznanie:** brak trasy u odbiorcy może oznaczać błąd na kilku etapach control plane. Ustal dokładny punkt, w którym prefiks przestaje być widoczny.
+
+### Sytuacja 2: R1 ma 172.16.60.0/24 przez R2, ale 172.16.61.0/24 przez R3
+
+To **zamierzony wynik** naszej polityki importu. Na R1 Business-B otrzymał LOCAL_PREF 200 od R2, a Services-B LOCAL_PREF 200 od R3. Router nie musi wysyłać wszystkich prefiksów do tego samego AS tym samym korytarzem. Obie drogi mogą być jednocześnie poprawne.
+
+**Rozpoznanie:** różna aktywna ścieżka dla różnych prefiksów nie oznacza niestabilnej sesji BGP. Może być efektem zamierzonego traffic engineering.
+
+### Sytuacja 3: R1 widzi 172.16.62.0/24 jako hidden
+
+To nadal może oznaczać, że R6 rzeczywiście ogłosił tę trasę, a R1 ją otrzymał. W naszym scenariuszu powinien odrzucić ją na imporcie. Żeby to potwierdzić, sprawdzamy \`show route receive-protocol bgp\`, \`show route hidden detail\` oraz aktualny import policy. **Hidden** bez informacji o przyczynie nie jest jeszcze diagnozą.
+
+**Rozpoznanie:** odrzucenie prefiksu BGP to zdarzenie w control plane, nie zablokowany pakiet w data plane.
+
+### Sytuacja 4: R5 może pingować bramę R1, lecz nie adres 172.16.60.1 na R6
+
+Ping do R1 jest host-bound. Ping do R6 przechodzi przez wiele routerów i ich stateful sessions. Prawidłowy host-inbound ping R1 nie dowodzi ani poprawnego eksportu BGP, ani powrotu przez R2/R3, ani zezwolenia SRX na tranzyt.
+
+**Rozpoznanie:** testuj właściwy przepływ — z adresu 172.16.50.1 do 172.16.60.1, a potem równolegle obserwuj RIB, FIB i sesję.
+
+### Sytuacja 5: Licznik filtra rośnie, ale zabroniony pakiet nadal przechodzi dalej
+
+Jeśli na początku stateless filtra stoi \`then count\` bez \`next term\`, pasujący pakiet może otrzymać **implicit accept**. Następny term \`then discard\` nigdy go nie zobaczy. To całkowicie inne zachowanie niż routing policy z nieterminującą akcją \`then local-preference\`.
+
+**Rozpoznanie:** składnia \`term/from/then\` nie oznacza, że oba silniki mają identyczne zasady kontynuowania oceny.
+
+### Co w tym rozdziale warto wynieść poza egzamin?
+
+Najlepszy nawyk inżyniera Junos można sprowadzić do jednego pytania:
+
+**Czy właśnie oceniam informację o trasie, decyzję wyboru next-hopa, pojedynczy pakiet czy nową sesję?**
+
+Od tej odpowiedzi zależy właściwe narzędzie:
+
+- **Routing policy / \`policy-options\`** — import/export prefiksów, modyfikacja atrybutów, wybór ścieżki BGP.
+- **RIB/FIB** — aktywna trasa, rzeczywista droga do next-hopa, instalacja forwardingu.
+- **Stateless firewall filter / \`firewall family inet\`** — decyzja o pojedynczym pakiecie, liczniki, policery, ochrona RE lub klasyfikacja FBF.
+- **SRX security policy / \`security policies\`** — decyzja o nowej sesji między strefami i kontrola stanu jej ruchu.
+- **uRPF** — kontrola wiarygodności source IP w kontekście drogi powrotnej.
+
+To jest jedna spójna metoda, którą można wykorzystać zarówno przy projektowaniu nowego site'u Enterprise, jak i w środku nocnego incydentu z niejasnym komunikatem „routing działa, ale aplikacja nie”.
+
+W rozdziałach 9 i 10 rozszerzymy tę wiedzę na OSPF i IS-IS, gdzie wewnętrzne mechanizmy link-state ograniczają zakres import policy. W rozdziale 11 wrócimy do naszego **DIAMOND-6R** i rozbudujemy BGP: multipath, next-hop, communities, szczegółowy wybór ścieżki oraz bardziej złożone polityki wielooperatorskie.
+
+---
+
+## Dokumentacja, status i powiązania
+
+**Źródło stylu redakcyjnego:** dostarczona przez czytelnika wersja rozdziału 8, której kolejność objaśnień i praktyczna logika zostały potraktowane jako wzorzec. Obecny rozdział napisano od nowa dla **sześciu vSRX i jednej konsekwentnej topologii**. Nie skopiowano niezweryfikowanych przykładowych outputów ani nie zachowano stwierdzeń sprzecznych z aktualną dokumentacją producenta.
+
+**Kanoniczna referencja topologii:** [DIAMOND-6R — sześć vSRX](../../labs/reference-diamond-6vsrx/README.md), [diagram](../../labs/reference-diamond-6vsrx/DIAMOND_TOPOLOGY.md). Poprzednia topologia czterech vSRX i dwóch VPCS nadal istnieje jako baza historycznych rozdziałów, ale ten rozdział używa wariantu rozszerzonego.
+
+**Status walidacji:** redakcja i analiza mechanizmów na podstawie dokumentacji — ukończone. **EVE-NG runtime: nie wykonano.** Wszystkie przewidywania dotyczące \`show route\`, \`show firewall\`, \`show security flow session\`, zachowania filtrów i ścieżki pakietów wymagają porównania z faktycznym wynikiem na używanym obrazie vSRX. Szczegóły platformowe, m.in. obsługa uRPF, RPF fail-filter i rozliczanie filtrów na lo0, należy sprawdzić na konkretnym release.
+
+### Najważniejsze źródła Juniper / HPE Networking
+
+1. [Default Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-actions-defaults.html) — protokołowe import/export defaults.
+2. [How a Routing Policy Is Evaluated](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-routing-policies-evaluation-method.html) — kolejność termów, \`accept\`, \`reject\`, \`next term\`, \`next policy\`.
+3. [Actions in Routing Policy Terms](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-configuring-actions-in-routing-policy-terms.html) — modyfikacje atrybutów i akcje terminalne.
+4. [Basic BGP Routing Policies](https://www.juniper.net/documentation/us/en/software/junos/bgp/topics/topic-map/basic-routing-policies.html) — aktywne trasy, import/export i przepływ NLRI.
+5. [BGP keep](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/keep-edit-protocols-bgp.html) — domyślna retencja, \`keep all\`, \`keep none\`, hidden routes.
+6. [Route-Filter Walkup](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/walkup-route-filter-policy-option-overview.html) — wybór najbardziej szczegółowych wzorców.
+7. [Stateless Firewall Filter Components](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-components.html) — \`count\`, implicit \`accept\`, implicit \`discard\`, \`next term\`.
+8. [Guidelines for Applying Firewall Filters](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/firewall-filter-stateless-guidelines-for-applying.html) — punkty przyłożenia, w tym \`lo0.0\`.
+9. [Unicast RPF](https://www.juniper.net/documentation/us/en/software/junos/security-services/topics/topic-map/interfaces-configuring-unicast-rpf.html) — strict, loose, platform-specific reverse path.
+10. [OSPF Routing Policy](https://www.juniper.net/documentation/us/en/software/junos/ospf/topics/topic-map/configuring-ospf-routing-policy.html) oraz [IS-IS import](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/import-edit-protocols-isis.html) — ograniczenia import dla link-state.
+11. [Routing Policy Testing](https://www.juniper.net/documentation/us/en/software/junos/routing-policy/topics/concept/policy-testing-routing-policies.html) — zakres i ograniczenia \`test policy\`.
+12. [SRX Security Policies](https://www.juniper.net/documentation/us/en/software/junos/security-policies/topics/concept/policy-overview.html) — sesje stateful i security zones.
+
+**Pokrycie blueprintu:** 8.1 default routing policies; 8.2 import vs export; 8.3 policy flow; 8.4 wpływ na RIB/FIB; 8.5 budowa termów; 8.6 match criteria i actions; 8.7 rola firewall filters; 8.8 ich struktura; 8.9 ochrona RE i analiza pakietów; 8.10 uRPF; 8.11 konfiguracja/monitoring; 8.12 OSPF/IS-IS/BGP; 8.13 zaawansowana inżynieria polityk; 8.14 laboratorium sześciu vSRX z import/export, dwoma ścieżkami, fault injection i rollbackiem.
+
+W nowej wersji priorytetem jest **wyjaśnienie mechanizmu, jego konsekwencji, konkretnego przykładu i sposobu weryfikacji**, a nie sztuczne wprowadzanie kolejnej historii co kilka akapitów.
